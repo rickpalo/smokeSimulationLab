@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SmokeSimLab Documentation</title>
+<style>
+  :root {
+    --bg:       #1a1a2e;
+    --surface:  #16213e;
+    --card:     #0f3460;
+    --accent:   #e94560;
+    --accent2:  #53d8fb;
+    --text:     #e0e0e0;
+    --muted:    #8a9bb0;
+    --code-bg:  #0a0a1a;
+    --border:   #2a3a5a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+  }
+  a { color: var(--accent2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Header ── */
+  header {
+    background: linear-gradient(135deg, var(--card) 0%, #1a0a2e 100%);
+    border-bottom: 2px solid var(--accent);
+    padding: 3rem 2rem 2rem;
+    text-align: center;
+  }
+  header h1 {
+    font-size: 2.8rem;
+    letter-spacing: 0.05em;
+    color: #fff;
+  }
+  header h1 span { color: var(--accent); }
+  header p {
+    margin-top: 0.75rem;
+    color: var(--muted);
+    font-size: 1.1rem;
+    max-width: 600px;
+    margin-inline: auto;
+  }
+  .badge-row {
+    margin-top: 1.5rem;
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .badge {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 0.3rem 0.9rem;
+    font-size: 0.82rem;
+    color: var(--accent2);
+  }
+
+  /* ── Layout ── */
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 4rem;
+  }
+
+  /* ── Nav ── */
+  nav {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 2.5rem;
+  }
+  nav h2 { font-size: 0.85rem; text-transform: uppercase;
+            letter-spacing: 0.12em; color: var(--muted); margin-bottom: 0.75rem; }
+  nav ol { padding-left: 1.2rem; }
+  nav li { margin: 0.3rem 0; font-size: 0.95rem; }
+
+  /* ── Sections ── */
+  section { margin-bottom: 3rem; }
+  h2 {
+    font-size: 1.5rem;
+    color: var(--accent2);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+    margin-bottom: 1.25rem;
+  }
+  h3 {
+    font-size: 1.1rem;
+    color: #fff;
+    margin: 1.5rem 0 0.5rem;
+  }
+  p { margin-bottom: 0.9rem; color: var(--text); }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin: 1rem 0;
+  }
+  .card.highlight { border-color: var(--accent2); }
+
+  /* ── Steps ── */
+  .steps { counter-reset: step; }
+  .step {
+    display: flex;
+    gap: 1rem;
+    margin: 0.75rem 0;
+    align-items: flex-start;
+  }
+  .step::before {
+    counter-increment: step;
+    content: counter(step);
+    background: var(--accent);
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.85rem;
+    width: 1.7rem;
+    height: 1.7rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 0.15rem;
+  }
+
+  /* ── Tables ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.92rem;
+  }
+  th {
+    background: var(--card);
+    color: var(--accent2);
+    text-align: left;
+    padding: 0.6rem 0.9rem;
+    font-weight: 600;
+  }
+  td {
+    padding: 0.55rem 0.9rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.03); }
+
+  /* ── Code ── */
+  code {
+    background: var(--code-bg);
+    color: var(--accent2);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem;
+    overflow-x: auto;
+    margin: 1rem 0;
+    font-size: 0.88rem;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    color: #c8d8f0;
+  }
+
+  /* ── Callouts ── */
+  .note, .warn, .tip {
+    border-left: 4px solid;
+    padding: 0.8rem 1rem;
+    border-radius: 0 6px 6px 0;
+    margin: 1rem 0;
+    font-size: 0.93rem;
+  }
+  .note  { border-color: var(--accent2); background: rgba(83,216,251,0.07); }
+  .warn  { border-color: var(--accent);  background: rgba(233,69,96,0.07);  }
+  .tip   { border-color: #4ec94e;        background: rgba(78,201,78,0.07);  }
+  .note strong, .tip strong { color: var(--accent2); }
+  .warn strong { color: var(--accent); }
+
+  /* ── Mode comparison ── */
+  .mode-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin: 1rem 0;
+  }
+  .mode-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem;
+  }
+  .mode-card.default { border-color: var(--accent2); }
+  .mode-card h4 {
+    color: var(--accent2);
+    margin-bottom: 0.5rem;
+    font-size: 1rem;
+  }
+  .mode-card.default h4::after {
+    content: " ★ default";
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-weight: normal;
+  }
+  .mode-card ul { padding-left: 1.1rem; font-size: 0.9rem; }
+  .mode-card li { margin: 0.3rem 0; }
+
+  /* ── Footer ── */
+  footer {
+    text-align: center;
+    padding: 2rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Smoke<span>Sim</span>Lab</h1>
+  <p>Batch smoke simulation parameter sweeper for Blender 4.x</p>
+  <div class="badge-row">
+    <span class="badge">Blender 4.0+</span>
+    <span class="badge">Tested on 4.5.5 LTS</span>
+    <span class="badge">Windows</span>
+    <span class="badge">Mantaflow</span>
+    <span class="badge">Cycles GPU / EEVEE</span>
+  </div>
+</header>
+
+<div class="container">
+
+  <nav>
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#installation">Installation</a></li>
+      <li><a href="#quickstart">Quick Start</a></li>
+      <li><a href="#parameters">Parameter Reference</a></li>
+      <li><a href="#iteration">Iteration Modes</a></li>
+      <li><a href="#rendering">Render Engine Options</a></li>
+      <li><a href="#text-objects">Text Objects</a></li>
+      <li><a href="#output">Output Files</a></li>
+      <li><a href="#csv">CSV Reference</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+    </ol>
+  </nav>
+
+  <!-- ── Overview ── -->
+  <section id="overview">
+    <h2>Overview</h2>
+    <p>
+      SmokeSimLab automates the process of exploring smoke simulation parameters in
+      Blender. Instead of manually changing settings, baking, and rendering one at a
+      time, you define parameter ranges in a panel, click <strong>Export Batch</strong>,
+      and a Windows batch file runs every combination automatically.
+    </p>
+    <p>
+      For each job the addon: bakes the Mantaflow fluid simulation, renders an MP4
+      playblast animation, renders a final quality PNG still frame, updates in-scene
+      text objects with the current parameter values, and logs everything to a CSV file.
+    </p>
+    <div class="note">
+      <strong>Why batch files?</strong> Blender 4.5 crashes when
+      <code>bpy.ops.fluid.bake_all()</code> is called from inside another Python
+      operator or timer. Launching separate Blender processes avoids this entirely —
+      each process owns its own memory and event loop.
+    </div>
+  </section>
+
+  <!-- ── Installation ── -->
+  <section id="installation">
+    <h2>Installation</h2>
+    <div class="steps">
+      <div class="step">Download <code>SmokeSimLab.zip</code> from the
+        <a href="https://github.com/YOUR_USERNAME/SmokeSimLab/releases">Releases page</a>.
+      </div>
+      <div class="step">In Blender open <strong>Edit → Preferences → Add-ons</strong>.</div>
+      <div class="step">Click <strong>Install</strong> and select <code>SmokeSimLab.zip</code>.</div>
+      <div class="step">Enable <strong>SmokeSimLab</strong> in the add-on list.</div>
+      <div class="step">Press <strong>N</strong> in the 3D Viewport and open the
+        <strong>SmokeLab</strong> tab.</div>
+    </div>
+    <div class="warn">
+      <strong>Both files must be installed together.</strong> The zip contains
+      <code>__init__.py</code> and <code>smoke_worker.py</code>. If you manually copy
+      only one file the Export Batch button will show an error.
+    </div>
+  </section>
+
+  <!-- ── Quick Start ── -->
+  <section id="quickstart">
+    <h2>Quick Start</h2>
+    <div class="steps">
+      <div class="step">Set up a smoke simulation scene with a Mantaflow fluid domain object.</div>
+      <div class="step">Open the <strong>SmokeLab</strong> tab in the N-panel.</div>
+      <div class="step">Set <strong>Domain Object</strong> to your fluid domain.</div>
+      <div class="step">Set <strong>Output</strong> to a folder for results.</div>
+      <div class="step">Configure parameter defaults and any ranges to sweep.</div>
+      <div class="step"><strong>Save your .blend file</strong> — the batch launcher needs its absolute path.</div>
+      <div class="step">Click <strong>Export Batch</strong>.</div>
+      <div class="step">Double-click <code>run_smoke_batch.bat</code> in Windows Explorer.</div>
+    </div>
+  </section>
+
+  <!-- ── Parameters ── -->
+  <section id="parameters">
+    <h2>Parameter Reference</h2>
+
+    <h3>Resolution</h3>
+    <p>
+      The number of voxels along the longest side of the fluid domain.
+      Blender's default is 32. Higher values produce more detail but bake
+      times increase roughly as the cube of the resolution.
+    </p>
+
+    <h3>Gas Parameters</h3>
+    <p>All three gas parameters live in a single collapsible "Gas Parameters" section.</p>
+    <table>
+      <tr>
+        <th>Parameter</th><th>Blender Attribute</th><th>Default</th><th>Range</th><th>Description</th>
+      </tr>
+      <tr>
+        <td>Vorticity</td>
+        <td><code>d.vorticity</code></td>
+        <td>1.0</td>
+        <td>0 – ∞</td>
+        <td>Adds turbulent swirling detail. 0 = smooth rising column, higher = chaotic swirling smoke.</td>
+      </tr>
+      <tr>
+        <td>Buoyancy Density</td>
+        <td><code>d.alpha</code></td>
+        <td>1.0</td>
+        <td>–5 – 5</td>
+        <td>Buoyant force from smoke density. Positive = smoke rises, negative = sinks.</td>
+      </tr>
+      <tr>
+        <td>Buoyancy Heat</td>
+        <td><code>d.beta</code></td>
+        <td>1.0</td>
+        <td>–5 – 5</td>
+        <td>Buoyant force from temperature. Works with flow object Initial Temperature setting.</td>
+      </tr>
+    </table>
+
+    <h3>Dissolve</h3>
+    <p>
+      When enabled, smoke fades out over time rather than accumulating indefinitely.
+      The enable checkbox appears in the section header.
+    </p>
+    <table>
+      <tr><th>Option</th><th>Description</th></tr>
+      <tr><td>Dissolve Speed</td><td>Number of frames until smoke fully dissolves. Blender default is 5.</td></tr>
+      <tr><td>Slow Dissolve</td><td>Use logarithmic fade instead of linear — smoke lingers longer then fades quickly.</td></tr>
+    </table>
+
+    <h3>Noise</h3>
+    <p>
+      Adds a high-resolution turbulent detail layer on top of the base simulation.
+      The enable checkbox appears in the section header.
+    </p>
+    <table>
+      <tr><th>Parameter</th><th>Blender Attribute</th><th>Default</th><th>Description</th></tr>
+      <tr>
+        <td>Scale</td>
+        <td><code>d.noise_scale</code></td>
+        <td>2</td>
+        <td>Upres factor — how many times finer the noise grid is vs the base grid.</td>
+      </tr>
+      <tr>
+        <td>Strength</td>
+        <td><code>d.noise_strength</code></td>
+        <td>1.0</td>
+        <td>How strongly the noise detail affects the visual result.</td>
+      </tr>
+      <tr>
+        <td>Position Scale</td>
+        <td><code>d.noise_pos_scale</code></td>
+        <td>1.0</td>
+        <td>Spatial frequency of the noise pattern. Higher = finer, more detailed noise.</td>
+      </tr>
+    </table>
+
+    <h3>Input Modes</h3>
+    <p>Every parameter supports three input modes, selectable with the Range / List toggles:</p>
+    <table>
+      <tr><th>Mode</th><th>How to activate</th><th>Behaviour</th></tr>
+      <tr>
+        <td><strong>Default only</strong></td>
+        <td>Neither Range nor List enabled</td>
+        <td>The default value is used for every job. No iteration on this parameter.</td>
+      </tr>
+      <tr>
+        <td><strong>Range</strong></td>
+        <td>Enable the Range toggle</td>
+        <td>Values are generated from Begin to End in increments of Step.</td>
+      </tr>
+      <tr>
+        <td><strong>List</strong></td>
+        <td>Enable the List toggle</td>
+        <td>Specific values entered by the user via the + / − buttons.</td>
+      </tr>
+    </table>
+    <div class="tip">
+      <strong>Tip:</strong> Range and List are mutually exclusive — enabling one
+      automatically disables the other.
+    </div>
+  </section>
+
+  <!-- ── Iteration ── -->
+  <section id="iteration">
+    <h2>Iteration Modes</h2>
+    <div class="mode-grid">
+      <div class="mode-card default">
+        <h4>Limited Combinations</h4>
+        <ul>
+          <li>Vary <strong>one parameter at a time</strong></li>
+          <li>All others stay at their default value</li>
+          <li>Total jobs = <strong>sum</strong> of range lengths</li>
+          <li>Best for initial exploration</li>
+        </ul>
+      </div>
+      <div class="mode-card">
+        <h4>All Combinations</h4>
+        <ul>
+          <li>Full <strong>Cartesian product</strong> of all ranges</li>
+          <li>Total jobs = <strong>product</strong> of range lengths</li>
+          <li>Can produce very many jobs quickly</li>
+          <li>Best for fine-tuning after exploration</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>Example</h3>
+    <p>
+      Suppose you define: Vorticity range [0.5, 1.0, 1.5] and Noise Strength
+      range [0.5, 1.0, 1.5]. All other parameters at default.
+    </p>
+    <table>
+      <tr><th>Mode</th><th>Jobs</th><th>Description</th></tr>
+      <tr>
+        <td>Limited</td>
+        <td>6</td>
+        <td>3 vorticity jobs + 3 noise strength jobs</td>
+      </tr>
+      <tr>
+        <td>All</td>
+        <td>9</td>
+        <td>3 × 3 = every combination</td>
+      </tr>
+    </table>
+    <p>
+      With five parameters each having a 5-step range, Limited = 25 jobs vs
+      All = 3,125 jobs. Limited Combinations is strongly recommended for
+      initial parameter exploration.
+    </p>
+  </section>
+
+  <!-- ── Rendering ── -->
+  <section id="rendering">
+    <h2>Render Engine Options</h2>
+    <table>
+      <tr><th>Mode</th><th>Speed</th><th>Quality</th><th>Requirements</th></tr>
+      <tr>
+        <td><strong>Cycles GPU</strong> (default)</td>
+        <td>Medium</td>
+        <td>Path-traced</td>
+        <td>Works in <code>--background</code> mode. Uses OptiX → CUDA → CPU fallback.</td>
+      </tr>
+      <tr>
+        <td><strong>EEVEE</strong></td>
+        <td>Fast</td>
+        <td>Rasterised</td>
+        <td>Requires a visible Blender window (windowed mode). Cannot run headless.</td>
+      </tr>
+    </table>
+    <div class="note">
+      <strong>Playblast samples:</strong> The playblast uses 32 Cycles samples by
+      default for speed. Edit <code>smoke_worker.py</code> and change
+      <code>scene.cycles.samples = 32</code> to adjust quality vs speed.
+      Re-export after editing the worker.
+    </div>
+  </section>
+
+  <!-- ── Text Objects ── -->
+  <section id="text-objects">
+    <h2>Text Objects</h2>
+    <p>
+      SmokeSimLab can update FONT (text) objects in your scene with the current
+      job's parameter values before each render, so the values appear in the
+      rendered output. This is useful for comparison sheets.
+    </p>
+    <p>
+      Expand the <strong>Text Objects</strong> section in the panel and enter the
+      exact name of each FONT object in your scene. Objects not found are silently
+      skipped.
+    </p>
+    <table>
+      <tr><th>Field</th><th>Default Name</th><th>Example Value</th></tr>
+      <tr><td>Resolution</td><td><code>Resolution_Text</code></td><td>Res: 64</td></tr>
+      <tr><td>Noise</td><td><code>Noise_Text</code></td><td>Noise: U-2 | St-1.0 | Scale-1.0</td></tr>
+      <tr><td>Dissolve</td><td><code>Dissolve_Text</code></td><td>Dissolve: Time: 50 | Slow-No</td></tr>
+      <tr><td>Bake Time</td><td><code>Time_Text</code></td><td>Bake: 5 min 23 sec</td></tr>
+    </table>
+    <div class="tip">
+      <strong>Tip:</strong> Text objects are updated in the background Blender process.
+      The changes are written to the scene in memory and appear in the rendered frames,
+      but are not saved back to your original .blend file.
+    </div>
+  </section>
+
+  <!-- ── Output ── -->
+  <section id="output">
+    <h2>Output Files</h2>
+    <pre>&lt;output_path&gt;/
+    run_smoke_batch.bat            ← double-click to run all jobs
+    smoke_worker.py                ← per-job worker (do not edit)
+    jobs/
+        job_0000.json              ← parameters for job 0
+        job_0000.log               ← console output from job 0
+        job_0001.json
+        job_0001.log
+        ...
+    Renders/
+        R64_V1.0_A1.0_B1.0_D-OFF_N-OFF_0000.mp4   ← playblast
+        R64_V1.0_A1.0_B1.0_D-OFF_N-OFF_0000.png   ← final still
+        results.csv                                ← all results
+    Cache/
+        R64_V1.0_A1.0_B1.0_D-OFF_N-OFF_0000/      ← per-job cache
+            Data/
+            Noise/                                 ← if noise enabled</pre>
+
+    <h3>Filename Convention</h3>
+    <p>Each job's files use a stem built from its parameter values:</p>
+    <pre>R{resolution}_V{vorticity}_A{alpha}_B{beta}_{dissolve}_{noise}_{index:04d}</pre>
+    <p>Examples:</p>
+    <table>
+      <tr><th>Abbreviation</th><th>Parameter</th><th>Example</th></tr>
+      <tr><td><code>R64</code></td><td>Resolution 64</td><td>—</td></tr>
+      <tr><td><code>V1.0</code></td><td>Vorticity 1.0</td><td>—</td></tr>
+      <tr><td><code>A1.0</code></td><td>Alpha (buoyancy density) 1.0</td><td>—</td></tr>
+      <tr><td><code>B1.0</code></td><td>Beta (buoyancy heat) 1.0</td><td>—</td></tr>
+      <tr><td><code>D50</code></td><td>Dissolve speed 50 frames</td><td>or <code>D-OFF</code></td></tr>
+      <tr><td><code>N2_NS1.0_SC1.0</code></td><td>Noise scale/strength/pos</td><td>or <code>N-OFF</code></td></tr>
+      <tr><td><code>0000</code></td><td>Job index (guarantees uniqueness)</td><td>—</td></tr>
+    </table>
+  </section>
+
+  <!-- ── CSV ── -->
+  <section id="csv">
+    <h2>CSV Reference</h2>
+    <p>
+      <code>results.csv</code> is appended after each job completes. If you run
+      multiple batches the file accumulates all results.
+    </p>
+    <table>
+      <tr><th>Column</th><th>Type</th><th>Description</th></tr>
+      <tr><td>name</td><td>string</td><td>Job filename stem</td></tr>
+      <tr><td>resolution</td><td>int</td><td>Domain resolution used</td></tr>
+      <tr><td>vorticity</td><td>float</td><td>Vorticity value</td></tr>
+      <tr><td>alpha</td><td>float</td><td>Buoyancy density value</td></tr>
+      <tr><td>beta</td><td>float</td><td>Buoyancy heat value</td></tr>
+      <tr><td>dissolve_speed</td><td>int or OFF</td><td>Dissolve speed in frames, or OFF if disabled</td></tr>
+      <tr><td>slow_dissolve</td><td>bool or OFF</td><td>Whether slow dissolve was used</td></tr>
+      <tr><td>noise_upres</td><td>int or OFF</td><td>Noise scale factor</td></tr>
+      <tr><td>noise_strength</td><td>float or OFF</td><td>Noise strength</td></tr>
+      <tr><td>noise_spatial_scale</td><td>float or OFF</td><td>Noise position scale</td></tr>
+      <tr><td>bake_seconds</td><td>int</td><td>Bake time in seconds</td></tr>
+    </table>
+  </section>
+
+  <!-- ── Troubleshooting ── -->
+  <section id="troubleshooting">
+    <h2>Troubleshooting</h2>
+
+    <div class="card">
+      <h3>Export Batch shows "smoke_worker.py not found"</h3>
+      <p>Both files must be installed together. Re-install the addon using the zip file.
+      Do not install <code>__init__.py</code> and <code>smoke_worker.py</code> separately.</p>
+    </div>
+
+    <div class="card">
+      <h3>Batch crashes immediately with EXCEPTION_ACCESS_VIOLATION</h3>
+      <p>Some installed Blender addons crash when Blender loads in background mode.
+      The <code>--factory-startup</code> flag prevents most user addons from loading.
+      If this doesn't help, check <code>jobs/job_0000.log</code> — the last line
+      before the crash usually identifies the problematic addon.</p>
+    </div>
+
+    <div class="card">
+      <h3>Cache files found: 0 after bake</h3>
+      <p>The bake completed but wrote nothing to disk. Common causes:</p>
+      <ul style="padding-left:1.2rem; margin-top:0.5rem">
+        <li>Cache directory path contains special characters or spaces in unusual positions</li>
+        <li>The domain object's Fluid modifier is set to a type other than Domain</li>
+        <li>Output path is on a network drive that is slow to flush</li>
+      </ul>
+      <p style="margin-top:0.5rem">Check the full log for error messages before the "Cache files found: 0" line.</p>
+    </div>
+
+    <div class="card">
+      <h3>Playblast takes a very long time</h3>
+      <p>The Cycles sample count defaults to 32. For faster previews at the cost of
+      quality, edit <code>smoke_worker.py</code> in your output folder and reduce
+      <code>scene.cycles.samples = 32</code> to 8 or 16. Re-export the batch after
+      changing the worker (Export Batch overwrites the worker copy).</p>
+    </div>
+
+    <div class="card">
+      <h3>Physics panel resolution is greyed out after batch</h3>
+      <p>The domain is pointing at a job cache directory which has existing files,
+      so Blender locks the parameters. In Physics Properties → Fluid, click
+      <strong>Free All</strong>, then point the cache directory back to your
+      working folder.</p>
+    </div>
+
+    <div class="card">
+      <h3>The job count seems wrong</h3>
+      <p>In <strong>Limited Combinations</strong> mode the count is the sum of
+      range lengths (not the product). In <strong>All Combinations</strong> mode
+      it is the product. The panel shows the exact count above the Export button.
+      Also check for the floating-point range off-by-one: a range of 0.2 to 1.0
+      in steps of 0.2 correctly produces 5 values (the epsilon fix handles this).</p>
+    </div>
+
+    <div class="card">
+      <h3>EEVEE renders crash or produce blank frames</h3>
+      <p>EEVEE requires an OpenGL context which is not available in
+      <code>--background</code> mode. Switch to <strong>Cycles GPU</strong> in
+      the Render Engine selector, or if you specifically need EEVEE, switch to
+      EEVEE mode which opens a small visible Blender window per job.</p>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  SmokeSimLab — Blender 4.x addon —
+  <a href="https://github.com/YOUR_USERNAME/SmokeSimLab">GitHub</a>
+</footer>
+
+</body>
+</html>
