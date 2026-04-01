@@ -4,7 +4,7 @@ A Blender 4.x addon for batch smoke simulation parameter sweeping.
 
 SmokeSimLab automates the tedious process of testing many different smoke simulation settings. You define parameter ranges in a panel, click Export Batch, and a Windows batch file runs every combination — baking the simulation, rendering a playblast animation and a final still, and logging results to CSV for comparison.
 
-![SmokeLab Panel](docs/panel_screenshot.png)
+![SmokeLab Panel](documentation/images/SmokeSimLab_Panel.png)
 
 ---
 
@@ -12,8 +12,8 @@ SmokeSimLab automates the tedious process of testing many different smoke simula
 
 - **Batch parameter sweeping** across Resolution, Vorticity, Buoyancy Density, Buoyancy Heat, Dissolve Speed, and three Noise parameters
 - **Two iteration modes:**
-  - *Limited Combinations* — vary one parameter at a time while all others hold at their default value (far fewer jobs)
-  - *All Combinations* — full Cartesian product of all ranges
+  - _Limited Combinations_ — vary one parameter at a time while all others hold at their default value (far fewer jobs)
+  - _All Combinations_ — full Cartesian product of all ranges
 - **Per-job outputs:** MP4 playblast, PNG final still, and a row in `results.csv`
 - **In-render text object updates** — scene FONT objects display the current parameter values in each render
 - **Cycles GPU rendering** (OptiX → CUDA → HIP fallback) in background mode, or EEVEE in windowed mode
@@ -82,33 +82,37 @@ Each job opens a fresh Blender instance, bakes the simulation, renders, and exit
 ## Parameter Reference
 
 ### Resolution
+
 The longest side of the fluid domain grid. Higher = more detail, much longer bake times. Blender default is 32.
 
 ### Gas Parameters
 
-| Parameter | Blender Attribute | Default | Description |
-|---|---|---|---|
-| Vorticity | `d.vorticity` | 1.0 | Turbulent swirling detail. 0 = smooth, higher = more chaotic |
-| Buoyancy Density | `d.alpha` | 1.0 | How much smoke density drives upward buoyancy |
-| Buoyancy Heat | `d.beta` | 1.0 | How much temperature drives upward buoyancy |
+| Parameter        | Blender Attribute | Default | Description                                                  |
+| ---------------- | ----------------- | ------- | ------------------------------------------------------------ |
+| Vorticity        | `d.vorticity`     | 1.0     | Turbulent swirling detail. 0 = smooth, higher = more chaotic |
+| Buoyancy Density | `d.alpha`         | 1.0     | How much smoke density drives upward buoyancy                |
+| Buoyancy Heat    | `d.beta`          | 1.0     | How much temperature drives upward buoyancy                  |
 
 ### Dissolve
+
 When enabled, smoke fades out over time. Controlled by dissolve speed (frames) and optional logarithmic (slow) mode.
 
 ### Noise
+
 Adds high-resolution turbulent detail on top of the base simulation. Controlled by three sub-parameters:
 
-| Parameter | Blender Attribute | Default | Description |
-|---|---|---|---|
-| Scale | `d.noise_scale` | 2 | Upres factor — how much finer the noise grid is |
-| Strength | `d.noise_strength` | 1.0 | Intensity of the noise detail |
-| Position Scale | `d.noise_pos_scale` | 1.0 | Spatial frequency of the noise pattern |
+| Parameter      | Blender Attribute   | Default | Description                                     |
+| -------------- | ------------------- | ------- | ----------------------------------------------- |
+| Scale          | `d.noise_scale`     | 2       | Upres factor — how much finer the noise grid is |
+| Strength       | `d.noise_strength`  | 1.0     | Intensity of the noise detail                   |
+| Position Scale | `d.noise_pos_scale` | 1.0     | Spatial frequency of the noise pattern          |
 
 ### Iteration Modes
 
 **Limited Combinations** (default): For each parameter that has a range defined, one group of jobs is created where that parameter sweeps its range while all others stay at their default value. Total jobs = sum of all range lengths.
 
 Example: Vorticity range [0.5, 1.0, 1.5] + Noise Strength range [0.5, 1.0, 1.5]:
+
 - 3 jobs sweeping vorticity (noise strength = default)
 - 3 jobs sweeping noise strength (vorticity = default)
 - **Total: 6 jobs**
@@ -117,10 +121,10 @@ Example: Vorticity range [0.5, 1.0, 1.5] + Noise Strength range [0.5, 1.0, 1.5]:
 
 ### Render Modes
 
-| Mode | Speed | Requirements |
-|---|---|---|
-| Cycles GPU | Medium | Works in `--background` mode; uses OptiX/CUDA |
-| EEVEE | Fast | Requires windowed mode (visible Blender window) |
+| Mode       | Speed  | Requirements                                    |
+| ---------- | ------ | ----------------------------------------------- |
+| Cycles GPU | Medium | Works in `--background` mode; uses OptiX/CUDA   |
+| EEVEE      | Fast   | Requires windowed mode (visible Blender window) |
 
 ---
 
@@ -130,30 +134,30 @@ SmokeSimLab can update FONT (text) objects in your scene with current parameter 
 
 Set the object names in the **Text Objects** section. Objects not found in the scene are silently skipped.
 
-| Field | Default Name | Example Value |
-|---|---|---|
-| Resolution | `Resolution_Text` | `Res: 64` |
-| Noise | `Noise_Text` | `Noise: U-2 \| St-1.0 \| Scale-1.0` |
-| Dissolve | `Dissolve_Text` | `Dissolve: Time: 50 \| Slow-No` |
-| Bake Time | `Time_Text` | `Bake: 5 min 23 sec` |
+| Field      | Default Name      | Example Value                       |
+| ---------- | ----------------- | ----------------------------------- |
+| Resolution | `Resolution_Text` | `Res: 64`                           |
+| Noise      | `Noise_Text`      | `Noise: U-2 \| St-1.0 \| Scale-1.0` |
+| Dissolve   | `Dissolve_Text`   | `Dissolve: Time: 50 \| Slow-No`     |
+| Bake Time  | `Time_Text`       | `Bake: 5 min 23 sec`                |
 
 ---
 
 ## results.csv Columns
 
-| Column | Description |
-|---|---|
-| name | Job filename stem |
-| resolution | Domain resolution |
-| vorticity | Vorticity value used |
-| alpha | Buoyancy density value used |
-| beta | Buoyancy heat value used |
-| dissolve_speed | Dissolve speed in frames (or OFF) |
-| slow_dissolve | Whether slow dissolve was used (or OFF) |
-| noise_upres | Noise scale factor (or OFF) |
-| noise_strength | Noise strength (or OFF) |
-| noise_spatial_scale | Noise position scale (or OFF) |
-| bake_seconds | Bake time in seconds |
+| Column              | Description                             |
+| ------------------- | --------------------------------------- |
+| name                | Job filename stem                       |
+| resolution          | Domain resolution                       |
+| vorticity           | Vorticity value used                    |
+| alpha               | Buoyancy density value used             |
+| beta                | Buoyancy heat value used                |
+| dissolve_speed      | Dissolve speed in frames (or OFF)       |
+| slow_dissolve       | Whether slow dissolve was used (or OFF) |
+| noise_upres         | Noise scale factor (or OFF)             |
+| noise_strength      | Noise strength (or OFF)                 |
+| noise_spatial_scale | Noise position scale (or OFF)           |
+| bake_seconds        | Bake time in seconds                    |
 
 ---
 
