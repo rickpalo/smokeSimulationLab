@@ -32,7 +32,7 @@ SmokeSimLab automates the tedious process of testing many different smoke simula
 
 ## Installation
 
-1. Download the latest `SmokeSimLab.zip` from the [Releases](https://github.com/YOUR_USERNAME/SmokeSimLab/releases) page.
+1. Download the latest `SmokeSimLab.zip` from the [Releases](https://github.com/rickpalo/SmokeSimLab/releases) page.
 2. In Blender, open **Edit → Preferences → Add-ons**.
 3. Click **Install** and select `SmokeSimLab.zip`.
 4. Enable the **SmokeSimLab** addon in the list.
