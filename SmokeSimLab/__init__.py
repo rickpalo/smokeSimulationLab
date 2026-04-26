@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5).
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "SmokeSimLab",
-    "version":     (1, 2, 0),
+    "version":     (1, 3, 0),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -57,6 +57,7 @@ import os
 import shutil
 import itertools
 import json
+import subprocess
 
 # Placeholder GitHub/documentation URL.  Update this when you have a real URL.
 DOCS_URL = "https://github.com/YOUR_USERNAME/SmokeSimLab"
@@ -379,10 +380,15 @@ def export_batch(context):
 
     output_path = bpy.path.abspath(s.output_path)
     jobs_dir    = os.path.join(output_path, "jobs")
-    os.makedirs(jobs_dir, exist_ok=True)
 
-    blend_file  = bpy.data.filepath
-    blender_exe = bpy.app.binary_path
+    # Clear the jobs folder so stale jobs from a previous export don't linger.
+    if os.path.isdir(jobs_dir):
+        shutil.rmtree(jobs_dir)
+    os.makedirs(jobs_dir)
+
+    # Use user-specified paths when set; fall back to the running Blender/file.
+    blender_exe = bpy.path.abspath(s.blender_exe) if s.blender_exe.strip() else bpy.app.binary_path
+    blend_file  = bpy.path.abspath(s.blend_file)  if s.blend_file.strip()  else bpy.data.filepath
     frame_end   = context.scene.frame_end
     jobs        = list(generate_jobs(s))
 
@@ -754,6 +760,32 @@ class SmokeSettings(bpy.types.PropertyGroup):
         default='CYCLES',
     )
 
+    # ── Machine-specific paths ───────────────────────────────────────────────
+    # Default to empty so a .blend file opened on a different machine does not
+    # carry stale paths from the original machine.  Set these once per machine.
+
+    blender_exe: bpy.props.StringProperty(
+        name="Blender Executable",
+        description="Full path to blender.exe on this computer. "
+                    "Leave empty to use the currently running Blender",
+        subtype='FILE_PATH',
+        default="",
+    )
+
+    blend_file: bpy.props.StringProperty(
+        name="Blend File",
+        description="Full path to the .blend file to bake and render. "
+                    "Leave empty to use the currently open file",
+        subtype='FILE_PATH',
+        default="",
+    )
+
+    # ── Batch run status ─────────────────────────────────────────────────────
+
+    batch_progress: bpy.props.StringProperty(default="")
+    batch_total:    bpy.props.IntProperty(default=0)
+    batch_jobs_dir: bpy.props.StringProperty(default="")
+
     # ── Status / UI state ────────────────────────────────────────────────────
 
     last_export_info: bpy.props.StringProperty(
@@ -783,10 +815,19 @@ class SMOKE_OT_export_batch(bpy.types.Operator):
             self.report({'ERROR'}, "No domain object selected")
             return {'CANCELLED'}
 
-        if not bpy.data.filepath:
+        blender_exe = bpy.path.abspath(s.blender_exe) if s.blender_exe.strip() else bpy.app.binary_path
+        blend_file  = bpy.path.abspath(s.blend_file)  if s.blend_file.strip()  else bpy.data.filepath
+
+        if not blender_exe or not os.path.exists(blender_exe):
             self.report({'ERROR'},
-                "Please save the .blend file first — "
-                "the batch launcher needs its absolute path")
+                f"Blender executable not found: {blender_exe or '(not set)'} — "
+                "set the path in the Machine Setup section")
+            return {'CANCELLED'}
+
+        if not blend_file or not os.path.exists(blend_file):
+            self.report({'ERROR'},
+                f"Blend file not found: {blend_file or '(not set)'} — "
+                "set the path in the Machine Setup section or save the file first")
             return {'CANCELLED'}
 
         try:
@@ -834,6 +875,99 @@ class SMOKE_OT_remove_value(bpy.types.Operator):
             lst.remove(idx)
             # Clamp index so it stays within the (now shorter) list
             setattr(s, self.param + "_index", max(min(idx, len(lst) - 1), 0))
+        return {'FINISHED'}
+
+
+def _poll_batch_progress():
+    """
+    Timer callback — counts started jobs and updates the batch_progress string.
+    Registered when Run Batch is clicked; unregisters itself when all jobs are done.
+    Returns the next interval (seconds) or None to stop.
+    """
+    for scene in bpy.data.scenes:
+        s = getattr(scene, "smoke_settings", None)
+        if s is None or not s.batch_jobs_dir or s.batch_total == 0:
+            continue
+
+        jobs_dir = s.batch_jobs_dir
+        if not os.path.isdir(jobs_dir):
+            s.batch_progress = ""
+            return None
+
+        started = len([f for f in os.listdir(jobs_dir) if f.endswith(".log")])
+        total   = s.batch_total
+
+        if started >= total:
+            s.batch_progress = f"All {total} job(s) complete"
+            s.batch_jobs_dir = ""
+            _redraw_panels()
+            return None
+
+        s.batch_progress = f"{started} of {total} job(s) started"
+        _redraw_panels()
+        return 5.0
+
+    return None
+
+
+def _redraw_panels():
+    """Force all 3D View areas to redraw so the progress label updates."""
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+
+class SMOKE_OT_run_batch(bpy.types.Operator):
+    """Launch run_smoke_batch.bat in a new console window and track progress."""
+
+    bl_idname     = "smoke.run_batch"
+    bl_label      = "Run Batch"
+    bl_description = (
+        "Open run_smoke_batch.bat in a new console window. "
+        "Progress is tracked in the panel below."
+    )
+
+    def execute(self, context):
+        s           = context.scene.smoke_settings
+        output_path = bpy.path.abspath(s.output_path)
+        bat_path    = os.path.join(output_path, "run_smoke_batch.bat")
+
+        if not os.path.exists(bat_path):
+            self.report({'ERROR'}, "No batch file found — run Export Batch first")
+            return {'CANCELLED'}
+
+        jobs_dir   = os.path.join(output_path, "jobs")
+        job_files  = [f for f in os.listdir(jobs_dir) if f.endswith(".json")] \
+                     if os.path.isdir(jobs_dir) else []
+
+        if not job_files:
+            self.report({'ERROR'}, "No job files found — run Export Batch first")
+            return {'CANCELLED'}
+
+        # Remove old log files so the counter starts from zero.
+        if os.path.isdir(jobs_dir):
+            for f in os.listdir(jobs_dir):
+                if f.endswith(".log"):
+                    try:
+                        os.remove(os.path.join(jobs_dir, f))
+                    except OSError:
+                        pass
+
+        s.batch_total    = len(job_files)
+        s.batch_jobs_dir = jobs_dir
+        s.batch_progress = f"0 of {len(job_files)} job(s) started"
+
+        # Launch the bat in a new console window; returns immediately.
+        subprocess.Popen(
+            ["cmd", "/c", "start", "SmokeSimLab Batch", bat_path],
+            shell=False,
+        )
+
+        if not bpy.app.timers.is_registered(_poll_batch_progress):
+            bpy.app.timers.register(_poll_batch_progress, first_interval=5.0)
+
+        self.report({'INFO'}, f"Batch started — {len(job_files)} job(s) queued")
         return {'FINISHED'}
 
 
@@ -1033,6 +1167,15 @@ class SMOKE_PT_panel(bpy.types.Panel):
         # ── Domain and output ─────────────────────────────────────────────
         layout.prop(s, "domain_obj", text="Domain Object")
         layout.prop(s, "output_path")
+
+        # ── Machine Setup ─────────────────────────────────────────────────
+        # These paths are machine-specific and default to empty so they are
+        # never carried over from another computer via the .blend file.
+        box = layout.box()
+        box.label(text="Machine Setup", icon='PREFERENCES')
+        box.prop(s, "blender_exe", text="Blender EXE")
+        box.prop(s, "blend_file",  text="Blend File")
+
         layout.separator()
 
         # ── Parameter sections ────────────────────────────────────────────
@@ -1076,7 +1219,7 @@ class SMOKE_PT_panel(bpy.types.Panel):
 
         layout.separator()
 
-        # ── Render engine + export button ─────────────────────────────────
+        # ── Render engine + export + run buttons ──────────────────────────
         layout.prop(s, "render_mode", text="Render Engine")
         layout.operator(
             "smoke.export_batch",
@@ -1093,6 +1236,12 @@ class SMOKE_PT_panel(bpy.types.Panel):
             if len(info) > 60:
                 col.label(text=info[60:])
 
+        layout.separator()
+        layout.operator("smoke.run_batch", text="Run Batch", icon='PLAY')
+
+        if s.batch_progress:
+            layout.label(text=s.batch_progress, icon='TIME')
+
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -1103,6 +1252,7 @@ classes = [
     SMOKE_UL_value_list,
     SmokeSettings,
     SMOKE_OT_export_batch,
+    SMOKE_OT_run_batch,
     SMOKE_OT_add_value,
     SMOKE_OT_remove_value,
     SMOKE_OT_open_docs,
@@ -1151,6 +1301,8 @@ def unregister():
     Unregister all classes, remove the Scene property, and clean up the
     load_post handler.  Called when the addon is disabled or Blender exits.
     """
+    if bpy.app.timers.is_registered(_poll_batch_progress):
+        bpy.app.timers.unregister(_poll_batch_progress)
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
     if hasattr(bpy.types.Scene, "smoke_settings"):
