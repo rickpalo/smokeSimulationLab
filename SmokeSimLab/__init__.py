@@ -386,9 +386,9 @@ def export_batch(context):
         shutil.rmtree(jobs_dir)
     os.makedirs(jobs_dir)
 
-    # Use user-specified paths when set; fall back to the running Blender/file.
+    # Use user-specified Blender path or fall back to the running instance.
     blender_exe = bpy.path.abspath(s.blender_exe) if s.blender_exe.strip() else bpy.app.binary_path
-    blend_file  = bpy.path.abspath(s.blend_file)  if s.blend_file.strip()  else bpy.data.filepath
+    blend_file  = bpy.data.filepath
     frame_end   = context.scene.frame_end
     jobs        = list(generate_jobs(s))
 
@@ -410,6 +410,9 @@ def export_batch(context):
     # ── Write .bat header ────────────────────────────────────────────────────
     bat_lines = [
         "@echo off",
+        # Switch to the bat file's own directory so cmd always has a valid cwd,
+        # regardless of what working directory Blender or the shell inherited.
+        'cd /d "%~dp0"',
         "setlocal enabledelayedexpansion",
         f"echo SmokeSimLab batch - {len(jobs)} job(s)",
         "echo.",
@@ -772,14 +775,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
         default="",
     )
 
-    blend_file: bpy.props.StringProperty(
-        name="Blend File",
-        description="Full path to the .blend file to bake and render. "
-                    "Leave empty to use the currently open file",
-        subtype='FILE_PATH',
-        default="",
-    )
-
     # ── Batch run status ─────────────────────────────────────────────────────
 
     batch_progress: bpy.props.StringProperty(default="")
@@ -816,7 +811,6 @@ class SMOKE_OT_export_batch(bpy.types.Operator):
             return {'CANCELLED'}
 
         blender_exe = bpy.path.abspath(s.blender_exe) if s.blender_exe.strip() else bpy.app.binary_path
-        blend_file  = bpy.path.abspath(s.blend_file)  if s.blend_file.strip()  else bpy.data.filepath
 
         if not blender_exe or not os.path.exists(blender_exe):
             self.report({'ERROR'},
@@ -824,10 +818,8 @@ class SMOKE_OT_export_batch(bpy.types.Operator):
                 "set the path in the Machine Setup section")
             return {'CANCELLED'}
 
-        if not blend_file or not os.path.exists(blend_file):
-            self.report({'ERROR'},
-                f"Blend file not found: {blend_file or '(not set)'} — "
-                "set the path in the Machine Setup section or save the file first")
+        if not bpy.data.filepath:
+            self.report({'ERROR'}, "Please save the .blend file first")
             return {'CANCELLED'}
 
         try:
@@ -959,9 +951,11 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         s.batch_progress = f"0 of {len(job_files)} job(s) started"
 
         # Launch the bat in a new console window; returns immediately.
+        # cwd is set to output_path so the new cmd starts with a valid directory.
         subprocess.Popen(
             ["cmd", "/c", "start", "SmokeSimLab Batch", bat_path],
             shell=False,
+            cwd=output_path,
         )
 
         if not bpy.app.timers.is_registered(_poll_batch_progress):
@@ -1174,7 +1168,6 @@ class SMOKE_PT_panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Machine Setup", icon='PREFERENCES')
         box.prop(s, "blender_exe", text="Blender EXE")
-        box.prop(s, "blend_file",  text="Blend File")
 
         layout.separator()
 
