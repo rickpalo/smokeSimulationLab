@@ -17,8 +17,53 @@ appends a row to Renders/results.csv, then quits Blender.
 import bpy
 import sys
 import os
+import re
 import json
 import time as _time
+import atexit
+import subprocess
+
+sys.stdout.reconfigure(line_buffering=True)
+
+# _log_file is opened after the job config is loaded (it carries the path).
+_log_file = None
+
+def _log(msg):
+    """Write msg to stdout (batch window) and the per-job log file."""
+    print(msg)
+    if _log_file is not None:
+        _log_file.write(msg + "\n")
+        _log_file.flush()
+
+
+def _find_match(parent, prefix, suffix="", want_file=False):
+    """Return the most-recently-modified path in *parent* whose name matches
+    prefix_NNNN[suffix] (4-digit job index may differ from the current run).
+    Returns None if no match found."""
+    if not os.path.isdir(parent):
+        return None
+    pat   = re.compile(r'^' + re.escape(prefix) + r'_\d{4}' + re.escape(suffix) + r'$')
+    check = os.path.isfile if want_file else os.path.isdir
+    hits  = [
+        os.path.join(parent, e) for e in os.listdir(parent)
+        if pat.match(e) and check(os.path.join(parent, e))
+    ]
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
+def _close_log():
+    """Flush and close the per-job log file. Registered with atexit so it runs
+    on all exit paths — sys.exit(), unhandled exception, and clean quit."""
+    global _log_file
+    if _log_file is not None:
+        try:
+            _log_file.flush()
+            _log_file.close()
+        except OSError:
+            pass
+        _log_file = None
+
+atexit.register(_close_log)
 
 
 # ---------------------------------------------------------------------------
@@ -32,9 +77,9 @@ def _set_text(obj_name, value_str):
     obj = bpy.data.objects.get(obj_name)
     if obj and obj.type == 'FONT':
         obj.data.body = value_str
-        print(f"  Text '{obj_name}' -> '{value_str}'")
+        _log(f"  Text '{obj_name}' -> '{value_str}'")
     else:
-        print(f"  WARNING: '{obj_name}' not found or not a FONT object")
+        _log(f"  WARNING: '{obj_name}' not found or not a FONT object")
 
 
 def update_text_objects(text_map, params, bake_seconds=None):
@@ -48,9 +93,12 @@ def update_text_objects(text_map, params, bake_seconds=None):
     params       : job parameter dict from JSON
     bake_seconds : elapsed bake time in seconds, or None (omits time update)
     """
-    # Resolution
+    # Resolution + gas parameters
     _set_text(text_map.get("resolution", ""),
-              f"Res: {int(params['resolution'])}")
+              f"Res: {int(params['resolution'])}\n"
+              f"Vort: {round(float(params['vorticity']), 1)}, "
+              f"Dens: {round(float(params['alpha']), 1)}, "
+              f"Heat: {round(float(params['beta']), 1)}")
 
     # Noise — combined string or "Noise-None"
     if params["use_noise"]:
@@ -100,7 +148,7 @@ def enable_gpu_rendering(scene):
     prefs = bpy.context.preferences
 
     if 'cycles' not in prefs.addons:
-        print("  Cycles addon not available — using CPU")
+        _log("  Cycles addon not available — using CPU")
         scene.cycles.device = 'CPU'
         return False
 
@@ -115,13 +163,13 @@ def enable_gpu_rendering(scene):
                 for device in devices:
                     device.use = True
                 scene.cycles.device = 'GPU'
-                print(f"  GPU rendering enabled: {device_type}")
+                _log(f"  GPU rendering enabled: {device_type}")
                 return True
         except Exception as e:
-            print(f"  {device_type} not available: {e}")
+            _log(f"  {device_type} not available: {e}")
             continue
 
-    print("  No GPU available — falling back to CPU")
+    _log("  No GPU available — falling back to CPU")
     scene.cycles.device = 'CPU'
     return False
 
@@ -138,13 +186,13 @@ def setup_eevee(scene):
     available = scene.render.bl_rna.properties['engine'].enum_items.keys()
     if 'BLENDER_EEVEE_NEXT' in available:
         scene.render.engine = 'BLENDER_EEVEE_NEXT'
-        print("  Render engine: EEVEE Next")
+        _log("  Render engine: EEVEE Next")
         return True
     elif 'BLENDER_EEVEE' in available:
         scene.render.engine = 'BLENDER_EEVEE'
-        print("  Render engine: EEVEE")
+        _log("  Render engine: EEVEE")
         return True
-    print("  EEVEE not available — falling back to Cycles")
+    _log("  EEVEE not available — falling back to Cycles")
     return False
 
 
@@ -164,14 +212,19 @@ try:
     sep      = argv.index("--")
     job_path = argv[sep + 1]
 except (ValueError, IndexError):
-    print("ERROR: expected path to job JSON after --")
+    _log("ERROR: expected path to job JSON after --")
     sys.exit(1)
 
 with open(job_path) as fh:
     cfg = json.load(fh)
 
+_log_path = cfg.get("log_path")
+if _log_path:
+    _log_file = open(_log_path, "w", buffering=1)
+
 p           = cfg["params"]
 name        = cfg["name"]
+name_prefix = name.rsplit('_', 1)[0]   # parameter key without job index
 output_path = cfg["output_path"]
 domain_name = cfg["domain_name"]
 frame_end   = cfg["frame_end"]
@@ -180,16 +233,18 @@ text_map    = cfg.get("text_objects", {})
 # Render mode from job config — defaults to 'CYCLES'
 # Set to 'EEVEE' in job JSON or export settings for windowed mode
 render_mode = cfg.get("render_mode", "CYCLES")
+use_placeholders   = cfg.get("use_placeholders", False)
+use_existing_cache = cfg.get("use_existing_cache", False)
 
 render_dir = os.path.join(output_path, "Renders")
 cache_dir  = os.path.join(output_path, "Cache", name)
 os.makedirs(render_dir, exist_ok=True)
 os.makedirs(cache_dir,  exist_ok=True)
 
-print(f"[{name}] Job started.")
-print(f"[{name}] Cache dir: {cache_dir}")
-print(f"[{name}] Render dir: {render_dir}")
-print(f"[{name}] Render mode: {render_mode}")
+_log(f"[{name}] Job started.")
+_log(f"[{name}] Cache dir: {cache_dir}")
+_log(f"[{name}] Render dir: {render_dir}")
+_log(f"[{name}] Render mode: {render_mode}")
 
 # ---------------------------------------------------------------------------
 # Locate domain object and fluid modifier
@@ -197,12 +252,12 @@ print(f"[{name}] Render mode: {render_mode}")
 
 obj = bpy.data.objects.get(domain_name)
 if not obj:
-    print(f'ERROR: object "{domain_name}" not found in scene')
+    _log(f'ERROR: object "{domain_name}" not found in scene')
     sys.exit(1)
 
 mod = obj.modifiers.get("Fluid")
 if not mod:
-    print(f'ERROR: no Fluid modifier on "{domain_name}"')
+    _log(f'ERROR: no Fluid modifier on "{domain_name}"')
     sys.exit(1)
 
 d = mod.domain_settings
@@ -211,7 +266,6 @@ d = mod.domain_settings
 # Apply simulation parameters
 # ---------------------------------------------------------------------------
 
-d.cache_directory    = cache_dir
 d.resolution_max     = int(p["resolution"])
 d.vorticity          = float(p["vorticity"])
 d.alpha              = float(p["alpha"])    # buoyancy density
@@ -227,9 +281,12 @@ if p["use_noise"]:
     d.noise_pos_scale = float(p["noise_spatial_scale"])
 
 # OpenVDB + Blosc: smaller files, faster reads, industry-standard format
-d.cache_data_format           = 'OPENVDB'
-d.cache_noise_format          = 'OPENVDB'
-d.openvdb_cache_compress_type = 'BLOSC'
+d.cache_data_format  = 'OPENVDB'
+d.cache_noise_format = 'OPENVDB'
+try:
+    d.openvdb_cache_compress_type = 'BLOSC'
+except TypeError:
+    d.openvdb_cache_compress_type = 'ZIP'
 
 bpy.context.view_layer.objects.active = obj
 obj.select_set(True)
@@ -243,50 +300,91 @@ _time.sleep(3.0)
 # ---------------------------------------------------------------------------
 
 update_text_objects(text_map, p)
-print(f"[{name}] Text objects updated (pre-bake).")
+_log(f"[{name}] Text objects updated (pre-bake).")
 
 # ---------------------------------------------------------------------------
 # Bake
 # ---------------------------------------------------------------------------
 
-print(f"[{name}] Setting up cache directory...")
-d.cache_directory = cache_dir
+_log(f"[{name}] Setting up cache directory...")
+
+# Resolve the effective cache directory.  When use_existing_cache is on, also
+# search for a cache produced by a different job-number run with the same
+# parameters (e.g. reuse Cache/R128_…_0002 when current job is _0001).
+# NOTE: cache_dir (the current job's directory) was already created empty by
+# os.makedirs above, so we cannot rely on mtime alone — we must verify that
+# a candidate actually contains .vdb/.uni files before accepting it.
+effective_cache_dir = cache_dir
+if use_existing_cache:
+    cache_base = os.path.join(output_path, "Cache")
+    if os.path.isdir(cache_base):
+        pat        = re.compile(r'^' + re.escape(name_prefix) + r'_\d{4}$')
+        candidates = sorted(
+            [os.path.join(cache_base, e) for e in os.listdir(cache_base)
+             if pat.match(e) and os.path.isdir(os.path.join(cache_base, e))],
+            key=os.path.getmtime, reverse=True,
+        )
+        for candidate in candidates:
+            has_files = False
+            for _root, _dirs, files in os.walk(candidate):
+                if any(f.endswith('.vdb') or f.endswith('.uni') for f in files):
+                    has_files = True
+                    break
+            if has_files:
+                effective_cache_dir = candidate
+                if candidate != cache_dir:
+                    _log(f"[{name}] Found cache from different run: {candidate}")
+                break
+
+d.cache_directory = effective_cache_dir
 bpy.context.view_layer.update()
 _time.sleep(2.0)
 
-print(f"[{name}] Freeing previous cache...")
-bpy.ops.fluid.free_all()
-_time.sleep(2.0)
-
-print(f"[{name}] Baking...")
-bake_start   = _time.time()
-bpy.ops.fluid.bake_all()
-bake_seconds = _time.time() - bake_start
-print(f"[{name}] Bake complete in {bake_seconds:.0f}s.")
-
-_time.sleep(2.0)
-
-# ---------------------------------------------------------------------------
-# Verify cache wrote successfully
-# ---------------------------------------------------------------------------
-
-cache_files = []
-for root, dirs, files in os.walk(cache_dir):
+# Check whether usable cache files already exist in the resolved directory
+existing_cache_files = []
+for root, dirs, files in os.walk(effective_cache_dir):
     for f in files:
         if f.endswith('.vdb') or f.endswith('.uni'):
-            cache_files.append(os.path.join(root, f))
+            existing_cache_files.append(os.path.join(root, f))
 
-print(f"[{name}] Cache files found: {len(cache_files)}")
-if len(cache_files) == 0:
-    print(f"[{name}] ERROR: No cache files under {cache_dir} — skipping render")
-    sys.exit(1)
+if use_existing_cache and existing_cache_files:
+    _log(f"[{name}] Use Existing Cache enabled — found {len(existing_cache_files)} cache file(s), skipping bake.")
+    bake_seconds = 0.0
+else:
+    if effective_cache_dir != cache_dir:
+        # No files in alt dir — fall back to current job's fresh cache
+        effective_cache_dir = cache_dir
+        d.cache_directory   = cache_dir
+    _log(f"[{name}] Freeing previous cache...")
+    bpy.ops.fluid.free_all()
+    _time.sleep(2.0)
+
+    _log(f"[{name}] Baking...")
+    bake_start   = _time.time()
+    bpy.ops.fluid.bake_all()
+    bake_seconds = _time.time() - bake_start
+    _log(f"[{name}] Bake complete in {bake_seconds:.0f}s.")
+
+    _time.sleep(2.0)
+
+    # Verify cache wrote successfully
+    existing_cache_files = []
+    for root, dirs, files in os.walk(effective_cache_dir):
+        for f in files:
+            if f.endswith('.vdb') or f.endswith('.uni'):
+                existing_cache_files.append(os.path.join(root, f))
+
+    _log(f"[{name}] Cache files found: {len(existing_cache_files)}")
+    if len(existing_cache_files) == 0:
+        _log(f"[{name}] ERROR: No cache files under {effective_cache_dir} — skipping render")
+        sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Update text objects (after bake — includes bake time)
 # ---------------------------------------------------------------------------
 
 update_text_objects(text_map, p, bake_seconds=bake_seconds)
-print(f"[{name}] Text objects updated (post-bake).")
+_log(f"[{name}] Text objects updated (post-bake).")
 
 # ---------------------------------------------------------------------------
 # Scene setup — used by both render passes
@@ -295,7 +393,6 @@ print(f"[{name}] Text objects updated (post-bake).")
 scene             = bpy.context.scene
 scene.frame_start = 1
 scene.frame_end   = frame_end
-prev_engine       = scene.render.engine
 
 # ---------------------------------------------------------------------------
 # Playblast — full animation
@@ -317,20 +414,91 @@ if 'bl_ext.blender_org.anim_reviewer' in bpy.context.preferences.addons or \
         scene.render.ffmpeg.codec               = "H264"
         bpy.ops.animreview.render_animation()
         anim_reviewer_used = True
-        print(f"[{name}] Playblast via Anim Reviewer complete.")
+        _log(f"[{name}] Playblast via Anim Reviewer complete.")
     except Exception as e:
-        print(f"[{name}] Anim Reviewer failed ({e}), falling back to Cycles.")
+        _log(f"[{name}] Anim Reviewer failed ({e}), falling back to Cycles.")
 
 if not anim_reviewer_used:
     # Cycles GPU playblast — works reliably in background mode
     setup_cycles(scene, samples=32)
     scene.render.filepath                   = mp4
-    scene.render.image_settings.file_format = "FFMPEG"
     scene.render.ffmpeg.format              = "MPEG4"
     scene.render.ffmpeg.codec               = "H264"
-    print(f"[{name}] Playblasting (Cycles {scene.cycles.samples} samples) -> {mp4}")
-    bpy.ops.render.render(animation=True)
-    print(f"[{name}] Playblast complete.")
+
+    # Try native FFMPEG format (Blender < 5.1)
+    ffmpeg_supported = False
+    try:
+        scene.render.image_settings.file_format = "FFMPEG"
+        ffmpeg_supported = True
+        _log(f"[{name}] Playblasting (Cycles {scene.cycles.samples} samples) -> {mp4}")
+        bpy.ops.render.render(animation=True)
+        _log(f"[{name}] Playblast complete.")
+    except TypeError:
+        # FFMPEG format not supported (Blender 5.1+), fall back to PNG sequence
+        _log(f"[{name}] FFMPEG format not supported, rendering to PNG sequence instead.")
+        ffmpeg_supported = False
+
+    if not ffmpeg_supported:
+        # Render to PNG sequence, then convert with external FFmpeg
+        png_sequence_dir = os.path.join(render_dir, f"{name}_frames")
+
+        # When use_placeholders is on, also accept a frames folder produced by
+        # a different job-number run with identical parameters.
+        effective_frames_dir = png_sequence_dir
+        if use_placeholders:
+            alt_frames = _find_match(render_dir, name_prefix, suffix="_frames")
+            if alt_frames:
+                effective_frames_dir = alt_frames
+                if alt_frames != png_sequence_dir:
+                    _log(f"[{name}] Found existing frames dir from different run: {alt_frames}")
+
+        os.makedirs(effective_frames_dir, exist_ok=True)
+        scene.render.image_settings.file_format = "PNG"
+
+        # Check for existing frames if use_placeholders is enabled
+        frames_to_render = set(range(scene.frame_start, frame_end + 1))
+        if use_placeholders:
+            existing_frames = set()
+            for frame_num in frames_to_render:
+                frame_file = os.path.join(effective_frames_dir, f"frame_{frame_num:04d}.png")
+                if os.path.exists(frame_file):
+                    existing_frames.add(frame_num)
+
+            frames_to_render -= existing_frames
+            if existing_frames:
+                _log(f"[{name}] Found {len(existing_frames)} existing frame(s), skipping those")
+            if not frames_to_render:
+                _log(f"[{name}] All frames already exist, skipping animation render")
+
+        # Render frames individually to support skipping
+        if frames_to_render:
+            _log(f"[{name}] Playblasting (Cycles {scene.cycles.samples} samples) -> {effective_frames_dir}")
+            for frame_num in sorted(frames_to_render):
+                scene.frame_set(frame_num)
+                frame_file = os.path.join(effective_frames_dir, f"frame_{frame_num:04d}.png")
+                scene.render.filepath = frame_file
+                bpy.ops.render.render(write_still=True)
+            _log(f"[{name}] Playblast frame sequence complete.")
+        else:
+            _log(f"[{name}] No frames to render (all exist or skipped)")
+
+        # Convert PNG sequence to MP4 using FFmpeg
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",  # Overwrite output file
+            "-framerate", str(scene.render.fps),
+            "-i", os.path.join(effective_frames_dir, "frame_%04d.png"),
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            mp4
+        ]
+        try:
+            subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+            _log(f"[{name}] MP4 conversion complete -> {mp4}")
+        except subprocess.CalledProcessError as e:
+            _log(f"[{name}] FFmpeg conversion failed: {e.stderr.decode()}")
+        except FileNotFoundError:
+            _log(f"[{name}] FFmpeg not found on system PATH. PNG frames saved to {png_sequence_dir}")
 
 # ---------------------------------------------------------------------------
 # Final still — last frame only
@@ -351,10 +519,9 @@ scene.render.image_settings.file_format = 'PNG'
 
 scene.frame_set(frame_end)
 scene.render.filepath = png
-print(f"[{name}] Rendering final frame ({scene.render.engine}) -> {png}")
+_log(f"[{name}] Rendering final frame ({scene.render.engine}) -> {png}")
 bpy.ops.render.render(write_still=True)
-scene.render.engine = prev_engine
-print(f"[{name}] PNG render complete. File exists: {os.path.exists(png)}")
+_log(f"[{name}] PNG render complete. File exists: {os.path.exists(png)}")
 
 # ---------------------------------------------------------------------------
 # CSV — append one row per job, including dissolve/noise enabled flags
@@ -375,7 +542,7 @@ header   = [
     "bake_seconds",
 ]
 write_header = not os.path.exists(csv_path)
-with open(csv_path, "a") as fh:
+with open(csv_path, "a", encoding="utf-8") as fh:
     if write_header:
         fh.write(",".join(header) + "\n")
     fh.write(",".join(str(x) for x in [
@@ -392,11 +559,12 @@ with open(csv_path, "a") as fh:
         int(bake_seconds),
     ]) + "\n")
 
-print(f"[{name}] Done. Results -> {csv_path}")
+_log(f"[{name}] Done. Results -> {csv_path}")
 
 # ---------------------------------------------------------------------------
 # Exit
 # ---------------------------------------------------------------------------
 
-print(f"[{name}] Exiting Blender.")
+_log(f"[{name}] Exiting Blender.")
+_close_log()
 bpy.ops.wm.quit_blender()
