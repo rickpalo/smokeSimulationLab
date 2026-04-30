@@ -354,12 +354,20 @@ for _root, _dirs, files in os.walk(effective_cache_dir):
 
 bake_complete = (frame_end in baked_frames)
 
+# rebaked_frames: frame numbers whose cache was RECOMPUTED this run.
+# Existing renders for these frames must NOT be used as placeholders, because
+# the new bake may produce different smoke data than the old render.
+rebaked_frames = set()
+
 if use_existing_cache and bake_complete:
     _log(f"[{name}] Use Existing Cache enabled — frame {frame_end} confirmed, skipping bake.")
     bake_seconds = 0.0
+    # rebaked_frames stays empty — all cache pre-existing, renders still valid
 
 elif use_existing_cache and baked_frames:
-    # Partial bake from a previous crash — resume without freeing existing frames
+    # Partial bake from a previous crash — resume without freeing existing frames.
+    # Only frames beyond the previous bake are recomputed.
+    rebaked_frames = set(range(1, frame_end + 1)) - baked_frames
     _log(f"[{name}] Partial cache ({len(baked_frames)}/{frame_end} frames). Resuming bake...")
     _log(f"[{name}] Baking...")
     bake_start   = _time.time()
@@ -369,6 +377,8 @@ elif use_existing_cache and baked_frames:
     _time.sleep(2.0)
 
 else:
+    # Full rebake — all frames recomputed, any existing renders are stale
+    rebaked_frames = set(range(1, frame_end + 1))
     if effective_cache_dir != cache_dir:
         # No usable files in alt dir — fall back to this job's own cache dir
         effective_cache_dir = cache_dir
@@ -437,11 +447,15 @@ os.makedirs(effective_frames_dir, exist_ok=True)
 setup_cycles(scene, samples=32)
 scene.render.image_settings.file_format = "PNG"
 
-# Check for existing frames if use_placeholders is enabled
+# Check for existing frames if use_placeholders is enabled.
+# Frames in rebaked_frames are always re-rendered even if a PNG exists, because
+# the new bake may produce different smoke than the render that was previously made.
 frames_to_render = set(range(scene.frame_start, frame_end + 1))
 if use_placeholders:
     existing_frames = set()
     for frame_num in frames_to_render:
+        if frame_num in rebaked_frames:
+            continue  # cache was recomputed — must re-render
         frame_file = os.path.join(effective_frames_dir, f"frame_{frame_num:04d}.png")
         if os.path.exists(frame_file):
             existing_frames.add(frame_num)
@@ -449,6 +463,8 @@ if use_placeholders:
     frames_to_render -= existing_frames
     if existing_frames:
         _log(f"[{name}] Found {len(existing_frames)} existing frame(s), skipping those")
+    if rebaked_frames and use_placeholders:
+        _log(f"[{name}] {len(rebaked_frames)} frame(s) were rebaked — re-rendering those regardless of placeholders")
     if not frames_to_render:
         _log(f"[{name}] All frames already exist, skipping animation render")
 

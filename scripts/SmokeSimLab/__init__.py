@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "SmokeSimLab",
-    "version":     (0, 1, 22),
+    "version":     (0, 1, 23),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -840,6 +840,7 @@ class SmokeSettings(bpy.types.PropertyGroup):
     batch_job_log_key:    bpy.props.StringProperty(default="")
     batch_job_start_time: bpy.props.FloatProperty(default=0.0)
     batch_frame_end:      bpy.props.IntProperty(default=0)
+    batch_jobs_elapsed:   bpy.props.FloatProperty(default=0.0)
     show_results:         bpy.props.BoolProperty(
         name="Display Results When Finished",
         description="After all jobs complete, create a grid of result planes in a SmokeOutput collection",
@@ -1192,6 +1193,7 @@ def _poll_batch_progress():
             s.batch_job_log_key    = ""
             s.batch_job_start_time = 0.0
             s.batch_frame_end      = 0
+            s.batch_jobs_elapsed   = 0.0
             _redraw_panels()
             if s.show_results:
                 bpy.app.timers.register(_setup_results_deferred, first_interval=0.5)
@@ -1205,8 +1207,11 @@ def _poll_batch_progress():
             log_file, log_stem, tail = running
             now = time.time()
 
-            # Detect job transition — reset per-job timer and load frame count
+            # Detect job transition — accumulate elapsed time for completed job,
+            # then reset per-job timer and load frame count for the new job.
             if log_file != s.batch_job_log_key:
+                if s.batch_job_log_key and s.batch_job_start_time > 0:
+                    s.batch_jobs_elapsed += max(now - s.batch_job_start_time, 0.0)
                 s.batch_job_log_key    = log_file
                 s.batch_job_start_time = now
                 json_path = os.path.join(jobs_dir, log_stem + ".json")
@@ -1265,11 +1270,12 @@ def _poll_batch_progress():
             s.batch_job_text   = f"Job stage {stage_completed} of {_TOTAL_SUBTASKS} ({_format_eta(job_remaining)} this job)"
 
             # --- ETA: current_job_remaining + not-started jobs × avg_per_job ---
-            time_for_completed = (
-                max(s.batch_job_start_time - s.batch_start_time, 0.0)
-                if s.batch_job_start_time > 0 and s.batch_start_time > 0 else 0.0
-            )
-            avg_completed    = (time_for_completed / done) if done > 0 else default_job_secs
+            # avg_completed uses batch_jobs_elapsed — accumulated actual wall-clock
+            # time for each job that transitioned away during this batch run.
+            # Falls back to default_job_secs until at least one job has transitioned.
+            avg_completed    = (s.batch_jobs_elapsed / done
+                                if done > 0 and s.batch_jobs_elapsed > 0
+                                else default_job_secs)
             jobs_not_started = max(total - done - 1, 0)
             remaining        = job_remaining + jobs_not_started * avg_completed
             s.batch_time_remaining = f"All jobs: {_format_eta(remaining)}"
@@ -1356,6 +1362,7 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         s.batch_job_log_key    = ""
         s.batch_job_start_time = 0.0
         s.batch_frame_end      = 0
+        s.batch_jobs_elapsed   = 0.0
 
         # Launch the bat in a new console window; returns immediately.
         # cwd is set to output_path so the new cmd starts with a valid directory.
@@ -1527,6 +1534,7 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
         s.batch_job_log_key    = ""
         s.batch_job_start_time = 0.0
         s.batch_frame_end      = 0
+        s.batch_jobs_elapsed   = 0.0
 
         if not bpy.app.timers.is_registered(_poll_batch_progress):
             bpy.app.timers.register(_poll_batch_progress, first_interval=5.0)
@@ -2041,6 +2049,7 @@ def _reset_on_load(dummy=None):
         s.batch_job_log_key    = ""
         s.batch_job_start_time = 0.0
         s.batch_frame_end      = 0
+        s.batch_jobs_elapsed   = 0.0
 
 
 # ---------------------------------------------------------------------------
