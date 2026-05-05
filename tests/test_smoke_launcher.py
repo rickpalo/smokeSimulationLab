@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts", "SmokeSimLab"))
 
-from smoke_launcher import _find_werfault_for_pid, _save_crash_log
+from smoke_launcher import _find_werfault_for_pid, _save_crash_log, _write_crashed_marker
 
 
 # ---------------------------------------------------------------------------
@@ -169,3 +169,23 @@ class TestLauncherJobJson:
 
         assert data.get("blend_file", "") == ""
         assert data.get("render_mode", "CYCLES") == "CYCLES"
+
+
+# ---------------------------------------------------------------------------
+# _write_crashed_marker
+# ---------------------------------------------------------------------------
+
+class TestWriteCrashedMarker:
+    def test_creates_marker_file(self, tmp_path):
+        """Writes a .crashed marker file in the jobs directory."""
+        _write_crashed_marker(str(tmp_path), "job_0000")
+        marker = tmp_path / "job_0000.crashed"
+        assert marker.exists()
+        assert "crashed" in marker.read_text()
+
+    def test_marker_contains_iso_timestamp(self, tmp_path):
+        """Marker file content includes an ISO-format timestamp."""
+        _write_crashed_marker(str(tmp_path), "job_0001")
+        content = (tmp_path / "job_0001.crashed").read_text()
+        import re
+        assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", content)

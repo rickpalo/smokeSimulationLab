@@ -83,6 +83,15 @@ def _kill_pid(pid, label):
         print(f"[smoke_launcher] Warning: could not kill {label} PID {pid}: {exc}")
 
 
+def _write_crashed_marker(jobs_dir, job_stem):
+    marker = os.path.join(jobs_dir, job_stem + ".crashed")
+    try:
+        with open(marker, "w") as mf:
+            mf.write(f"crashed {datetime.datetime.now().isoformat()}\n")
+    except OSError:
+        pass
+
+
 def _save_crash_log(jobs_dir, job_stem):
     """Copy blender.crash.txt from %TEMP% to the jobs directory."""
     crash_src = os.path.join(
@@ -139,44 +148,51 @@ def main():
 
     print(f"[smoke_launcher] Starting job {job_stem}")
 
+    # Suppress the WerFault crash dialog before spawning Blender.
+    # SEM_NOGPFAULTERRORBOX is inherited by child processes: when Blender
+    # crashes, Windows skips the interactive dialog and lets the process
+    # terminate immediately with a non-zero exit code.
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetErrorMode(0x0002)  # SEM_NOGPFAULTERRORBOX
+        print("[smoke_launcher] SEM_NOGPFAULTERRORBOX set — crash dialogs suppressed")
+    except Exception as e:
+        print(f"[smoke_launcher] Warning: could not set error mode: {e}")
+
     # stderr=DEVNULL suppresses Blender's C++ startup noise; stdout is
     # inherited so live worker output still appears in the batch window.
     proc        = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
     blender_pid = proc.pid
     print(f"[smoke_launcher] Blender PID {blender_pid}")
 
-    crashed = False
     while True:
         if proc.poll() is not None:
-            break  # Blender exited on its own
+            break  # Blender exited (clean or crash)
 
+        # Belt-and-suspenders: if SetErrorMode didn't suppress the dialog on
+        # this machine, detect and kill WerFault so the batch doesn't hang.
         wer_pid = _find_werfault_for_pid(blender_pid)
         if wer_pid is not None:
-            print(f"[smoke_launcher] Crash detected — WerFault PID {wer_pid}")
+            print(f"[smoke_launcher] WerFault PID {wer_pid} detected — killing")
             _save_crash_log(jobs_dir, job_stem)
             _kill_pid(wer_pid, "WerFault")
             _kill_pid(blender_pid, "Blender")
             proc.wait()
-
-            marker = os.path.join(jobs_dir, job_stem + ".crashed")
-            try:
-                with open(marker, "w") as mf:
-                    mf.write(f"crashed {datetime.datetime.now().isoformat()}\n")
-            except OSError:
-                pass
-
-            crashed = True
-            break
+            _write_crashed_marker(jobs_dir, job_stem)
+            print(f"[smoke_launcher] Job {job_stem} CRASHED — crash log saved to jobs/")
+            sys.exit(1)
 
         time.sleep(_POLL_INTERVAL)
 
-    if crashed:
-        print(f"[smoke_launcher] Job {job_stem} CRASHED — crash log saved to jobs/")
+    exit_code = proc.returncode
+    if exit_code != 0:
+        _save_crash_log(jobs_dir, job_stem)
+        _write_crashed_marker(jobs_dir, job_stem)
+        print(f"[smoke_launcher] Job {job_stem} CRASHED (exit {exit_code}) — crash log saved to jobs/")
         sys.exit(1)
 
-    exit_code = proc.returncode
-    print(f"[smoke_launcher] Job {job_stem} {'OK' if exit_code == 0 else f'FAILED (exit {exit_code})'}")
-    sys.exit(exit_code)
+    print(f"[smoke_launcher] Job {job_stem} OK")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
