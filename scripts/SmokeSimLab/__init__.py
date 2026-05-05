@@ -60,6 +60,7 @@ import shutil
 import itertools
 import json
 import subprocess
+import sys
 import time
 
 print(f"SmokeSimLab {'.'.join(str(v) for v in bl_info['version'])} loaded")
@@ -430,6 +431,7 @@ def export_batch(context):
     blender_exe = bpy.app.binary_path
     blend_file  = bpy.data.filepath
     frame_end   = context.scene.frame_end
+    python_exe  = sys.executable   # Blender's bundled Python — always on disk, no PATH needed
     jobs        = list(generate_jobs(s))
 
     # ── Locate and copy worker script ────────────────────────────────────────
@@ -499,7 +501,7 @@ def export_batch(context):
         # saves crash logs, and exits non-zero so the batch marks the job failed.
         # Falls back to calling Blender directly if the launcher was not exported.
         if os.path.exists(dest_launcher):
-            run_cmd = f'python "{dest_launcher}" "{blender_exe}" "{job_path}"'
+            run_cmd = f'"{python_exe}" "{dest_launcher}" "{blender_exe}" "{job_path}"'
         elif s.render_mode == "EEVEE":
             run_cmd = (
                 f'"{blender_exe}" "{blend_file}" '

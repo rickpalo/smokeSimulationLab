@@ -824,10 +824,10 @@
         <strong>Automatically Retry Failed Jobs</strong> if that option is enabled.
       </p>
       <div class="note">
-        <strong>Requires Python on PATH.</strong> <code>smoke_launcher.py</code> is run
-        with the system Python interpreter. Python 3.x is required and must be accessible
-        as <code>python</code> from the command line. If Python is not found, the batch
-        falls back to calling Blender directly (no crash protection).
+        <strong>Uses Blender's bundled Python.</strong> The batch file records the full
+        path to Blender's own Python executable at Export time, so no system Python or
+        PATH configuration is required. Re-export if you move or update your Blender
+        installation.
       </div>
 
       <h3>Retry Failed Jobs</h3>
