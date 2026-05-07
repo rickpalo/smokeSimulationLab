@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 1, 46),
+    "version":     (0, 2, 0),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -691,6 +691,14 @@ def export_batch(context):
         "",
     ]
 
+    # ── Seed the Job Log list (one row per job, status=NOT_STARTED) ─────────
+    s.job_log_items.clear()
+    for i, p in enumerate(jobs):
+        _item = s.job_log_items.add()
+        _item.job_number = i + 1
+        _item.job_name   = make_name(p, i)
+        _item.status     = 'NOT_STARTED'
+
     # ── Write one JSON + one .bat entry per job ──────────────────────────────
     for i, p in enumerate(jobs):
         name      = make_name(p, i)
@@ -815,6 +823,47 @@ class SMOKE_UL_value_list(bpy.types.UIList):
         row = layout.row(align=True)
         row.prop(item, "marked", text="")
         row.prop(item, "value", text="", emboss=True)
+
+
+class SmokeJobItem(bpy.types.PropertyGroup):
+    """One row in the Job Log panel section."""
+    job_number: bpy.props.IntProperty(name="Job #",  default=0)
+    job_name:   bpy.props.StringProperty(name="Name", default="")
+    status:     bpy.props.EnumProperty(
+        name="Status",
+        items=[
+            ('NOT_STARTED', "Not Started", ""),
+            ('IN_PROGRESS', "In Progress",  ""),
+            ('RETRYING',    "Retrying",     ""),
+            ('COMPLETE',    "Complete",     ""),
+            ('FAILED',      "Failed",       ""),
+        ],
+        default='NOT_STARTED',
+    )
+
+
+class SMOKE_UL_job_log(bpy.types.UIList):
+    """Job Log list — one row per exported job, colour-coded by status."""
+
+    _STATUS_ICONS = {
+        'NOT_STARTED': 'RADIOBUT_OFF',
+        'IN_PROGRESS': 'SEQUENCE_COLOR_07',  # blue  — active / running
+        'RETRYING':    'SEQUENCE_COLOR_04',  # yellow — transient error, retrying
+        'COMPLETE':    'SEQUENCE_COLOR_05',  # green  — success
+        'FAILED':      'SEQUENCE_COLOR_01',  # red    — permanent failure
+    }
+
+    def draw_item(self, context, layout, data, item, icon,
+                  active_data, active_propname):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            split = layout.split(factor=0.10, align=True)
+            split.label(icon=self._STATUS_ICONS.get(item.status, 'NONE'), text="")
+            inner = split.split(factor=0.22, align=True)
+            inner.label(text=str(item.job_number))
+            inner.label(text=item.job_name)
+
+    def draw_filter(self, context, layout):
+        pass  # suppress the filter / sort bar
 
 
 class SmokeSettings(bpy.types.PropertyGroup):
@@ -1151,6 +1200,16 @@ class SmokeSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
+    # ── Job Log ───────────────────────────────────────────────────────────────
+
+    show_job_log: bpy.props.BoolProperty(
+        name="Job Log",
+        default=False,
+        description="Expand or collapse the Job Log section",
+    )
+    job_log_items: bpy.props.CollectionProperty(type=SmokeJobItem)
+    job_log_index: bpy.props.IntProperty(default=0)
+
     # ── Utilities ─────────────────────────────────────────────────────────────
 
     show_utilities: bpy.props.BoolProperty(
@@ -1184,7 +1243,10 @@ class SmokeSettings(bpy.types.PropertyGroup):
     batch_subtask_factor: bpy.props.FloatProperty(default=0.0, min=0.0, max=1.0)
     batch_job_text:       bpy.props.StringProperty(default="")
     batch_job_factor:     bpy.props.FloatProperty(default=0.0, min=0.0, max=1.0)
-    batch_complete_msg:   bpy.props.StringProperty(default="")
+    batch_summary_line1:  bpy.props.StringProperty(default="")
+    batch_summary_line2:  bpy.props.StringProperty(default="")
+    batch_summary_line3:  bpy.props.StringProperty(default="")
+    batch_summary_line4:  bpy.props.StringProperty(default="")
     batch_start_time:     bpy.props.FloatProperty(default=0.0)
     batch_time_remaining: bpy.props.StringProperty(default="")
     batch_job_log_key:    bpy.props.StringProperty(default="")
@@ -1601,6 +1663,94 @@ def _format_eta(seconds):
     return f"~{h}h {m}min remaining"
 
 
+def _format_elapsed(secs):
+    """Return elapsed wall-clock time as '1 h, 7 min', '27 min', or '45 sec'."""
+    secs = int(max(0.0, secs))
+    h    = secs // 3600
+    m    = (secs % 3600) // 60
+    s    = secs % 60
+    if h > 0:
+        return f"{h} h, {m} min"
+    if m > 0:
+        return f"{m} min"
+    return f"{s} sec"
+
+
+def _update_job_log_statuses(s, jobs_dir):
+    """Refresh each SmokeJobItem status by scanning the jobs directory."""
+    try:
+        all_files = set(os.listdir(jobs_dir))
+    except OSError:
+        return
+    for item in s.job_log_items:
+        n          = f"{item.job_number - 1:04d}"   # job_number is 1-based; filenames are 0-based
+        retry_done = f"job_{n}_retry.done"
+        first_done = f"job_{n}.done"
+        retry_log  = f"job_{n}_retry.log"
+        first_log  = f"job_{n}.log"
+
+        def _has_error(fname):
+            try:
+                with open(os.path.join(jobs_dir, fname)) as fh:
+                    return "error" in fh.read().lower()
+            except OSError:
+                return False
+
+        if retry_done in all_files:
+            item.status = 'FAILED' if _has_error(retry_done) else 'COMPLETE'
+        elif retry_log in all_files:
+            item.status = 'RETRYING'
+        elif first_done in all_files:
+            item.status = 'FAILED' if _has_error(first_done) else 'COMPLETE'
+        elif first_log in all_files:
+            item.status = 'IN_PROGRESS'
+        # else: leave as NOT_STARTED
+
+
+def _compute_batch_summary(jobs_dir, elapsed_secs):
+    """Scan done files and return (line1, line2, line3, line4) summary strings.
+
+    line3 and line4 are empty strings when the respective counts are zero.
+    """
+    try:
+        all_files = os.listdir(jobs_dir)
+    except OSError:
+        all_files = []
+
+    def _has_error(fname):
+        try:
+            with open(os.path.join(jobs_dir, fname)) as fh:
+                return "error" in fh.read().lower()
+        except OSError:
+            return False
+
+    first_dones = [f for f in all_files if f.endswith(".done") and "_retry" not in f]
+    retry_dones = [f for f in all_files if f.endswith("_retry.done")]
+
+    first_failed_stems = {f[:-5] for f in first_dones if _has_error(f)}
+
+    retry_ok = retry_fail = 0
+    for f in retry_dones:
+        if _has_error(f):
+            retry_fail += 1
+        else:
+            retry_ok   += 1
+
+    no_retry_fail  = max(len(first_failed_stems) - (retry_ok + retry_fail), 0)
+    clean_complete = len(first_dones) - len(first_failed_stems)
+    total_complete = clean_complete + retry_ok
+    total_failed   = retry_fail + no_retry_fail
+
+    def _n(count, noun):
+        return f"{count} {noun}{'s' if count != 1 else ''}"
+
+    line1 = f"All Jobs Finished — {_format_elapsed(elapsed_secs)}"
+    line2 = f"{_n(total_complete, 'Job')} Complete"
+    line3 = f"{_n(retry_ok,     'Job')} Error, but Retried Successfully" if retry_ok    > 0 else ""
+    line4 = f"{_n(total_failed, 'Job')} Failed"                          if total_failed > 0 else ""
+    return line1, line2, line3, line4
+
+
 # ---------------------------------------------------------------------------
 # Estimation log — append-only JSONL diagnostic file
 # ---------------------------------------------------------------------------
@@ -1681,6 +1831,8 @@ def _poll_batch_progress():
         done  = len(done_files)
         total = s.batch_total
 
+        _update_job_log_statuses(s, jobs_dir)
+
         # Estimation log: record batch start once per run.
         # Output path is only set when collect_estimation_data is on; _estim_log
         # is a no-op when output_path is empty, so all logging is suppressed.
@@ -1724,8 +1876,16 @@ def _poll_batch_progress():
             })
             _estim["batch_logged"] = False   # allow logging for any future run
 
-            err_txt = f"  ({errors} error(s))" if errors else ""
-            s.batch_complete_msg   = "" if will_auto_retry else f"All {total} job(s) complete{err_txt}"
+            if will_auto_retry:
+                s.batch_summary_line1 = s.batch_summary_line2 = ""
+                s.batch_summary_line3 = s.batch_summary_line4 = ""
+            else:
+                elapsed = time.time() - s.batch_start_time
+                l1, l2, l3, l4 = _compute_batch_summary(jobs_dir, elapsed)
+                s.batch_summary_line1 = l1
+                s.batch_summary_line2 = l2
+                s.batch_summary_line3 = l3
+                s.batch_summary_line4 = l4
             s.batch_progress       = ""
             s.batch_overall_factor = 0.0
             s.batch_subtask_text   = ""
@@ -2196,7 +2356,11 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
                     except OSError:
                         pass
 
-        s.batch_complete_msg   = ""
+        s.batch_summary_line1 = s.batch_summary_line2 = ""
+        s.batch_summary_line3 = s.batch_summary_line4 = ""
+        s.show_job_log        = True
+        for _it in s.job_log_items:
+            _it.status = 'NOT_STARTED'
         s.batch_total          = len(job_files)
         s.batch_jobs_dir       = jobs_dir
         s.batch_progress       = f"0 of {len(job_files)} job(s) complete"
@@ -2377,7 +2541,8 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
                           if f.endswith(".json") and "_retry" not in f])
         done_now   = len([f for f in os.listdir(jobs_dir) if f.endswith(".done")])
 
-        s.batch_complete_msg   = ""
+        s.batch_summary_line1 = s.batch_summary_line2 = ""
+        s.batch_summary_line3 = s.batch_summary_line4 = ""
         s.batch_total          = total_jobs
         s.batch_jobs_dir       = jobs_dir
         s.batch_progress       = f"{done_now} of {total_jobs} job(s) complete"
@@ -2871,9 +3036,13 @@ class SMOKE_PT_panel(bpy.types.Panel):
         layout.prop(s, "show_results")
         layout.operator("smoke.run_batch", text="Run Batch", icon='PLAY')
 
-        if s.batch_complete_msg:
-            layout.label(text=s.batch_complete_msg, icon='CHECKMARK')
-            if "error" in s.batch_complete_msg:
+        if s.batch_summary_line1:
+            layout.label(text=s.batch_summary_line1, icon='CHECKMARK')
+            layout.label(text=s.batch_summary_line2)
+            if s.batch_summary_line3:
+                layout.label(text=s.batch_summary_line3)
+            if s.batch_summary_line4:
+                layout.label(text=s.batch_summary_line4)
                 layout.operator("smoke.retry_failed", icon='FILE_REFRESH')
             layout.operator("smoke.setup_results", icon='IMAGE_DATA')
         elif s.batch_progress:
@@ -2902,6 +3071,27 @@ class SMOKE_PT_panel(bpy.types.Panel):
 
             if s.batch_time_remaining:
                 layout.label(text=s.batch_time_remaining, icon='TIME')
+
+        layout.separator()
+
+        # ── Job Log (collapsible, default collapsed, auto-expands on Run Batch) ──
+        box_log = layout.box()
+        row_log = box_log.row()
+        row_log.prop(s, "show_job_log",
+                     icon='TRIA_DOWN' if s.show_job_log else 'TRIA_RIGHT',
+                     emboss=False, text="")
+        row_log.label(text="Job Log")
+        if s.show_job_log and s.job_log_items:
+            hdr = box_log.row()
+            hdr.label(text="", icon='BLANK1')
+            hdr.label(text="#")
+            hdr.label(text="Job Name")
+            box_log.template_list(
+                "SMOKE_UL_job_log", "",
+                s, "job_log_items",
+                s, "job_log_index",
+                rows=min(len(s.job_log_items), 8),
+            )
 
         layout.separator()
 
@@ -2994,8 +3184,11 @@ def _reset_on_load(dummy=None):
         s.show_results       = False
 
         s.last_export_info     = ""
-        s.batch_complete_msg   = ""
+        s.batch_summary_line1 = s.batch_summary_line2 = ""
+        s.batch_summary_line3 = s.batch_summary_line4 = ""
         s.batch_progress       = ""
+        s.show_job_log         = False
+        s.job_log_items.clear()
         s.batch_total          = 0
         s.batch_jobs_dir       = ""
         s.batch_overall_factor = 0.0
@@ -3027,6 +3220,8 @@ def _reset_on_load(dummy=None):
 classes = [
     ValueItem,
     SMOKE_UL_value_list,
+    SmokeJobItem,
+    SMOKE_UL_job_log,
     SmokeSettings,
     SmokeSimLabPreferences,
     SMOKE_OT_export_batch,
