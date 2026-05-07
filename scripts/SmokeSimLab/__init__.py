@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 1, 45),
+    "version":     (0, 1, 46),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -647,6 +647,18 @@ def export_batch(context):
     python_exe  = sys.executable   # Blender's bundled Python — always on disk, no PATH needed
     jobs        = list(generate_jobs(s))
 
+    # ── Pre-compute per-job emitter densities (done once, not in the worker) ──
+    # Read every FLOW emitter's current density from the scene, then for each
+    # job compute the scaled density = base * (job_res / blend_res).  The
+    # worker just applies the pre-computed value — no math, no domain lookup.
+    _blend_res   = _blend_domain_resolution(s.domain_obj)
+    _base_densities = {}  # {obj_name: base_density}
+    if s.maintain_density and _blend_res > 0:
+        for _obj in context.scene.objects:
+            for _mod in _obj.modifiers:
+                if _mod.type == 'FLUID' and _mod.fluid_type == 'FLOW':
+                    _base_densities[_obj.name] = _mod.flow_settings.density
+
     # ── Locate and copy worker script ────────────────────────────────────────
     # __file__ is reliable here because we are installed as a proper addon,
     # so it points to the SmokeSimLab folder, not the .blend file.
@@ -701,7 +713,10 @@ def export_batch(context):
             "use_placeholders": s.use_placeholders,
             "use_existing_cache": s.use_existing_cache or s.use_placeholders,
             "maintain_density": s.maintain_density,
-            "density_base_resolution": _blend_domain_resolution(s.domain_obj),
+            "emitter_densities": {
+                name: base * (float(p.get("resolution", _blend_res)) / _blend_res)
+                for name, base in _base_densities.items()
+            } if _base_densities else {},
             "collect_crash_logs":      s.collect_crash_logs,
             "collect_estimation_data": s.collect_estimation_data,
             "log_path":       log_path,

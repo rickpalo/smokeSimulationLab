@@ -268,9 +268,8 @@ render_samples     = cfg.get("render_samples", 16)
 use_placeholders   = cfg.get("use_placeholders", False)
 use_existing_cache = cfg.get("use_existing_cache", False)
 
-# Density scaling — applied before baking when maintain_density is True
-maintain_density         = cfg.get("maintain_density", False)
-density_base_resolution  = cfg.get("density_base_resolution", int(p.get("resolution", 64)))
+# Emitter densities pre-computed at export time: {object_name: scaled_density}
+emitter_densities = cfg.get("emitter_densities", {})
 collect_estimation_data  = cfg.get("collect_estimation_data", False)
 
 render_dir = os.path.join(output_path, "Renders")
@@ -334,27 +333,22 @@ bpy.context.view_layer.update()
 _time.sleep(3.0)
 
 # ---------------------------------------------------------------------------
-# Maintain consistent density — scale emitter flow density with resolution
+# Apply pre-computed emitter densities (scaled at export time, not here)
 # ---------------------------------------------------------------------------
 
-if maintain_density and density_base_resolution > 0:
-    job_resolution = int(p["resolution"])
-    density_ratio  = job_resolution / density_base_resolution
-    scaled = 0
+if emitter_densities:
     for em_obj in bpy.data.objects:
+        if em_obj.name not in emitter_densities:
+            continue
         for mod in em_obj.modifiers:
             if mod.type == 'FLUID' and mod.fluid_type == 'FLOW':
                 try:
-                    base_dens = mod.flow_settings.density
-                    mod.flow_settings.density = base_dens * density_ratio
+                    old_dens = mod.flow_settings.density
+                    mod.flow_settings.density = emitter_densities[em_obj.name]
                     _log(f"[{name}] Density: '{em_obj.name}' "
-                         f"{base_dens:.4f} → {mod.flow_settings.density:.4f} "
-                         f"(res {density_base_resolution}→{job_resolution})")
-                    scaled += 1
+                         f"{old_dens:.4f} → {mod.flow_settings.density:.4f}")
                 except AttributeError as exc:
-                    _log(f"[{name}] WARNING: density scale failed on '{em_obj.name}': {exc}")
-    if scaled == 0:
-        _log(f"[{name}] WARNING: maintain_density=True but no FLUID FLOW objects found in scene")
+                    _log(f"[{name}] WARNING: density set failed on '{em_obj.name}': {exc}")
 
 # ---------------------------------------------------------------------------
 # Update text objects (before bake — no time available yet)
