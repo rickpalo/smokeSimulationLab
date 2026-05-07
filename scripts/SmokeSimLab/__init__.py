@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 1, 39),
+    "version":     (0, 1, 41),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -164,7 +164,7 @@ _SWEEP_PARAMS = [
 def _settings_dict(s):
     """Return a JSON-serialisable snapshot of all Simulation Parameter settings."""
     d = {
-        "smokesettings_version": 1,
+        "smokesettings_version": 2,
         "iteration_mode":        s.iteration_mode,
         "use_dissolve":          s.use_dissolve,
         "slow_dissolve":         s.slow_dissolve,
@@ -175,7 +175,6 @@ def _settings_dict(s):
     }
     for name in _SWEEP_PARAMS:
         d["params"][name] = {
-            "value":     getattr(s, name),
             "use_range": getattr(s, name + "_use_range"),
             "use_list":  getattr(s, name + "_use_list"),
             "begin":     getattr(s, name + "_begin"),
@@ -202,12 +201,15 @@ def _apply_settings_dict(s, data):
         if name not in params:
             continue
         p = params[name]
-        setattr(s, name,                 p.get("value",     getattr(s, name)))
+        # v1 presets stored a "value" key (the old base/default property).
+        # Use it as a fallback for "begin"/"end" so old presets load correctly.
+        v1_value = p.get("value")
+        cur_begin = getattr(s, name + "_begin", 0)
         setattr(s, name + "_use_range",  p.get("use_range", False))
         setattr(s, name + "_use_list",   p.get("use_list",  False))
-        setattr(s, name + "_begin",      p.get("begin",     getattr(s, name)))
-        setattr(s, name + "_end",        p.get("end",       getattr(s, name)))
-        setattr(s, name + "_step",       p.get("step",      0))
+        setattr(s, name + "_begin",      p.get("begin", v1_value if v1_value is not None else cur_begin))
+        setattr(s, name + "_end",        p.get("end",   v1_value if v1_value is not None else cur_begin))
+        setattr(s, name + "_step",       p.get("step",  0))
         lst = getattr(s, name + "_list")
         lst.clear()
         for val in p.get("list", []):
@@ -276,10 +278,12 @@ def expand_param(s, name):
     """
     Return a list of values for iterable parameter *name* from SmokeSettings *s*.
 
-    Priority order:
-      1. Explicit list  — user-entered values in the UIList
-      2. Range          — begin/end/step sweep
-      3. Base value     — single default value (no iteration)
+    In all three modes the Begin field is the authoritative single value:
+
+      1. Explicit list  — user-entered values in the UIList; falls back to
+                          [begin] when the list is empty.
+      2. Range          — begin/end/step sweep; step=0 returns [begin].
+      3. Single value   — [begin] (Begin field shown as "Value" in the UI).
 
     Float ranges use a small epsilon tolerance on the end boundary to
     avoid off-by-one errors caused by IEEE 754 floating point accumulation
@@ -295,17 +299,16 @@ def expand_param(s, name):
     -------
     list of float/int values to iterate over
     """
-    base = getattr(s, name)
+    begin = getattr(s, name + "_begin")
 
     # Mode 1: explicit list
     if getattr(s, name + "_use_list"):
         lst  = getattr(s, name + "_list")
         vals = [i.value for i in lst]
-        return vals if vals else [base]
+        return vals if vals else [begin]
 
     # Mode 2: range sweep
     if getattr(s, name + "_use_range"):
-        begin = getattr(s, name + "_begin")
         end   = getattr(s, name + "_end")
         step  = getattr(s, name + "_step")
         if step == 0:
@@ -317,8 +320,8 @@ def expand_param(s, name):
             v += step
         return vals
 
-    # Mode 3: single default
-    return [base]
+    # Mode 3: single value — Begin field doubles as the fixed value
+    return [begin]
 
 
 def _default_job(s):
@@ -866,11 +869,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
         default=True,
         description="Expand or collapse the Resolution section",
     )
-    resolution:           bpy.props.IntProperty(
-        default=64, min=8,
-        description="Default resolution (longest domain side). "
-                    "Blender default is 32; 64 is a common starting point",
-    )
     resolution_begin:     bpy.props.IntProperty(default=64, min=8)
     resolution_end:       bpy.props.IntProperty(default=64, min=8)
     resolution_step:      bpy.props.IntProperty(default=0)
@@ -891,11 +889,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
 
 
     # Alpha — d.alpha — buoyancy based on smoke density
-    alpha:           bpy.props.FloatProperty(
-        default=1.0, min=-5.0, max=5.0,
-        description="Default buoyancy density (alpha). Positive = smoke rises. "
-                    "Blender default is 1.0",
-    )
     alpha_begin:     bpy.props.FloatProperty(default=1.0)
     alpha_end:       bpy.props.FloatProperty(default=1.0)
     alpha_step:      bpy.props.FloatProperty(default=0)
@@ -907,11 +900,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
     alpha_index:     bpy.props.IntProperty()
 
     # Beta — d.beta — buoyancy based on smoke heat/temperature
-    beta:           bpy.props.FloatProperty(
-        default=1.0, min=-5.0, max=5.0,
-        description="Default buoyancy heat (beta). Controls how temperature "
-                    "affects rising. Blender default is 1.0",
-    )
     beta_begin:     bpy.props.FloatProperty(default=1.0)
     beta_end:       bpy.props.FloatProperty(default=1.0)
     beta_step:      bpy.props.FloatProperty(default=0)
@@ -923,11 +911,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
     beta_index:     bpy.props.IntProperty()
 
     # Vorticity — d.vorticity — adds turbulent detail to smoke
-    vorticity:           bpy.props.FloatProperty(
-        default=0.0,
-        description="Default vorticity. Controls turbulent swirling detail. "
-                    "Blender default is 0.0; higher = more swirl",
-    )
     vorticity_begin:     bpy.props.FloatProperty(default=0.0)
     vorticity_end:       bpy.props.FloatProperty(default=0.0)
     vorticity_step:      bpy.props.FloatProperty(default=0)
@@ -961,10 +944,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
         default=False,
         description="Use logarithmic (slow) dissolve instead of linear",
     )
-    dissolve_speed: bpy.props.IntProperty(
-        default=5,
-        description="Default dissolve speed in frames. Blender default is 5",
-    )
     dissolve_speed_begin:     bpy.props.IntProperty(default=5)
     dissolve_speed_end:       bpy.props.IntProperty(default=5)
     dissolve_speed_step:      bpy.props.IntProperty(default=0)
@@ -996,10 +975,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
     )
 
     # Noise scale — d.noise_scale — upres factor
-    noise_upres: bpy.props.IntProperty(
-        default=2,
-        description="Default noise upres factor. Blender default is 2",
-    )
     noise_upres_begin:     bpy.props.IntProperty(default=2)
     noise_upres_end:       bpy.props.IntProperty(default=2)
     noise_upres_step:      bpy.props.IntProperty(default=0)
@@ -1011,10 +986,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
     noise_upres_index:     bpy.props.IntProperty()
 
     # Noise strength — d.noise_strength
-    noise_strength: bpy.props.FloatProperty(
-        default=2.0,
-        description="Default noise strength. Blender default is 1.0",
-    )
     noise_strength_begin:     bpy.props.FloatProperty(default=2.0)
     noise_strength_end:       bpy.props.FloatProperty(default=2.0)
     noise_strength_step:      bpy.props.FloatProperty(default=0)
@@ -1026,10 +997,6 @@ class SmokeSettings(bpy.types.PropertyGroup):
     noise_strength_index:     bpy.props.IntProperty()
 
     # Noise position scale — d.noise_pos_scale
-    noise_spatial_scale: bpy.props.FloatProperty(
-        default=2.0,
-        description="Default noise position scale. Blender default is 1.0",
-    )
     noise_spatial_scale_begin:     bpy.props.FloatProperty(default=2.0)
     noise_spatial_scale_end:       bpy.props.FloatProperty(default=2.0)
     noise_spatial_scale_step:      bpy.props.FloatProperty(default=0)
@@ -2556,7 +2523,7 @@ def _sub_param_ui(box, s, name, label):
 
     Used for Gas sub-params (vorticity, alpha, beta) and Noise sub-params
     where the outer collapsible box already exists and we only need to draw
-    the Default value + Range/List controls.
+    the Value/Range/List controls.
 
     Parameters
     ----------
@@ -2567,7 +2534,6 @@ def _sub_param_ui(box, s, name, label):
     """
     box.separator()
     box.label(text=f"{label}:")
-    box.prop(s, name, text="Default")    # renamed from "Base Value"
 
     row = box.row()
     row.prop(s, f"{name}_use_range", text="Range", toggle=True)
@@ -2584,6 +2550,8 @@ def _sub_param_ui(box, s, name, label):
         col = row.column(align=True)
         col.operator("smoke.add_value",    text="", icon='ADD').param    = name
         col.operator("smoke.remove_value", text="", icon='REMOVE').param = name
+    else:
+        box.prop(s, f"{name}_begin", text="Value")
 
 
 def _settings_ui(layout, s):
@@ -2636,8 +2604,6 @@ def _standalone_param_ui(layout, s, name, label,
         for prop_name, prop_label in extra_props:
             box.prop(s, prop_name, text=prop_label)
 
-    box.prop(s, name, text="Default")   # renamed from "Base Value"
-
     row = box.row()
     row.prop(s, f"{name}_use_range", text="Range", toggle=True)
     row.prop(s, f"{name}_use_list",  text="List",  toggle=True)
@@ -2653,6 +2619,8 @@ def _standalone_param_ui(layout, s, name, label,
         col = row.column(align=True)
         col.operator("smoke.add_value",    text="", icon='ADD').param    = name
         col.operator("smoke.remove_value", text="", icon='REMOVE').param = name
+    else:
+        box.prop(s, f"{name}_begin", text="Value")
     return box
 
 

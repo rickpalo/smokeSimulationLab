@@ -32,13 +32,12 @@ def _make_s(**overrides):
         "settings_snapshot":    "",
     }
     defaults = {
-        "resolution": 64, "vorticity": 1.0, "alpha": 1.0, "beta": 1.0,
-        "dissolve_speed": 50, "noise_upres": 2, "noise_strength": 1.0,
-        "noise_spatial_scale": 1.0,
+        "resolution": 64, "vorticity": 0.0, "alpha": 1.0, "beta": 1.0,
+        "dissolve_speed": 5, "noise_upres": 2, "noise_strength": 2.0,
+        "noise_spatial_scale": 2.0,
     }
     for name in _SWEEP_PARAMS:
         base = defaults[name]
-        d[name]                    = base
         d[name + "_use_range"]     = False
         d[name + "_use_list"]      = False
         d[name + "_begin"]         = base
@@ -56,7 +55,7 @@ def _make_s(**overrides):
 class TestSettingsDict:
     def test_returns_version(self):
         d = _settings_dict(_make_s())
-        assert d["smokesettings_version"] == 1
+        assert d["smokesettings_version"] == 2
 
     def test_top_level_flags(self):
         s = _make_s(use_dissolve=True, slow_dissolve=True, use_noise=True,
@@ -73,9 +72,10 @@ class TestSettingsDict:
             assert name in d["params"], f"missing param: {name}"
 
     def test_param_fields(self):
-        d = _settings_dict(_make_s(resolution=128))
+        d = _settings_dict(_make_s(resolution_begin=128))
         p = d["params"]["resolution"]
-        assert p["value"]     == 128
+        assert "value" not in p          # removed in v2
+        assert p["begin"]     == 128
         assert p["use_range"] is False
         assert p["use_list"]  is False
         assert p["list"]      == []
@@ -123,20 +123,17 @@ class TestApplySettingsDict:
                 return item
 
         s.resolution_list = _Collection()
-        data = _settings_dict(_make_s(resolution=256,
-                                      resolution_use_range=True,
+        data = _settings_dict(_make_s(resolution_use_range=True,
                                       resolution_begin=64,
                                       resolution_end=256,
                                       resolution_step=64))
         data["params"]["resolution"]["list"] = [64.0, 128.0]
         data["params"]["resolution"]["use_list"] = True
-        # re-inject a real Collection on s
         _apply_settings_dict(s, data)
-        assert s.resolution         == 256
-        assert s.resolution_use_list is True
         assert s.resolution_begin    == 64
         assert s.resolution_end      == 256
         assert s.resolution_step     == 64
+        assert s.resolution_use_list is True
         assert [item.value for item in s.resolution_list] == [64.0, 128.0]
 
     def test_updates_snapshot(self):
@@ -147,12 +144,12 @@ class TestApplySettingsDict:
         # snapshot matches re-computed dict
         assert s.settings_snapshot == json.dumps(_settings_dict(s), sort_keys=True)
 
-    def test_missing_param_leaves_value_unchanged(self):
-        s = _make_s(resolution=128)
+    def test_missing_param_leaves_begin_unchanged(self):
+        s = _make_s(resolution_begin=128)
         data = {"params": {}, "iteration_mode": "LIMITED",
                 "use_dissolve": False, "slow_dissolve": False, "use_noise": False}
         _apply_settings_dict(s, data)
-        assert s.resolution == 128  # unchanged
+        assert s.resolution_begin == 128  # unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -174,10 +171,10 @@ class TestIsSettingsDirty:
         s.settings_snapshot = json.dumps(_settings_dict(s), sort_keys=True)
         assert _is_settings_dirty(s) is False
 
-    def test_changed_value_is_dirty(self):
+    def test_changed_begin_is_dirty(self):
         s = _make_s(settings_file_path="/some/file.smokesettings")
         s.settings_snapshot = json.dumps(_settings_dict(s), sort_keys=True)
-        s.resolution = 256   # change after snapshot
+        s.resolution_begin = 256   # change after snapshot
         assert _is_settings_dirty(s) is True
 
 
@@ -204,12 +201,12 @@ class TestLoadSettingsFromPath:
 
     def test_load_applies_values(self, tmp_path):
         s = _make_s()
-        data = _settings_dict(_make_s(resolution=512, use_dissolve=True))
+        data = _settings_dict(_make_s(resolution_begin=512, use_dissolve=True))
         path = tmp_path / "test.smokesettings"
         path.write_text(json.dumps(data), encoding="utf-8")
         _load_settings_from_path(s, str(path))
-        assert s.resolution    == 512
-        assert s.use_dissolve  is True
+        assert s.resolution_begin == 512
+        assert s.use_dissolve     is True
 
     def test_missing_file_does_not_raise(self):
         s = _make_s()

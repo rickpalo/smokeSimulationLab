@@ -63,7 +63,7 @@ def _make_settings(**overrides):
 # ---------------------------------------------------------------------------
 
 class TestExpandParam:
-    def test_default_mode_returns_base(self):
+    def test_single_value_mode_returns_begin(self):
         assert expand_param(_make_settings(), "resolution") == [64]
 
     def test_list_mode_returns_values(self):
@@ -73,7 +73,7 @@ class TestExpandParam:
         )
         assert expand_param(s, "resolution") == [128.0, 256.0]
 
-    def test_empty_list_falls_back_to_base(self):
+    def test_empty_list_falls_back_to_begin(self):
         s = _make_settings(resolution_use_list=True, resolution_list=[])
         assert expand_param(s, "resolution") == [64]
 
