@@ -244,6 +244,10 @@ def _settings_files_enum_items(self, _context):
     """EnumProperty items — list .smokesettings files in the search path."""
     import os
     folder = self.settings_search_path or self.output_path or ""
+    # output_path may be a Blender-relative path (e.g. "//AutoTest"); resolve
+    # it to an absolute OS path before calling os.path.isdir.
+    if folder:
+        folder = bpy.path.abspath(folder)
     items = [('', "(none)", "No preset loaded")]
     if folder and os.path.isdir(folder):
         try:
@@ -586,9 +590,18 @@ def export_batch(context):
     jobs_dir    = os.path.join(output_path, "jobs")
 
     # Clear the jobs folder so stale jobs from a previous export don't linger.
+    # Fall back to per-file deletion if rmtree hits a PermissionError (e.g. a
+    # _retry.log held open by a still-running Blender process).
     if os.path.isdir(jobs_dir):
-        shutil.rmtree(jobs_dir)
-    os.makedirs(jobs_dir)
+        try:
+            shutil.rmtree(jobs_dir)
+        except PermissionError:
+            for _fn in os.listdir(jobs_dir):
+                try:
+                    os.unlink(os.path.join(jobs_dir, _fn))
+                except OSError:
+                    pass
+    os.makedirs(jobs_dir, exist_ok=True)
 
     # Use the currently running Blender instance
     blender_exe = bpy.app.binary_path
