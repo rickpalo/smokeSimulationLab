@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 1, 44),
+    "version":     (0, 1, 45),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -578,6 +578,20 @@ def make_name(p, index=0):
 # Batch export
 # ---------------------------------------------------------------------------
 
+def _blend_domain_resolution(domain_obj):
+    """Return the domain's current resolution_max as stored in the .blend file.
+
+    This is the resolution the scene was saved at — used as the denominator
+    when scaling emitter density for different-resolution jobs.  Returns 0 if
+    the object has no FLUID DOMAIN modifier (caller should treat 0 as 'unknown').
+    """
+    if domain_obj:
+        for mod in domain_obj.modifiers:
+            if mod.type == 'FLUID' and mod.fluid_type == 'DOMAIN':
+                return mod.domain_settings.resolution_max
+    return 0
+
+
 def export_batch(context):
     """
     Prepare all batch job files and write the Windows .bat launcher.
@@ -687,7 +701,7 @@ def export_batch(context):
             "use_placeholders": s.use_placeholders,
             "use_existing_cache": s.use_existing_cache or s.use_placeholders,
             "maintain_density": s.maintain_density,
-            "density_base_resolution": expand_param(s, "resolution")[0],
+            "density_base_resolution": _blend_domain_resolution(s.domain_obj),
             "collect_crash_logs":      s.collect_crash_logs,
             "collect_estimation_data": s.collect_estimation_data,
             "log_path":       log_path,
