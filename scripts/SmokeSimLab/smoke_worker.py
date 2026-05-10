@@ -401,7 +401,12 @@ if use_existing_cache:
         for candidate in candidates:
             has_files = False
             for _root, _dirs, files in os.walk(candidate):
-                if any(f.endswith('.vdb') or f.endswith('.uni') for f in files):
+                # Require frame-numbered data files, not just config/meta .uni files.
+                # Mantaflow creates config .uni files immediately on domain init;
+                # those match .endswith('.uni') but not '_\d+\.(vdb|uni)$'.
+                # Using the same regex as the frame-counting walk ensures a candidate
+                # is only accepted when it has actual simulation frame data.
+                if any(re.search(r'_\d+\.(vdb|uni)$', f) for f in files):
                     has_files = True
                     break
             if has_files:

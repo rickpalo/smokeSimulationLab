@@ -8,32 +8,28 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
-## TODO-2: Retry job does not find partial bake cache from crashed job
+## ~~TODO-2~~: Retry job does not find partial bake cache — **DONE** (v0.2.3)
 
-**Observed behaviour:**  
-A job crashed approximately halfway through baking.  The crash was correctly
-detected and the `.crashed` marker was written.  When the batch was retried
-(`auto_retry_failed` or manual retry), the retry job reported no existing cache
-and started a full rebake from frame 1, discarding the ~50% already baked.
+**Root cause (confirmed from job_0000_retry.log):**  
+The `has_files` candidate check used `f.endswith('.vdb') or f.endswith('.uni')`,
+which matches Mantaflow's config/metadata `.uni` files (e.g. `fluidsimulation.uni`)
+that are created immediately on domain init — before any simulation frames are
+baked.  A candidate directory with only config files passed `has_files = True`,
+was selected as the effective cache dir, then produced empty `baked_frames` in
+the frame-counting walk (those config files don't match `_\d+\.(vdb|uni)$`).
+The code then fell into the full-rebake else-branch, switched back to the job's
+own cache dir, called `bpy.ops.fluid.free_all()`, and **destroyed the complete
+cache** before rebaking from scratch.
 
-**Expected behaviour:**  
-The retry should detect the partial VDB cache and resume baking from the last
-good frame (this is what `use_existing_cache=True` + `cache_resumable=True`
-is designed to do).
+For job_0000 specifically: the bake was complete when it crashed (crash was on
+render frame 0302). The `_0000` cache had all 500 VDB frames, but the retry
+found `_0030` (config files only), fell through to full rebake, freed `_0000`,
+and rebaked all 500 frames unnecessarily.
 
-**Likely root causes to investigate:**
-1. Cache directory name mismatch between the original job and the retry job —
-   `make_name()` appends a run index; if the retry produces a different name
-   the cache lookup misses entirely.
-2. The worker's cache completeness check uses `frame_start`…`frame_end`; if the
-   crash left the cache directory in a partially-written state the check may
-   return "no cache" rather than "partial cache".
-3. Confirm `d.cache_resumable = True` is actually being set before `bake_all()`
-   on the retry path (check worker log for the "Resumable cache enabled" line).
-
-**Files to investigate:** `scripts/SmokeSimLab/smoke_worker.py` (bake logic,
-cache completeness check), `scripts/SmokeSimLab/__init__.py` (`make_name`,
-`SMOKE_OT_retry_failed`).
+**Fix:** Changed the `has_files` check to use the same frame-number regex as
+the frame-counting walk (`re.search(r'_\d+\.(vdb|uni)$', f)`), so config-only
+directories are skipped and only candidates with actual simulation frame data
+are accepted.
 
 ---
 
