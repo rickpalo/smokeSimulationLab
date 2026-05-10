@@ -164,6 +164,27 @@ def analyze(perf_path):
     _report("render_secs_per_pixel_frame", cycles_rates,
             "_RENDER_RATE_CYCLES_PER_PIXEL_FRAME")
 
+    cycles_detail = [
+        r for r in records
+        if _engine_group(r.get("render_engine")) == "CYCLES"
+        and r.get("render_secs_per_pixel_frame") is not None
+        and r.get("render_seconds") is not None
+        and r.get("frames_rendered", 0) > 0
+    ]
+    if cycles_detail and cycles_rates:
+        k = _mean(cycles_rates)
+        print(f"  {'Job':<40} {'Actual':>10} {'Predicted':>10} {'Error%':>8}")
+        print(f"  {'-'*40} {'-'*10} {'-'*10} {'-'*8}")
+        for r in cycles_detail:
+            pixels   = r.get("render_width", 0) * r.get("render_height", 0)
+            frames   = r.get("frames_rendered", 0)
+            actual   = r["render_seconds"]
+            pred     = k * pixels * frames
+            err_pct  = (actual - pred) / pred * 100 if pred else 0
+            name     = r.get("job_name", "?")[:40]
+            print(f"  {name:<40} {actual:>10.1f} {pred:>10.1f} {err_pct:>+8.1f}%")
+        print()
+
     # ------------------------------------------------------------------
     # Render scaling — EEVEE
     # ------------------------------------------------------------------
@@ -178,6 +199,27 @@ def analyze(perf_path):
     print("RENDER (EEVEE)  —  render_time ≈ K × width × height × frames")
     _report("render_secs_per_pixel_frame", eevee_rates,
             "_RENDER_RATE_EEVEE_PER_PIXEL_FRAME")
+
+    eevee_detail = [
+        r for r in records
+        if _engine_group(r.get("render_engine")) == "EEVEE"
+        and r.get("render_secs_per_pixel_frame") is not None
+        and r.get("render_seconds") is not None
+        and r.get("frames_rendered", 0) > 0
+    ]
+    if eevee_detail and eevee_rates:
+        k = _mean(eevee_rates)
+        print(f"  {'Job':<40} {'Actual':>10} {'Predicted':>10} {'Error%':>8}")
+        print(f"  {'-'*40} {'-'*10} {'-'*10} {'-'*8}")
+        for r in eevee_detail:
+            pixels   = r.get("render_width", 0) * r.get("render_height", 0)
+            frames   = r.get("frames_rendered", 0)
+            actual   = r["render_seconds"]
+            pred     = k * pixels * frames
+            err_pct  = (actual - pred) / pred * 100 if pred else 0
+            name     = r.get("job_name", "?")[:40]
+            print(f"  {name:<40} {actual:>10.1f} {pred:>10.1f} {err_pct:>+8.1f}%")
+        print()
 
     # ------------------------------------------------------------------
     # Raw record summary

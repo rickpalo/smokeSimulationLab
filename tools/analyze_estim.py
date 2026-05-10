@@ -194,7 +194,7 @@ def _section_bake_rt(ev):
     for rt, act in paired:
         rt_proj = rt.get("est_total_rt_secs")
         actual  = act.get("actual_secs")
-        if rt_proj and actual:
+        if rt_proj is not None and actual is not None and rt_proj > 0:
             err = _pct_err(actual, rt_proj)
             pct_errs.append(err)
             fb   = rt.get("frames_baked", "?")
@@ -276,7 +276,7 @@ def _section_render_rt(ev, engine):
     for rt, act in paired:
         rt_proj = rt.get("est_total_rt_secs")
         actual  = act.get("actual_secs")
-        if rt_proj and actual:
+        if rt_proj is not None and actual is not None and rt_proj > 0:
             err = _pct_err(actual, rt_proj)
             pct_errs.append(err)
             fb   = rt.get("frames_rendered","?")

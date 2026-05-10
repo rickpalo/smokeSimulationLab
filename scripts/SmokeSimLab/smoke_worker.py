@@ -269,8 +269,24 @@ use_placeholders   = cfg.get("use_placeholders", False)
 use_existing_cache = cfg.get("use_existing_cache", False)
 
 # Emitter densities pre-computed at export time: {object_name: scaled_density}
-emitter_densities = cfg.get("emitter_densities", {})
-collect_estimation_data  = cfg.get("collect_estimation_data", False)
+emitter_densities       = cfg.get("emitter_densities", {})
+collect_estimation_data = cfg.get("collect_estimation_data", False)
+collect_debug_log       = cfg.get("collect_debug_log", False)
+
+_debug_out = os.path.join(output_path, "debug_log.txt")
+
+def _dlog(msg):
+    """Append one timestamped line to debug_log.txt. No-op when flag is off."""
+    if not collect_debug_log:
+        return
+    ts   = _time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts}  [worker/{name}]  {msg}"
+    _log(line)
+    try:
+        with open(_debug_out, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
 
 render_dir = os.path.join(output_path, "Renders")
 cache_dir  = os.path.join(output_path, "Cache", name)
@@ -278,6 +294,7 @@ os.makedirs(render_dir, exist_ok=True)
 os.makedirs(cache_dir,  exist_ok=True)
 
 _log(f"[{name}] Job started.")
+_dlog(f"cfg: {cfg}")
 _log(f"[{name}] Cache dir: {cache_dir}")
 _log(f"[{name}] Render dir: {render_dir}")
 _log(f"[{name}] Render mode: {render_mode}")
@@ -286,6 +303,7 @@ _log(f"[{name}] Render mode: {render_mode}")
 # Locate domain object and fluid modifier
 # ---------------------------------------------------------------------------
 
+_dlog(f"objects in scene: {[o.name for o in bpy.data.objects]}")
 obj = bpy.data.objects.get(domain_name)
 if not obj:
     _log(f'ERROR: object "{domain_name}" not found in scene')
@@ -296,6 +314,7 @@ if not mod:
     _log(f'ERROR: no Fluid modifier (type FLUID) on "{domain_name}" '
          f'(modifiers found: {[m.name for m in obj.modifiers]})')
     sys.exit(1)
+_dlog(f"domain: {domain_name}  res={obj.modifiers[0].domain_settings.resolution_max if mod else '?'}  cache_dir={cache_dir}")
 
 d = mod.domain_settings
 
@@ -423,6 +442,8 @@ if not baked_frames and _all_cache_files:
          f"frame-number pattern — first few: {_all_cache_files[:5]}")
 
 bake_complete = all(f in baked_frames for f in range(frame_start, frame_end + 1))
+_dlog(f"cache check: effective_cache_dir={effective_cache_dir!r}  "
+      f"baked_frames={len(baked_frames)}  bake_complete={bake_complete}")
 
 # rebaked_frames: frame numbers whose cache was RECOMPUTED this run.
 # Existing renders for these frames must NOT be used as placeholders, because
@@ -560,7 +581,8 @@ if use_placeholders:
 frames_actually_rendered = len(frames_to_render)
 render_seconds = 0.0
 if frames_to_render:
-    _log(f"[{name}] Rendering animation ({len(frames_to_render)} frame(s)) -> {effective_frames_dir}")
+    _dlog(f"render start: engine={render_mode}  frames={len(frames_to_render)}  dir={effective_frames_dir!r}")
+_log(f"[{name}] Rendering animation ({len(frames_to_render)} frame(s)) -> {effective_frames_dir}")
     render_start = _time.time()
     for frame_num in sorted(frames_to_render):
         scene.frame_set(frame_num)
@@ -693,6 +715,7 @@ if collect_estimation_data:
 # Exit
 # ---------------------------------------------------------------------------
 
+_dlog(f"exit: bake_seconds={bake_seconds:.1f}  render_seconds={render_seconds:.1f}  frames_rendered={frames_actually_rendered}")
 _log(f"[{name}] Exiting Blender.")
 _close_log()
 bpy.ops.wm.quit_blender()

@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 0),
+    "version":     (0, 2, 2),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -646,6 +646,7 @@ def export_batch(context):
         frame_end   = s.sim_frame_end
     python_exe  = sys.executable   # Blender's bundled Python — always on disk, no PATH needed
     jobs        = list(generate_jobs(s))
+    jobs.sort(key=lambda p: p.get("resolution", 0))
 
     # ── Pre-compute per-job emitter densities (done once, not in the worker) ──
     # Read every FLOW emitter's current density from the scene, then for each
@@ -691,17 +692,22 @@ def export_batch(context):
         "",
     ]
 
+    _dbg = s.collect_debug_log
+    _debug_log(_dbg, output_path, "addon",
+               f"export_batch: {len(jobs)} job(s)  blend={bpy.data.filepath!r}  "
+               f"out={output_path!r}  bpy={bpy.app.version_string}")
+
     # ── Seed the Job Log list (one row per job, status=NOT_STARTED) ─────────
     s.job_log_items.clear()
     for i, p in enumerate(jobs):
-        _item = s.job_log_items.add()
-        _item.job_number = i + 1
-        _item.job_name   = make_name(p, i)
-        _item.status     = 'NOT_STARTED'
+        _log_row = s.job_log_items.add()
+        _log_row.job_number = i + 1
+        _log_row.job_name   = make_name(p, i)
+        _log_row.status     = 'NOT_STARTED'
 
     # ── Write one JSON + one .bat entry per job ──────────────────────────────
     for i, p in enumerate(jobs):
-        name      = make_name(p, i)
+        name      = make_name(p, i)  # computed once; reused in log row + JSON
         job_path  = os.path.join(jobs_dir, f"job_{i:04d}.json")
         log_path  = os.path.join(jobs_dir, f"job_{i:04d}.log")
         done_path = os.path.join(jobs_dir, f"job_{i:04d}.done")
@@ -727,6 +733,7 @@ def export_batch(context):
             } if _base_densities else {},
             "collect_crash_logs":      s.collect_crash_logs,
             "collect_estimation_data": s.collect_estimation_data,
+            "collect_debug_log":       s.collect_debug_log,
             "log_path":       log_path,
             "text_objects": {
                 "resolution": s.text_resolution,
@@ -738,6 +745,7 @@ def export_batch(context):
 
         with open(job_path, "w") as fh:
             json.dump(job_data, fh, indent=2)
+        _debug_log(_dbg, output_path, "addon", f"job {i}: {name}  params={p}")
 
         # smoke_launcher.py wraps Blender, detects crash dialogs (WerFault),
         # saves crash logs, and exits non-zero so the batch marks the job failed.
@@ -1207,8 +1215,9 @@ class SmokeSettings(bpy.types.PropertyGroup):
         default=False,
         description="Expand or collapse the Job Log section",
     )
-    job_log_items: bpy.props.CollectionProperty(type=SmokeJobItem)
-    job_log_index: bpy.props.IntProperty(default=0)
+    job_log_items:       bpy.props.CollectionProperty(type=SmokeJobItem)
+    job_log_index:       bpy.props.IntProperty(default=0)
+    job_log_auto_scroll: bpy.props.BoolProperty(default=True)
 
     # ── Utilities ─────────────────────────────────────────────────────────────
 
@@ -1229,6 +1238,15 @@ class SmokeSettings(bpy.types.PropertyGroup):
         description=(
             "Write estim_log.jsonl (timing estimates vs actuals) and perf_log.json "
             "(per-job bake/render rates). Disable when not actively calibrating estimates"
+        ),
+        default=False,
+    )
+    collect_debug_log: bpy.props.BoolProperty(
+        name="Collect Debug Log",
+        description=(
+            "Write verbose diagnostic info to debug_log.txt in the output folder. "
+            "Enable when investigating problems on a new machine. "
+            "Nothing is written unless this checkbox is checked"
         ),
         default=False,
     )
@@ -1677,12 +1695,21 @@ def _format_elapsed(secs):
 
 
 def _update_job_log_statuses(s, jobs_dir):
-    """Refresh each SmokeJobItem status by scanning the jobs directory."""
+    """Refresh each SmokeJobItem status and drive auto-scroll."""
+    global _last_auto_index
+
+    # Detect manual scroll: if job_log_index moved since we last wrote it,
+    # the user dragged the list — disable auto-scroll for this run.
+    if s.job_log_auto_scroll and s.job_log_index != _last_auto_index:
+        s.job_log_auto_scroll = False
+
     try:
         all_files = set(os.listdir(jobs_dir))
     except OSError:
         return
-    for item in s.job_log_items:
+
+    active_index = -1
+    for idx, item in enumerate(s.job_log_items):
         n          = f"{item.job_number - 1:04d}"   # job_number is 1-based; filenames are 0-based
         retry_done = f"job_{n}_retry.done"
         first_done = f"job_{n}.done"
@@ -1700,11 +1727,19 @@ def _update_job_log_statuses(s, jobs_dir):
             item.status = 'FAILED' if _has_error(retry_done) else 'COMPLETE'
         elif retry_log in all_files:
             item.status = 'RETRYING'
+            if active_index < 0:
+                active_index = idx
         elif first_done in all_files:
             item.status = 'FAILED' if _has_error(first_done) else 'COMPLETE'
         elif first_log in all_files:
             item.status = 'IN_PROGRESS'
+            if active_index < 0:
+                active_index = idx
         # else: leave as NOT_STARTED
+
+    if s.job_log_auto_scroll and active_index >= 0:
+        s.job_log_index  = active_index
+        _last_auto_index = active_index
 
 
 def _compute_batch_summary(jobs_dir, elapsed_secs):
@@ -1752,6 +1787,9 @@ def _compute_batch_summary(jobs_dir, elapsed_secs):
 
 
 # ---------------------------------------------------------------------------
+# Job log auto-scroll: last index the timer wrote, so we can detect manual scrolls.
+_last_auto_index: int = 0
+
 # Estimation log — append-only JSONL diagnostic file
 # ---------------------------------------------------------------------------
 
@@ -1774,6 +1812,23 @@ _estim: dict = {
     "still_done_logged":   False,
     "job_done_logged":     False,
 }
+
+
+def _debug_log(enabled: bool, output_path: str, component: str, msg: str) -> None:
+    """Append one timestamped line to <output_path>/debug_log.txt.
+
+    The gate is inside this function: nothing is written — and the file is
+    never created — unless enabled is True.
+    """
+    if not enabled or not output_path:
+        return
+    ts   = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts}  [{component}]  {msg}"
+    try:
+        with open(os.path.join(output_path, "debug_log.txt"), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
 
 
 def _estim_log(record: dict) -> None:
@@ -2165,22 +2220,25 @@ def _poll_batch_progress():
             if s.batch_bake_secs_actual >= 0:
                 bake_remaining = 0.0
             elif s.batch_bake_start_time > 0 and frames_baked > 0:
-                elapsed_bake   = now - s.batch_bake_start_time
-                rate           = elapsed_bake / frames_baked
-                bake_remaining = rate * max(frame_end - frames_baked, 0)
-                if not _estim["bake_rt_logged"]:
-                    _estim["bake_rt_logged"] = True
-                    _estim_log({
-                        "event":              "bake_rt",
-                        "job":                _estim["job_name"],
-                        "frames_baked":       frames_baked,
-                        "total_frames":       frame_end,
-                        "elapsed_bake_secs":  round(elapsed_bake, 1),
-                        "rate_secs_per_frame": round(rate, 4),
-                        "est_remaining_secs": round(bake_remaining, 1),
-                        "est_total_rt_secs":  round(elapsed_bake + bake_remaining, 1),
-                        "default_est_secs":   _estim["est_bake_0"],
-                    })
+                elapsed_bake = max(now - s.batch_bake_start_time, 0.0)
+                if elapsed_bake > 0:
+                    rate           = elapsed_bake / frames_baked
+                    bake_remaining = rate * max(frame_end - frames_baked, 0)
+                    if not _estim["bake_rt_logged"]:
+                        _estim["bake_rt_logged"] = True
+                        _estim_log({
+                            "event":              "bake_rt",
+                            "job":                _estim["job_name"],
+                            "frames_baked":       frames_baked,
+                            "total_frames":       frame_end,
+                            "elapsed_bake_secs":  round(elapsed_bake, 1),
+                            "rate_secs_per_frame": round(rate, 4),
+                            "est_remaining_secs": round(bake_remaining, 1),
+                            "est_total_rt_secs":  round(elapsed_bake + bake_remaining, 1),
+                            "default_est_secs":   _estim["est_bake_0"],
+                        })
+                else:
+                    bake_remaining = default_bake_secs
             else:
                 bake_remaining = default_bake_secs
 
@@ -2191,22 +2249,27 @@ def _poll_batch_progress():
             if s.batch_render_secs_actual >= 0:
                 render_remaining = 0.0
             elif s.batch_render_start_time > 0 and 0 < frames_rendered < render_target:
-                elapsed_render   = now - s.batch_render_start_time
-                rate             = elapsed_render / frames_rendered
-                render_remaining = rate * max(render_target - frames_rendered, 0)
-                if not _estim["render_rt_logged"]:
-                    _estim["render_rt_logged"] = True
-                    _estim_log({
-                        "event":                "render_rt",
-                        "job":                  _estim["job_name"],
-                        "frames_rendered":      frames_rendered,
-                        "total_frames":         render_target,
-                        "elapsed_render_secs":  round(elapsed_render, 1),
-                        "rate_secs_per_frame":  round(rate, 4),
-                        "est_remaining_secs":   round(render_remaining, 1),
-                        "est_total_rt_secs":    round(elapsed_render + render_remaining, 1),
-                        "default_est_secs":     _estim["est_render_0"],
-                    })
+                elapsed_render = max(now - s.batch_render_start_time, 0.0)
+                if elapsed_render > 0:
+                    rate             = elapsed_render / frames_rendered
+                    render_remaining = rate * max(render_target - frames_rendered, 0)
+                    if not _estim["render_rt_logged"]:
+                        _estim["render_rt_logged"] = True
+                        _estim_log({
+                            "event":                "render_rt",
+                            "job":                  _estim["job_name"],
+                            "frames_rendered":      frames_rendered,
+                            "total_frames":         render_target,
+                            "elapsed_render_secs":  round(elapsed_render, 1),
+                            "rate_secs_per_frame":  round(rate, 4),
+                            "est_remaining_secs":   round(render_remaining, 1),
+                            "est_total_rt_secs":    round(elapsed_render + render_remaining, 1),
+                            "default_est_secs":     _estim["est_render_0"],
+                        })
+                else:
+                    render_remaining = max(default_render_secs - (
+                        now - s.batch_render_start_time
+                        if s.batch_render_start_time > 0 else 0.0), 0.0)
             else:
                 render_remaining = max(default_render_secs - (
                     now - s.batch_render_start_time
@@ -2356,9 +2419,12 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
                     except OSError:
                         pass
 
+        global _last_auto_index
         s.batch_summary_line1 = s.batch_summary_line2 = ""
         s.batch_summary_line3 = s.batch_summary_line4 = ""
-        s.show_job_log        = True
+        s.show_job_log           = True
+        s.job_log_auto_scroll    = True
+        _last_auto_index         = 0
         for _it in s.job_log_items:
             _it.status = 'NOT_STARTED'
         s.batch_total          = len(job_files)
@@ -2541,8 +2607,11 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
                           if f.endswith(".json") and "_retry" not in f])
         done_now   = len([f for f in os.listdir(jobs_dir) if f.endswith(".done")])
 
+        global _last_auto_index
         s.batch_summary_line1 = s.batch_summary_line2 = ""
         s.batch_summary_line3 = s.batch_summary_line4 = ""
+        s.job_log_auto_scroll  = True
+        _last_auto_index       = 0
         s.batch_total          = total_jobs
         s.batch_jobs_dir       = jobs_dir
         s.batch_progress       = f"{done_now} of {total_jobs} job(s) complete"
@@ -3074,24 +3143,25 @@ class SMOKE_PT_panel(bpy.types.Panel):
 
         layout.separator()
 
-        # ── Job Log (collapsible, default collapsed, auto-expands on Run Batch) ──
-        box_log = layout.box()
-        row_log = box_log.row()
-        row_log.prop(s, "show_job_log",
-                     icon='TRIA_DOWN' if s.show_job_log else 'TRIA_RIGHT',
-                     emboss=False, text="")
-        row_log.label(text="Job Log")
-        if s.show_job_log and s.job_log_items:
-            hdr = box_log.row()
-            hdr.label(text="", icon='BLANK1')
-            hdr.label(text="#")
-            hdr.label(text="Job Name")
-            box_log.template_list(
-                "SMOKE_UL_job_log", "",
-                s, "job_log_items",
-                s, "job_log_index",
-                rows=min(len(s.job_log_items), 8),
-            )
+        # ── Job Log (only shown once populated; auto-expands on Run Batch) ──────
+        if s.job_log_items:
+            box_log = layout.box()
+            row_log = box_log.row()
+            row_log.prop(s, "show_job_log",
+                         icon='TRIA_DOWN' if s.show_job_log else 'TRIA_RIGHT',
+                         emboss=False, text="")
+            row_log.label(text="Job Log")
+            if s.show_job_log:
+                hdr = box_log.row()
+                hdr.label(text="", icon='BLANK1')
+                hdr.label(text="#")
+                hdr.label(text="Job Name")
+                box_log.template_list(
+                    "SMOKE_UL_job_log", "",
+                    s, "job_log_items",
+                    s, "job_log_index",
+                    rows=min(len(s.job_log_items), 8),
+                )
 
         layout.separator()
 
@@ -3105,6 +3175,7 @@ class SMOKE_PT_panel(bpy.types.Panel):
         if s.show_utilities:
             box_util.prop(s, "collect_crash_logs")
             box_util.prop(s, "collect_estimation_data")
+            box_util.prop(s, "collect_debug_log")
 
 
 # ---------------------------------------------------------------------------
@@ -3186,8 +3257,10 @@ def _reset_on_load(dummy=None):
         s.last_export_info     = ""
         s.batch_summary_line1 = s.batch_summary_line2 = ""
         s.batch_summary_line3 = s.batch_summary_line4 = ""
-        s.batch_progress       = ""
-        s.show_job_log         = False
+        s.batch_progress         = ""
+        s.show_job_log           = False
+        s.job_log_auto_scroll    = True
+        s.collect_debug_log      = False
         s.job_log_items.clear()
         s.batch_total          = 0
         s.batch_jobs_dir       = ""

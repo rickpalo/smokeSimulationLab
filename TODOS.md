@@ -4,30 +4,7 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
-## TODO-1: Crash log written to jobs folder (gets deleted on next export)
-
-**Current behaviour:**  
-`smoke_launcher.py` copies `%TEMP%\blender.crash.txt` into  
-`<output_path>/jobs/<job_stem>_crash_<YYYYMMDD_HHMMSS>.txt`
-
-**Problem:**  
-The `jobs/` directory is wiped by `export_batch` before every run, so crash logs
-from earlier batches are silently lost.
-
-**Desired behaviour:**  
-- Single append-only file at `<output_path>/crash_log.txt` (survives re-exports).
-- Each crash appends a dated header block followed by the contents of
-  `blender.crash.txt`, e.g.:
-
-```
-=== 2026-05-06 14:23:11  job_0003_res128_v1.0_a1.0 ===
-<contents of blender.crash.txt>
-```
-
-- Still write the per-job `<job_stem>.crashed` marker in `jobs/` (used by the
-  batch runner to detect failures) — that file is intentionally ephemeral.
-
-**Files to change:** `scripts/SmokeSimLab/smoke_launcher.py` (`_save_crash_log`).
+## ~~TODO-1~~: Crash log written to jobs folder — **DONE** (already implemented in launcher)
 
 ---
 
@@ -60,55 +37,82 @@ cache completeness check), `scripts/SmokeSimLab/__init__.py` (`make_name`,
 
 ---
 
-## TODO-3: "Utilities" collapsible section at bottom of panel
-
-**Desired behaviour:**  
-Add a new collapsible box at the very bottom of `SMOKE_PT_panel.draw`, below all
-existing sections, labelled **Utilities**.  Default collapsed.
-
-Inside the expanded section, two checkboxes (both default `False`):
-
-| Property | Label | Behaviour |
-|---|---|---|
-| `collect_crash_logs` | Collect crash logs | When checked, `smoke_launcher.py` writes the append-only `crash_log.txt` (see TODO-1). When unchecked, crash logging is skipped. |
-| `collect_estimation_data` | Collect estimation data | When checked, the polling timer writes `estim_log.jsonl` (already implemented). When unchecked, `_estim_log` is a no-op. Also controls whether `perf_log.json` is written by the worker. |
-
-**Implementation notes:**
-- Add `collect_crash_logs: bpy.props.BoolProperty(default=False)` and
-  `collect_estimation_data: bpy.props.BoolProperty(default=False)` to
-  `SmokeSettings`.
-- Pass `collect_crash_logs` in the job JSON so `smoke_launcher.py` can read it.
-- Pass `collect_estimation_data` in the job JSON so `smoke_worker.py` can gate
-  `perf_log.json` writes.
-- Gate `_estim_log` writes in `_poll_batch_progress` on
-  `s.collect_estimation_data`.
-- The `show_utilities` BoolProperty drives the collapsible header (same pattern
-  as `show_setup`, `show_sim_params`, etc.).
-
-**Files to change:** `scripts/SmokeSimLab/__init__.py` (properties + panel draw
-+ polling gate), `scripts/SmokeSimLab/smoke_launcher.py` (crash log gate),
-`scripts/SmokeSimLab/smoke_worker.py` (perf_log gate).
+## ~~TODO-3~~: "Utilities" collapsible section — **DONE** (implemented in v0.1.x)
 
 ---
 
-## TODO-4: Update default parameter values
+## ~~TODO-4~~: Hide Job Log section when not populated — **DONE** (v0.2.0)
 
-Change the `default=` values on the following `SmokeSettings` properties in
-`scripts/SmokeSimLab/__init__.py`:
+---
 
-| Property | New default |
-|---|---|
-| `resolution` | `64` |
-| `buoyancy_density` | `1.0` |
-| `heat` | `1.0` |
-| `vorticity` | `0.0` |
-| `dissolve_speed` (or equivalent dissolve frames property) | `5` |
-| `upres` | `2` |
-| `noise_strength` | `2.0` |
-| `noise_scale` | `2.0` |
+## TODO-5: Job Log row goes blank after scrolling or job start
 
-**Note:** Verify the exact property names against `SmokeSettings` in `__init__.py`
-before changing — the table above uses likely names, not confirmed names.
+**Observed behaviour:**  
+Job 1 is visible immediately after the job log is populated (Export Batch).
+After either (a) scrolling the list to the bottom, or (b) the first job starts
+running, the row for job 1 becomes blank (empty job number and name).
 
-**Files to change:** `scripts/SmokeSimLab/__init__.py` (`SmokeSettings` property
-declarations).
+**Suspected causes (investigate in order):**
+
+1. **`job_log_index` scroll interaction** — Blender's `template_list` tracks the
+   active-item index in `job_log_index` (default 0 → item 0 = job 1).  When the
+   user scrolls the viewport, Blender may advance `job_log_index` to keep it
+   within the visible window, leaving item 0 "selected but off-screen."  If the
+   list then redraws before the scroll settles, item 0 can flicker blank.
+   *Try*: initialise `job_log_index = -1` (or 0 but with a guard in `draw_item`)
+   so no item starts selected.
+
+2. **Timer–draw race condition** — `_update_job_log_statuses` is called from the
+   poll timer (a background thread context).  Writing to a `CollectionProperty`
+   item's properties while Blender is mid-draw can cause a partial RNA
+   invalidation; the item is still present but its `job_number` / `job_name`
+   StringProperty/IntProperty values read as defaults (0 / "").
+   *Try*: guard the poll call with `_redraw_panels()` only *after* all item
+   writes are complete, and confirm the writes are atomic from Blender's
+   perspective.
+
+3. **`_item` name shadowing in `export_batch`** — the seed loop uses the local
+   name `_item` for each `job_log_items.add()` result.  After the loop exits,
+   `_item` still references the last item added.  If any later code in
+   `export_batch` accidentally reassigns or clears through `_item`, item 0
+   could be corrupted.  *Try*: rename the loop variable to `_log_row` to avoid
+   any ambiguity.
+
+4. **`make_name` differs between seed loop and job loop** — the seed loop and the
+   per-job JSON loop both call `make_name(p, i)` independently.  If `make_name`
+   is non-deterministic (e.g. depends on mutable state), the stored name may not
+   match.  *Try*: compute `name = make_name(p, i)` once per iteration and reuse
+   it in both places.
+
+**Recommended first step:**  
+Add `print(f"draw_item: job_number={item.job_number!r} job_name={item.job_name!r}")` at the top of `SMOKE_UL_job_log.draw_item` and reproduce; if the blank row prints `job_number=0, job_name=''`, the item's properties are genuinely zeroed (cause 2 or 3).  If the row is never printed at all, the item is scrolled out of the viewport (cause 1).
+
+**Files to investigate:** `scripts/SmokeSimLab/__init__.py`
+(`export_batch` seed loop, `_update_job_log_statuses`, `SMOKE_UL_job_log.draw_item`, `SMOKE_PT_panel.draw` `template_list` call).
+
+---
+
+## ~~TODO-6~~: Auto-scroll Job Log — **DONE** (v0.2.2)
+
+---
+
+## ~~TODO-7~~: Update default parameter values — **DONE** (all defaults were already correct)
+
+---
+
+## ~~TODO-8~~: Fix negative/zero RT_proj values — **DONE** (v0.2.1)
+
+---
+
+## ~~TODO-9~~: Sort exported jobs by resolution ascending — **DONE** (v0.2.1)
+
+---
+
+## ~~TODO-9~~: analyze_perf.py render tables — **DONE** (v0.2.1)
+
+---
+
+## ~~TODO-10~~: Debug log — **DONE** (v0.2.2)
+
+---
+

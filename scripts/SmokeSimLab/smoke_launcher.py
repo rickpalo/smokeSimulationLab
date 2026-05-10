@@ -144,6 +144,21 @@ def main():
     output_path        = job_data.get("output_path", "")
     log_path           = job_data.get("log_path", "")
     collect_crash_logs = job_data.get("collect_crash_logs", False)
+    collect_debug_log  = job_data.get("collect_debug_log", False)
+
+    _debug_out = os.path.join(output_path, "debug_log.txt") if output_path else ""
+
+    def _dlog(msg):
+        """Append one timestamped line to debug_log.txt. No-op when flag is off."""
+        ts   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"{ts}  [launcher/{job_stem}]  {msg}"
+        print(line)
+        if collect_debug_log and _debug_out:
+            try:
+                with open(_debug_out, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+            except OSError:
+                pass
 
     # smoke_worker.py is exported to output_path alongside run_smoke_batch.bat
     worker_py = os.path.join(output_path, "smoke_worker.py")
@@ -163,6 +178,9 @@ def main():
                "--python", worker_py,
                "--", job_json]
 
+    _dlog(f"startup: python={sys.version.split()[0]}  platform={sys.platform}  "
+          f"blender_exe={blender_exe!r}  job_json={job_json!r}")
+    _dlog(f"cmd: {cmd}")
     print(f"[smoke_launcher] Starting job {job_stem}")
 
     # Suppress the WerFault crash dialog before spawning Blender.
@@ -211,6 +229,7 @@ def main():
                 elif stale_since is not None:
                     idle_secs = time.time() - stale_since
                     if idle_secs >= _STALE_LOG_TIMEOUT:
+                        _dlog(f"stale watchdog: idle={int(idle_secs)}s  threshold={_STALE_LOG_TIMEOUT}s")
                         print(f"[smoke_launcher] No log activity for "
                               f"{int(idle_secs)}s — killing stuck job {job_stem}")
                         if collect_crash_logs:
@@ -252,9 +271,11 @@ def main():
         if collect_crash_logs:
             _save_crash_log(jobs_dir, job_stem)
         _write_crashed_marker(jobs_dir, job_stem)
+        _dlog(f"exit: CRASHED  exit_code={exit_code}")
         print(f"[smoke_launcher] Job {job_stem} CRASHED (exit {exit_code})")
         sys.exit(1)
 
+    _dlog(f"exit: OK  exit_code=0")
     print(f"[smoke_launcher] Job {job_stem} OK")
     sys.exit(0)
 
