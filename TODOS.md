@@ -112,3 +112,27 @@ Add `print(f"draw_item: job_number={item.job_number!r} job_name={item.job_name!r
 
 ---
 
+## ~~TODO-11~~: Settings dropdown shows stale name on load — **DONE** (v0.2.4)
+
+**Observed behaviour:**  
+When the .blend file (and addon) first loads, the settings preset dropdown shows
+a `.smokesettings` filename, but the settings displayed in the panel are from
+the blend file — not re-loaded from that preset file.  The dropdown should be
+blank on load; a name should only appear after the user explicitly loads or saves
+a preset.
+
+**Root cause:**  
+`_reset_on_load` clears `settings_file_path` and `settings_snapshot` but never
+resets `settings_file_enum`.  Blender restores the saved `EnumProperty` value
+(e.g. "default") from the blend file, but the `_on_settings_enum_update`
+callback does **not** fire during RNA restoration on file load — so the dropdown
+shows the old name while the settings remain whatever is stored in the blend
+file.
+
+**Fix:** Added `s.settings_file_enum = ""` to `_reset_on_load`, immediately
+after the other `settings_*` clears.  The update callback fires but returns
+immediately (stem is empty), leaving the dropdown blank and the in-blend
+settings untouched.
+
+---
+

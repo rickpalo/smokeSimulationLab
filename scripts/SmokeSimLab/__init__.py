@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 3),
+    "version":     (0, 2, 4),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -3242,6 +3242,7 @@ def _reset_on_load(dummy=None):
         s.settings_file_path   = ""
         s.settings_search_path = ""
         s.settings_snapshot    = ""
+        s.settings_file_enum   = ""
         s.render_samples       = 16
         s.maintain_density     = False
 
