@@ -136,6 +136,42 @@ Add `print(f"draw_item: job_number={item.job_number!r} job_name={item.job_name!r
 
 ---
 
+## ~~TODO-15~~: "Remove All Jobs" button in Utilities section — **DONE** (v0.2.6)
+
+New operator `SMOKE_OT_remove_all_jobs` (`bl_idname = "smoke.remove_all_jobs"`).
+`invoke()` shows a confirmation dialog before deleting anything.  Deletes the
+`jobs/` folder (with `shutil.rmtree` → per-file fallback on `PermissionError`),
+`run_smoke_batch.bat`, `smoke_worker.py`, and `smoke_launcher.py` from
+`output_path`.  Clears all job-log and batch-progress state; stops the poll timer.
+Leaves `domain_obj`, `output_path`, and all simulation parameters untouched.
+Button appears in the Utilities section with a `TRASH` icon.
+
+---
+
+## ~~TODO-16~~: Reliable crash-dialog suppression — **DONE** (v0.2.6)
+
+`SEM_NOGPFAULTERRORBOX` was unreliable because Blender resets the process error
+mode during startup, and it does not cover `WerFaultSecure.exe`.  The previous
+post-exit WerFault poll also covered only 3 seconds.  `collect_crash_logs`
+defaulted to `False` and was reset by `_reset_on_load`, so `crash_log.txt` was
+never written in practice.
+
+**Fix:**
+1. `smoke_launcher.py` now creates a Windows Job Object with
+   `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` before spawning Blender and
+   assigns Blender to it immediately after `Popen`.  The Job Object limit cannot
+   be overridden by the child process, so crash dialogs are suppressed at the OS
+   level without relying on inherited error-mode flags.
+2. `_find_werfault_for_pid` now checks both `WerFault.exe` and
+   `WerFaultSecure.exe`.
+3. `_POLL_INTERVAL` reduced from 2.0 s to 0.5 s for faster WerFault detection.
+4. Post-exit WerFault poll extended from 3 s to `_POST_EXIT_WERFAULT_SECS = 30` s.
+5. `_save_crash_log` is now called unconditionally on any non-zero exit (no longer
+   gated on `collect_crash_logs`).
+6. `LAUNCHER_VERSION` bumped to `"0.2.6"`.
+
+---
+
 ## ~~TODO-6~~: Auto-scroll Job Log — **DONE** (v0.2.2)
 
 ---

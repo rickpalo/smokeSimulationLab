@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 5),
+    "version":     (0, 2, 6),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -71,8 +71,8 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.2.5"
-_EXPECTED_LAUNCHER_VERSION = "0.2.5"
+_EXPECTED_WORKER_VERSION   = "0.2.6"
+_EXPECTED_LAUNCHER_VERSION = "0.2.6"
 
 
 def _read_helper_version(path: str, var_name: str) -> str:
@@ -2884,6 +2884,101 @@ class SMOKE_OT_setup_results(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SMOKE_OT_remove_all_jobs(bpy.types.Operator):
+    """Delete all exported jobs and reset batch state (simulation params untouched)."""
+
+    bl_idname      = "smoke.remove_all_jobs"
+    bl_label       = "Remove All Jobs"
+    bl_description = (
+        "Delete the exported jobs/ folder, run_smoke_batch.bat, smoke_worker.py, "
+        "and smoke_launcher.py from the output path, then clear the job log and "
+        "reset all batch progress state.  Simulation parameters are not changed."
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        s           = context.scene.smoke_settings
+        output_path = s.output_path
+
+        # Stop the poll timer before touching any state.
+        if bpy.app.timers.is_registered(_poll_batch_progress):
+            bpy.app.timers.unregister(_poll_batch_progress)
+
+        deleted   = []
+        skipped   = []
+
+        # Delete the jobs/ folder.
+        jobs_dir = os.path.join(output_path, "jobs")
+        if os.path.isdir(jobs_dir):
+            try:
+                shutil.rmtree(jobs_dir)
+                deleted.append("jobs/")
+            except PermissionError:
+                # Fallback: delete files individually.
+                for fname in os.listdir(jobs_dir):
+                    fpath = os.path.join(jobs_dir, fname)
+                    try:
+                        os.remove(fpath)
+                        deleted.append(f"jobs/{fname}")
+                    except OSError as exc:
+                        skipped.append(f"jobs/{fname} ({exc})")
+                try:
+                    os.rmdir(jobs_dir)
+                except OSError:
+                    pass
+
+        # Delete exported helper files and the batch launcher.
+        for fname in ("run_smoke_batch.bat", "smoke_worker.py", "smoke_launcher.py"):
+            fpath = os.path.join(output_path, fname)
+            if os.path.isfile(fpath):
+                try:
+                    os.remove(fpath)
+                    deleted.append(fname)
+                except OSError as exc:
+                    skipped.append(f"{fname} ({exc})")
+
+        # Reset all batch / job-log state (mirrors the relevant part of _reset_on_load).
+        s.last_export_info     = ""
+        s.batch_summary_line1 = s.batch_summary_line2 = ""
+        s.batch_summary_line3 = s.batch_summary_line4 = ""
+        s.batch_progress         = ""
+        s.show_job_log           = False
+        s.job_log_auto_scroll    = True
+        s.job_log_items.clear()
+        s.batch_total            = 0
+        s.batch_jobs_dir         = ""
+        s.batch_overall_factor   = 0.0
+        s.batch_subtask_text     = ""
+        s.batch_subtask_factor   = 0.0
+        s.batch_job_text         = ""
+        s.batch_job_factor       = 0.0
+        s.batch_start_time       = 0.0
+        s.batch_time_remaining   = ""
+        s.batch_job_log_key      = ""
+        s.batch_job_start_time   = 0.0
+        s.batch_frame_end        = 0
+        s.batch_jobs_elapsed     = 0.0
+        s.batch_resolution       = 0
+        s.batch_render_width     = 0
+        s.batch_render_height    = 0
+        s.batch_render_mode      = "CYCLES"
+        s.batch_bake_start_time   = 0.0
+        s.batch_render_start_time = 0.0
+        s.batch_still_start_time  = 0.0
+        s.batch_bake_secs_actual  = -1.0
+        s.batch_render_secs_actual = -1.0
+
+        _redraw_panels()
+
+        if skipped:
+            self.report({'WARNING'}, f"Removed {len(deleted)} item(s); could not remove: {', '.join(skipped)}")
+        else:
+            self.report({'INFO'}, f"Removed {len(deleted)} exported item(s)")
+        return {'FINISHED'}
+
+
 # ---------------------------------------------------------------------------
 # Panel helpers
 # ---------------------------------------------------------------------------
@@ -3265,6 +3360,8 @@ class SMOKE_PT_panel(bpy.types.Panel):
             box_util.prop(s, "collect_crash_logs")
             box_util.prop(s, "collect_estimation_data")
             box_util.prop(s, "collect_debug_log")
+            box_util.separator()
+            box_util.operator("smoke.remove_all_jobs", text="Remove All Jobs", icon='TRASH')
 
 
 # ---------------------------------------------------------------------------
@@ -3422,6 +3519,7 @@ classes = [
     SMOKE_OT_open_docs,
     SMOKE_OT_retry_failed,
     SMOKE_OT_setup_results,
+    SMOKE_OT_remove_all_jobs,
     SMOKE_PT_panel,
 ]
 
