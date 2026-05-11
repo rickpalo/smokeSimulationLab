@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.2.6"
+WORKER_VERSION = "0.2.7"
 
 import bpy
 import sys
@@ -382,42 +382,63 @@ _log(f"[{name}] Text objects updated (pre-bake).")
 # Bake
 # ---------------------------------------------------------------------------
 
-_log(f"[{name}] Setting up cache directory...")
+_log(f"[{name}] --- Cache search ---")
+_log(f"[{name}]   This job's cache dir : {cache_dir}")
+_log(f"[{name}]   use_existing_cache   : {use_existing_cache}")
 
-# Resolve the effective cache directory.  When use_existing_cache is on, also
-# search for a cache produced by a different job-number run with the same
-# parameters (e.g. reuse Cache/R128_…_0002 when current job is _0001).
-# NOTE: cache_dir (the current job's directory) was already created empty by
-# os.makedirs above, so we cannot rely on mtime alone — we must verify that
-# a candidate actually contains .vdb/.uni files before accepting it.
 effective_cache_dir = cache_dir
+
+def _count_data_files(directory):
+    """Return the number of frame-numbered VDB/UNI data files in *directory*,
+    excluding Mantaflow's config/ subdirectory (which holds per-frame checkpoint
+    .uni files that look like data but contain no simulation output)."""
+    count = 0
+    for _root, _dirs, _fnames in os.walk(directory):
+        if os.path.basename(_root) == 'config':
+            continue
+        count += sum(1 for f in _fnames if re.search(r'_\d+\.(vdb|uni)$', f))
+    return count
+
 if use_existing_cache:
     cache_base = os.path.join(output_path, "Cache")
-    if os.path.isdir(cache_base):
-        pat        = re.compile(r'^' + re.escape(name_prefix) + r'_\d{4}$')
+    _log(f"[{name}]   Searching in         : {cache_base}")
+    if not os.path.isdir(cache_base):
+        _log(f"[{name}]   Cache base dir not found — will bake from scratch")
+    else:
+        pat = re.compile(r'^' + re.escape(name_prefix) + r'_\d{4}$')
+        _log(f"[{name}]   Pattern              : {pat.pattern!r}")
         candidates = sorted(
             [os.path.join(cache_base, e) for e in os.listdir(cache_base)
              if pat.match(e) and os.path.isdir(os.path.join(cache_base, e))],
             key=os.path.getmtime, reverse=True,
         )
+        _log(f"[{name}]   Candidates           : {len(candidates)}")
+        chosen = None
         for candidate in candidates:
-            has_files = False
-            for _root, _dirs, files in os.walk(candidate):
-                # Require frame-numbered data files, not just config/meta .uni files.
-                # Mantaflow creates config .uni files immediately on domain init;
-                # those match .endswith('.uni') but not '_\d+\.(vdb|uni)$'.
-                # Using the same regex as the frame-counting walk ensures a candidate
-                # is only accepted when it has actual simulation frame data.
-                if any(re.search(r'_\d+\.(vdb|uni)$', f) for f in files):
-                    has_files = True
-                    break
-            if has_files:
-                effective_cache_dir = candidate
-                if candidate != cache_dir:
-                    _log(f"[{name}] Found cache from different run: {candidate}")
+            n_data = _count_data_files(candidate)
+            if n_data > 0:
+                _log(f"[{name}]     ACCEPT {os.path.basename(candidate)}  data_files={n_data}")
+                chosen = candidate
                 break
+            else:
+                # Report config-checkpoint count so false-positives are visible.
+                n_cfg = sum(
+                    1 for _r, _d, _fs in os.walk(candidate)
+                    if os.path.basename(_r) == 'config'
+                    for f in _fs if re.search(r'_\d+\.uni$', f)
+                )
+                _log(f"[{name}]     SKIP   {os.path.basename(candidate)}  data_files=0  config_uni={n_cfg}")
 
+        if chosen is not None:
+            effective_cache_dir = chosen
+            if chosen != cache_dir:
+                _log(f"[{name}]   Selected cache from different run: {chosen}")
+            else:
+                _log(f"[{name}]   Selected this job's own cache dir")
+        else:
+            _log(f"[{name}]   No candidate with data files found — using this job's cache dir")
 
+_log(f"[{name}]   Effective cache dir  : {effective_cache_dir}")
 d.cache_directory = effective_cache_dir
 
 # Enable resumable baking so a mid-bake crash can be continued on the next run.
@@ -431,27 +452,48 @@ except AttributeError:
 bpy.context.view_layer.update()
 _time.sleep(2.0)
 
-# Determine bake completeness by checking if the last required frame is cached.
+# Count baked frames in the effective cache dir.
+# Skip the config/ subdirectory — Mantaflow writes per-frame config checkpoint
+# .uni files there (config_0001.uni, config_0002.uni, …) which match the
+# frame-number pattern but contain no simulation output data.
 # Three outcomes:
-#   1. Complete cache (frame_end present)  → skip bake entirely
-#   2. Partial cache (some frames, not all) → resume bake without freeing
-#   3. No cache (or ignoring existing)     → free + fresh bake
+#   1. Complete cache (all required frames present) → skip bake entirely
+#   2. Partial cache (some frames, not all)         → resume without freeing
+#   3. No data frames (or use_existing_cache off)  → free + fresh bake
 baked_frames = set()
 _all_cache_files = []
 for _root, _dirs, files in os.walk(effective_cache_dir):
+    subdir = os.path.basename(_root)
     for f in files:
         _all_cache_files.append(f)
+        if subdir == 'config':
+            continue  # checkpoint files, not simulation data
         m = re.search(r'_(\d+)\.(vdb|uni)$', f)
         if m:
             baked_frames.add(int(m.group(1)))
 
-if not baked_frames and _all_cache_files:
-    _log(f"[{name}] WARNING: cache dir has {len(_all_cache_files)} file(s) but none matched "
-         f"frame-number pattern — first few: {_all_cache_files[:5]}")
+_log(f"[{name}] --- Bake decision ---")
+_log(f"[{name}]   Frame range needed : {frame_start}–{frame_end} "
+     f"({frame_end - frame_start + 1} frames)")
+_log(f"[{name}]   Data frames found  : {len(baked_frames)}")
+
+if baked_frames:
+    _min_f, _max_f = min(baked_frames), max(baked_frames)
+    _missing = sorted(set(range(frame_start, frame_end + 1)) - baked_frames)
+    _log(f"[{name}]   Frame data spans   : {_min_f}–{_max_f}")
+    if _missing:
+        _missing_preview = _missing[:10]
+        _log(f"[{name}]   Missing frames     : {len(_missing)} "
+             f"(first few: {_missing_preview}{'…' if len(_missing) > 10 else ''})")
+    else:
+        _log(f"[{name}]   Missing frames     : none — cache complete")
+elif _all_cache_files:
+    _log(f"[{name}]   WARNING: {len(_all_cache_files)} file(s) in cache dir but none are "
+         f"data files (config/ only?) — first few: {_all_cache_files[:5]}")
+else:
+    _log(f"[{name}]   Cache dir is empty")
 
 bake_complete = all(f in baked_frames for f in range(frame_start, frame_end + 1))
-_dlog(f"cache check: effective_cache_dir={effective_cache_dir!r}  "
-      f"baked_frames={len(baked_frames)}  bake_complete={bake_complete}")
 
 # rebaked_frames: frame numbers whose cache was RECOMPUTED this run.
 # Existing renders for these frames must NOT be used as placeholders, because
@@ -459,18 +501,15 @@ _dlog(f"cache check: effective_cache_dir={effective_cache_dir!r}  "
 rebaked_frames = set()
 
 if use_existing_cache and bake_complete:
-    _log(f"[{name}] Use Existing Cache enabled — all {frame_end - frame_start + 1} "
-         f"frames ({frame_start}–{frame_end}) confirmed, skipping bake.")
+    _log(f"[{name}]   Decision           : SKIP BAKE — all {frame_end - frame_start + 1} frames confirmed")
     bake_seconds = 0.0
     bake_skipped = True
-    # rebaked_frames stays empty — all cache pre-existing, renders still valid
 
 elif use_existing_cache and baked_frames:
-    # Partial bake from a previous crash — resume without freeing existing frames.
-    # Only frames beyond the previous bake are recomputed.
     rebaked_frames = set(range(frame_start, frame_end + 1)) - baked_frames
     bake_skipped   = False
-    _log(f"[{name}] Partial cache ({len(baked_frames)}/{frame_end} frames). Resuming bake...")
+    _log(f"[{name}]   Decision           : RESUME — {len(baked_frames)} frames present, "
+         f"{len(rebaked_frames)} to bake")
     _log(f"[{name}] Baking...")
     bake_start   = _time.time()
     _bake_result = bpy.ops.fluid.bake_all()
@@ -482,19 +521,16 @@ elif use_existing_cache and baked_frames:
     _time.sleep(2.0)
 
 else:
-    # Full rebake — all frames recomputed, any existing renders are stale.
-    # Reaches here when use_existing_cache is False, OR when it is True but
-    # no VDB files were found (first run, or crash before any frames wrote).
     rebaked_frames = set(range(frame_start, frame_end + 1))
     bake_skipped   = False
     if effective_cache_dir != cache_dir:
-        # No usable files in alt dir — fall back to this job's own cache dir
         effective_cache_dir = cache_dir
         d.cache_directory   = cache_dir
     if use_existing_cache:
-        _log(f"[{name}] No existing cache found — performing full bake.")
+        _log(f"[{name}]   Decision           : FULL BAKE — use_existing_cache on but no data frames found")
     else:
-        _log(f"[{name}] Freeing previous cache...")
+        _log(f"[{name}]   Decision           : FULL BAKE — use_existing_cache disabled")
+    _log(f"[{name}] Freeing previous cache and baking from scratch...")
     bpy.ops.fluid.free_all()
     _time.sleep(2.0)
 

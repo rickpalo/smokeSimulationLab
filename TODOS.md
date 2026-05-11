@@ -89,50 +89,81 @@ IndentationError was invisible partly because the stale worker was silently used
 
 ---
 
-## TODO-5: Job Log row goes blank after scrolling or job start
+## TODO-5 / TODO-17: Job Log rows go blank on status transition
 
-**Observed behaviour:**  
-Job 1 is visible immediately after the job log is populated (Export Batch).
-After either (a) scrolling the list to the bottom, or (b) the first job starts
-running, the row for job 1 becomes blank (empty job number and name).
+**Observed behaviour (TODO-5, original):**  
+Job 1 is visible immediately after Export Batch.  After scrolling the list or
+after the first job starts running, the row for job 1 becomes blank (empty job
+number and name).
+
+**Additional observation (TODO-17, confirmed in a real batch run):**  
+Rows for jobs that have *completed* (COMPLETE or FAILED — i.e. a `.done` file
+exists) also go blank.  The in-progress job may blank too.  The status dot
+should remain visible and reflect the current status even after the job
+finishes.  The two observations together strongly implicate the timer–draw race
+(cause 2 below): the blank rows correlate with the moment `_update_job_log_statuses`
+writes `item.status`, which suggests the write partially invalidates the RNA
+item and causes Blender to return default values (0 / "") for the other fields
+during the same draw pass.
 
 **Suspected causes (investigate in order):**
 
 1. **`job_log_index` scroll interaction** — Blender's `template_list` tracks the
-   active-item index in `job_log_index` (default 0 → item 0 = job 1).  When the
-   user scrolls the viewport, Blender may advance `job_log_index` to keep it
-   within the visible window, leaving item 0 "selected but off-screen."  If the
-   list then redraws before the scroll settles, item 0 can flicker blank.
-   *Try*: initialise `job_log_index = -1` (or 0 but with a guard in `draw_item`)
-   so no item starts selected.
+   active-item index in `job_log_index`.  Scrolling may advance the index off-
+   screen, causing item 0 to flicker blank.
+   *Try*: initialise `job_log_index = -1` (or add a guard in `draw_item`).
 
-2. **Timer–draw race condition** — `_update_job_log_statuses` is called from the
-   poll timer (a background thread context).  Writing to a `CollectionProperty`
-   item's properties while Blender is mid-draw can cause a partial RNA
-   invalidation; the item is still present but its `job_number` / `job_name`
-   StringProperty/IntProperty values read as defaults (0 / "").
-   *Try*: guard the poll call with `_redraw_panels()` only *after* all item
-   writes are complete, and confirm the writes are atomic from Blender's
-   perspective.
+2. **Timer–draw race condition (most likely)** — `_update_job_log_statuses` runs
+   inside the poll timer.  Writing `item.status` while Blender is mid-draw can
+   partially invalidate the RNA item; `job_number` / `job_name` read back as
+   defaults (0 / "") during the same frame.  The fact that blanking tracks with
+   status transitions (job starts, job completes) strongly supports this.
+   *Try*: build a pending-status dict in the timer (`{idx: new_status}`) and
+   apply writes only inside a `_redraw_panels()` call or a `bpy.app.timers`
+   one-shot scheduled at 0 s from the main thread — RNA writes must not race
+   the draw thread.
 
-3. **`_item` name shadowing in `export_batch`** — the seed loop uses the local
-   name `_item` for each `job_log_items.add()` result.  After the loop exits,
-   `_item` still references the last item added.  If any later code in
-   `export_batch` accidentally reassigns or clears through `_item`, item 0
-   could be corrupted.  *Try*: rename the loop variable to `_log_row` to avoid
-   any ambiguity.
+3. **`_item` name shadowing in `export_batch`** — already renamed to `_log_row`
+   in the seed loop; verify no other path reuses `_item`.
 
-4. **`make_name` differs between seed loop and job loop** — the seed loop and the
-   per-job JSON loop both call `make_name(p, i)` independently.  If `make_name`
-   is non-deterministic (e.g. depends on mutable state), the stored name may not
-   match.  *Try*: compute `name = make_name(p, i)` once per iteration and reuse
-   it in both places.
+4. **`make_name` non-determinism** — seed loop and per-job JSON loop call
+   `make_name` independently; if non-deterministic, stored names may differ.
 
 **Recommended first step:**  
-Add `print(f"draw_item: job_number={item.job_number!r} job_name={item.job_name!r}")` at the top of `SMOKE_UL_job_log.draw_item` and reproduce; if the blank row prints `job_number=0, job_name=''`, the item's properties are genuinely zeroed (cause 2 or 3).  If the row is never printed at all, the item is scrolled out of the viewport (cause 1).
+Add `print(f"draw_item: {item.job_number!r} {item.job_name!r} {item.status!r}")` at
+the top of `SMOKE_UL_job_log.draw_item` and reproduce.  If blank rows print
+`job_number=0, job_name=''`, properties are genuinely zeroed (cause 2).
+Correlate the print timestamps with timer-poll firings to confirm.
 
-**Files to investigate:** `scripts/SmokeSimLab/__init__.py`
-(`export_batch` seed loop, `_update_job_log_statuses`, `SMOKE_UL_job_log.draw_item`, `SMOKE_PT_panel.draw` `template_list` call).
+**Files:** `scripts/SmokeSimLab/__init__.py` — `_update_job_log_statuses`,
+`SMOKE_UL_job_log.draw_item`, `_poll_batch_progress_impl`, `SMOKE_PT_panel.draw`.
+
+---
+
+## ~~TODO-18~~: Cache search logging and config-file false-positive — **DONE** (v0.2.7)
+
+**Observed:** Jobs with "Use Existing Cache" enabled still baked from scratch even
+when a complete cache existed from a previous run.
+
+**Root cause (config false-positive):** Mantaflow writes per-frame config
+checkpoints (`config/config_0001.uni`, `config_0002.uni`, …) to every cache
+directory immediately on domain init — before any simulation data is written.
+These files matched `r'_\d+\.(vdb|uni)$'`, so a directory containing *only*
+config checkpoints (no actual VDB data) passed `has_files` and was selected
+as the effective cache.  Those same filenames were then counted in `baked_frames`,
+making `bake_complete = True`, causing the bake to be skipped — but no real VDB
+data existed, so the render failed or produced the wrong frame.
+
+**Fix:** Skip the `config/` subdirectory when walking candidate directories for
+both the `has_files` check and the `baked_frames` count.  This preserves
+compatibility with the UNI data format (pre-VDB caches) while excluding
+per-frame config checkpoints.
+
+**Logging improvements:** Replaced sparse `_dlog`-only output with a full
+`_log` cache-search section that always records: the search path, the regex
+pattern used, every candidate evaluated (accept/reject + reason), the chosen
+effective cache dir, the frame range found, any missing frames, and the bake
+path taken (SKIP / RESUME / FULL).
 
 ---
 
