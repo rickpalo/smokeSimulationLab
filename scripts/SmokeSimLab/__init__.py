@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 4),
+    "version":     (0, 2, 5),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -67,6 +67,32 @@ print(f"SmokeSimLab {'.'.join(str(v) for v in bl_info['version'])} loaded")
 
 
 DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
+
+# Expected version strings in the helper files exported to the output folder.
+# When Run Batch detects a mismatch it warns the user to re-run Export Batch.
+# Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
+_EXPECTED_WORKER_VERSION   = "0.2.5"
+_EXPECTED_LAUNCHER_VERSION = "0.2.5"
+
+
+def _read_helper_version(path: str, var_name: str) -> str:
+    """Return the version string for var_name from the first 30 lines of path.
+
+    Returns "" if the file is missing or the variable is not found.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for i, line in enumerate(fh):
+                if i >= 30:
+                    break
+                line = line.strip()
+                if line.startswith(var_name + " ="):
+                    m = re.search(r'["\']([^"\']+)["\']', line)
+                    if m:
+                        return m.group(1)
+    except OSError:
+        pass
+    return ""
 
 # All iterable parameter base names — used by _clear_lists and generate_jobs.
 # Any parameter added here must also have corresponding properties in
@@ -1866,12 +1892,29 @@ def _estim_reset_job(log_key: str) -> None:
     })
 
 
+# Stale-log detection state: detect when the active job log stops updating.
+# The launcher kills the process after 30 min of log silence; the poller warns
+# at 35 min so the user sees a UI indicator even if the launcher also died.
+_POLLER_STALE_SECS: float = 35 * 60
+_poll_state: dict = {"log_key": "", "log_mtime": 0.0, "stale_since": 0.0}
+
+
 def _poll_batch_progress():
     """
     Timer callback — updates overall and sub-task progress bars.
     Registered when Run Batch is clicked; unregisters itself when all jobs are done.
     Returns the next interval (seconds) or None to stop.
+    Wrapped in try/except: an unhandled exception prints a warning and keeps
+    the timer alive rather than silently killing it mid-batch.
     """
+    try:
+        return _poll_batch_progress_impl()
+    except Exception as _exc:
+        print(f"[SmokeSimLab] poll timer error — {_exc}")
+        return 5.0
+
+
+def _poll_batch_progress_impl():
     for scene in bpy.data.scenes:
         s = getattr(scene, "smoke_settings", None)
         if s is None or not s.batch_jobs_dir or s.batch_total == 0:
@@ -1976,6 +2019,29 @@ def _poll_batch_progress():
         if running:
             log_file, log_stem, tail = running
             now = time.time()
+
+            # Stale-log detection: warn in UI if the active log hasn't been
+            # written to for _POLLER_STALE_SECS.  The launcher's watchdog kills
+            # the process at 30 min; 35 min here catches cases where the
+            # launcher itself crashes without writing a .done/.crashed marker.
+            _log_path = os.path.join(jobs_dir, log_file)
+            try:
+                _cur_mtime = os.path.getmtime(_log_path)
+            except OSError:
+                _cur_mtime = None
+            if _cur_mtime is not None:
+                if log_file != _poll_state["log_key"] or _cur_mtime != _poll_state["log_mtime"]:
+                    _poll_state["log_key"]    = log_file
+                    _poll_state["log_mtime"]  = _cur_mtime
+                    _poll_state["stale_since"] = 0.0
+                elif _poll_state["stale_since"] == 0.0:
+                    _poll_state["stale_since"] = time.time()
+                elif time.time() - _poll_state["stale_since"] >= _POLLER_STALE_SECS:
+                    _idle_min = int((time.time() - _poll_state["stale_since"]) / 60)
+                    s.batch_subtask_text = f"No log activity for {_idle_min} min — job may be frozen"
+            else:
+                _poll_state["log_key"]    = log_file
+                _poll_state["stale_since"] = 0.0
 
             # Detect job transition — accumulate elapsed time for completed job,
             # then reset per-job timer and load frame count for the new job.
@@ -2409,6 +2475,29 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         if not job_files:
             self.report({'ERROR'}, "No job files found — run Export Batch first")
             return {'CANCELLED'}
+
+        # Verify exported helper files match the addon version.  A mismatch means
+        # Export Batch was run with an older addon and the worker/launcher may lack
+        # bug fixes or features present in the current installation.
+        _worker_path   = os.path.join(output_path, "smoke_worker.py")
+        _launcher_path = os.path.join(output_path, "smoke_launcher.py")
+        _wv  = _read_helper_version(_worker_path,   "WORKER_VERSION")
+        _lv  = _read_helper_version(_launcher_path, "LAUNCHER_VERSION")
+        _bad = []
+        if _wv != _EXPECTED_WORKER_VERSION:
+            _bad.append(
+                f"smoke_worker.py (found {_wv!r}, expected {_EXPECTED_WORKER_VERSION!r})"
+            )
+        if _lv != _EXPECTED_LAUNCHER_VERSION:
+            _bad.append(
+                f"smoke_launcher.py (found {_lv!r}, expected {_EXPECTED_LAUNCHER_VERSION!r})"
+            )
+        if _bad:
+            self.report(
+                {'WARNING'},
+                "Helper file version mismatch — re-run Export Batch to update: "
+                + ", ".join(_bad),
+            )
 
         # Remove old log files so the counter starts from zero.
         if os.path.isdir(jobs_dir):
@@ -3185,13 +3274,17 @@ class SMOKE_PT_panel(bpy.types.Panel):
 @bpy.app.handlers.persistent
 def _reset_on_load(dummy=None):
     """
-    Clear all transient parameter state whenever a .blend file is opened.
+    Reset ALL addon properties to their defaults whenever a .blend file is opened.
 
-    Resets: lists, use_range/use_list flags, step values, iteration mode,
-    render options, export/batch status.
-    Preserves: domain_obj, output_path, render_mode, text object names,
-    and the base default values for each parameter.
+    Every property is reset so the addon always starts from a known clean state.
+    The user must re-select the domain object and output path after load; this
+    prevents stale batch state, job log rows, and export artefacts from persisting
+    across sessions.
     """
+    # Stop the poll timer immediately so it cannot fire between property resets.
+    if bpy.app.timers.is_registered(_poll_batch_progress):
+        bpy.app.timers.unregister(_poll_batch_progress)
+
     # bpy.data is a _RestrictData object during addon install — bail out early.
     try:
         scenes = bpy.data.scenes
@@ -3203,6 +3296,11 @@ def _reset_on_load(dummy=None):
         if s is None:
             continue
 
+        # ── Setup ────────────────────────────────────────────────────────────
+        s.domain_obj  = None
+        s.output_path = "C:/tmp"
+
+        # ── Simulation parameters ─────────────────────────────────────────────
         for name in ITERABLE_PARAMS:
             lst = getattr(s, name + "_list", None)
             if lst is not None:
@@ -3235,33 +3333,50 @@ def _reset_on_load(dummy=None):
         s.noise_spatial_scale_begin = 2.0
         s.noise_spatial_scale_end   = 2.0
 
+        s.use_dissolve          = False
+        s.slow_dissolve         = False
+        s.iterate_dissolve_both = False
+        s.use_noise             = False
+        s.iterate_noise_both    = False
+
         s.use_default_frames = True
         s.sim_frame_start    = 1
         s.sim_frame_end      = 250
 
+        # ── Settings presets ──────────────────────────────────────────────────
         s.settings_file_path   = ""
         s.settings_search_path = ""
         s.settings_snapshot    = ""
         s.settings_file_enum   = ""
-        s.render_samples       = 16
-        s.maintain_density     = False
 
-        s.iterate_dissolve_both = False
-        s.iterate_noise_both    = False
+        # ── Text objects ──────────────────────────────────────────────────────
+        s.text_resolution = "Resolution_Text"
+        s.text_noise      = "Noise_Text"
+        s.text_dissolve   = "Dissolve_Text"
+        s.text_time       = "Time_Text"
 
+        # ── Render / export settings ──────────────────────────────────────────
+        s.render_mode        = 'CYCLES'
+        s.render_samples     = 16
+        s.maintain_density   = False
         s.iteration_mode     = 'LIMITED'
         s.use_placeholders   = False
         s.use_existing_cache = False
         s.auto_retry_failed  = False
         s.show_results       = False
 
+        # ── Utilities ─────────────────────────────────────────────────────────
+        s.collect_crash_logs      = False
+        s.collect_estimation_data = False
+        s.collect_debug_log       = False
+
+        # ── Batch / job-log state ─────────────────────────────────────────────
         s.last_export_info     = ""
         s.batch_summary_line1 = s.batch_summary_line2 = ""
         s.batch_summary_line3 = s.batch_summary_line4 = ""
         s.batch_progress         = ""
         s.show_job_log           = False
         s.job_log_auto_scroll    = True
-        s.collect_debug_log      = False
         s.job_log_items.clear()
         s.batch_total          = 0
         s.batch_jobs_dir       = ""

@@ -2,12 +2,38 @@
 import datetime
 import json
 import os
+import py_compile
 import sys
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts", "SmokeSimLab"))
 
 from smoke_launcher import _find_werfault_for_pid, _save_crash_log, _write_crashed_marker
+
+
+# ---------------------------------------------------------------------------
+# Worker/launcher syntax validation — regression guard for silent parse errors
+# ---------------------------------------------------------------------------
+
+_SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "scripts", "SmokeSimLab")
+
+
+class TestWorkerSyntax:
+    def test_smoke_worker_valid_syntax(self):
+        """smoke_worker.py must parse cleanly — a SyntaxError prevents any log from being written.
+
+        Regression for v0.2.4 IndentationError that caused the first job to load the .blend
+        but produce no log file, with the Python traceback silently routed to /dev/null.
+        """
+        py_compile.compile(
+            os.path.join(_SCRIPTS_DIR, "smoke_worker.py"), doraise=True
+        )
+
+    def test_smoke_launcher_valid_syntax(self):
+        """smoke_launcher.py must also parse cleanly."""
+        py_compile.compile(
+            os.path.join(_SCRIPTS_DIR, "smoke_launcher.py"), doraise=True
+        )
 
 
 # ---------------------------------------------------------------------------

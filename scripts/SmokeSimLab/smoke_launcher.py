@@ -28,6 +28,9 @@ Behaviour
 No third-party dependencies — stdlib + tasklist.exe (built into Windows).
 """
 
+LAUNCHER_VERSION = "0.2.5"
+
+import atexit
 import datetime
 import json
 import os
@@ -194,9 +197,24 @@ def main():
     except Exception as e:
         print(f"[smoke_launcher] Warning: could not set error mode: {e}")
 
-    # stderr=DEVNULL suppresses Blender's C++ startup noise; stdout is
-    # inherited so live worker output still appears in the batch window.
-    proc        = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
+    # Redirect Blender's stderr to blender_stderr.txt (append, one header per job)
+    # instead of DEVNULL.  Python errors in the worker script (syntax errors,
+    # import failures) go to stderr; without capture they are invisible.
+    # C++ startup noise also lands here, keeping the batch console clean.
+    _stderr_path = os.path.join(output_path, "blender_stderr.txt") if output_path else None
+    _stderr_fh   = None
+    if _stderr_path:
+        try:
+            _stderr_fh = open(_stderr_path, "a", encoding="utf-8", errors="replace")
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _stderr_fh.write(f"\n=== {ts}  {job_stem} ===\n")
+            _stderr_fh.flush()
+            atexit.register(_stderr_fh.close)
+        except OSError as exc:
+            _dlog(f"warning: could not open blender_stderr.txt: {exc}")
+            _stderr_fh = None
+
+    proc        = subprocess.Popen(cmd, stderr=_stderr_fh if _stderr_fh is not None else subprocess.DEVNULL)
     blender_pid = proc.pid
     print(f"[smoke_launcher] Blender PID {blender_pid}")
 

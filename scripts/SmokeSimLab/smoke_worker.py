@@ -14,6 +14,8 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
+WORKER_VERSION = "0.2.5"
+
 import bpy
 import sys
 import os
@@ -415,6 +417,7 @@ if use_existing_cache:
                     _log(f"[{name}] Found cache from different run: {candidate}")
                 break
 
+
 d.cache_directory = effective_cache_dir
 
 # Enable resumable baking so a mid-bake crash can be continued on the next run.
@@ -587,7 +590,7 @@ frames_actually_rendered = len(frames_to_render)
 render_seconds = 0.0
 if frames_to_render:
     _dlog(f"render start: engine={render_mode}  frames={len(frames_to_render)}  dir={effective_frames_dir!r}")
-_log(f"[{name}] Rendering animation ({len(frames_to_render)} frame(s)) -> {effective_frames_dir}")
+    _log(f"[{name}] Rendering animation ({len(frames_to_render)} frame(s)) -> {effective_frames_dir}")
     render_start = _time.time()
     for frame_num in sorted(frames_to_render):
         scene.frame_set(frame_num)

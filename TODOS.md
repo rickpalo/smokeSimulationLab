@@ -41,6 +41,54 @@ are accepted.
 
 ---
 
+## ~~TODO-12~~: Full addon reset on .blend load — **DONE** (v0.2.5)
+
+`_reset_on_load` previously preserved `domain_obj`, `output_path`, `render_mode`,
+`use_dissolve`, `use_noise`, text object names, and the Utilities flags.  After
+exporting a batch run the job log rows persisted into the next session.
+
+**Fix:** `_reset_on_load` now resets every property to its factory default,
+including `domain_obj = None`, `output_path = "C:/tmp"`, all Utilities flags, and
+all UI toggle states.  The polling timer is also unregistered at the top of the
+handler so it cannot fire between property resets.
+
+---
+
+## ~~TODO-13~~: Crashed job freezes progress bars — **DONE** (v0.2.5)
+
+`_poll_batch_progress` had no exception guard; an unhandled error inside the timer
+silently killed it mid-batch (Blender unregisters a timer that raises).  Also, if
+the launcher process died without writing a `.done`/`.crashed` marker the UI gave
+no indication.
+
+**Fix:**
+1. The timer is wrapped in a `_poll_batch_progress` → `_poll_batch_progress_impl`
+   pattern: the outer function catches all exceptions, prints a warning, and
+   returns `5.0` to keep the timer alive.
+2. Added `_poll_state` + `_POLLER_STALE_SECS = 35 * 60` for timer-side stale
+   detection.  When the active job's log file mtime is unchanged for 35 min the
+   `batch_subtask_text` label is set to "No log activity for N min — job may be
+   frozen."
+
+---
+
+## ~~TODO-14~~: File versioning for helper scripts — **DONE** (v0.2.5)
+
+No mechanism existed to detect that `smoke_worker.py` or `smoke_launcher.py` in
+the output folder were exported from an older addon version.  The v0.2.5
+IndentationError was invisible partly because the stale worker was silently used.
+
+**Fix:**
+- `WORKER_VERSION = "0.2.5"` added to `smoke_worker.py`.
+- `LAUNCHER_VERSION = "0.2.5"` added to `smoke_launcher.py`.
+- `_EXPECTED_WORKER_VERSION` / `_EXPECTED_LAUNCHER_VERSION` constants in `__init__.py`.
+- `_read_helper_version()` reads the version string from the first 30 lines of a
+  file without importing it (avoids the `import bpy` constraint).
+- `SMOKE_OT_run_batch.execute` checks both files before starting and emits a
+  `WARNING` panel message if any version is wrong, prompting a re-export.
+
+---
+
 ## TODO-5: Job Log row goes blank after scrolling or job start
 
 **Observed behaviour:**  
