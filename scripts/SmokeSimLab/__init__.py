@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 7),
+    "version":     (0, 2, 8),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -71,7 +71,7 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.2.7"
+_EXPECTED_WORKER_VERSION   = "0.2.8"
 _EXPECTED_LAUNCHER_VERSION = "0.2.6"
 
 
@@ -890,6 +890,11 @@ class SMOKE_UL_job_log(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon,
                   active_data, active_propname):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            # Guard against RNA race: if the item is transiently zeroed during
+            # a timer write, show a placeholder rather than an empty row.
+            if not item.job_name and item.job_number == 0:
+                layout.label(text="…")
+                return
             split = layout.split(factor=0.10, align=True)
             split.label(icon=self._STATUS_ICONS.get(item.status, 'NONE'), text="")
             inner = split.split(factor=0.22, align=True)
@@ -1306,6 +1311,8 @@ class SmokeSettings(bpy.types.PropertyGroup):
     batch_still_start_time:  bpy.props.FloatProperty(default=0.0)
     batch_bake_secs_actual:  bpy.props.FloatProperty(default=-1.0)
     batch_render_secs_actual: bpy.props.FloatProperty(default=-1.0)
+    batch_bake_frame_baseline:   bpy.props.IntProperty(default=-1)
+    batch_render_frame_baseline: bpy.props.IntProperty(default=-1)
     show_results:         bpy.props.BoolProperty(
         name="Display Results When Finished",
         description="After all jobs complete, create a grid of result planes in a SmokeOutput collection",
@@ -1638,35 +1645,14 @@ def _find_running_log(jobs_dir):
     return None
 
 
-def _count_vdb_frames(jobs_dir, log_stem):
-    """Return (frames_baked, frame_end) by counting VDB files for log_stem, or None."""
-    json_path = os.path.join(jobs_dir, log_stem + ".json")
-    try:
-        with open(json_path) as fh:
-            job_data = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return None
-    frame_end   = job_data.get("frame_end", 0)
-    output_path = job_data.get("output_path", "")
-    name        = job_data.get("name", "")
-    if not (output_path and name and frame_end):
-        return None
-    data_dir     = os.path.join(output_path, "Cache", name, "data")
-    frames_baked = set()
-    if os.path.isdir(data_dir):
-        for f in os.listdir(data_dir):
-            m = re.search(r'_(\d{4})\.vdb$', f)
-            if m:
-                frames_baked.add(int(m.group(1)))
-    return len(frames_baked), frame_end
+def _count_vdb_frames(jobs_dir, log_stem, tail=None):
+    """Return (frames_baked, frame_end) by counting VDB files for log_stem, or None.
 
-
-def _count_png_frames(jobs_dir, log_stem, since=0.0):
-    """Return (frames_rendered, frame_end) for log_stem, or None.
-
-    When since > 0 only counts PNG files whose mtime >= since, so re-render
-    runs (where old frames exist on disk) report genuine progress instead of
-    the inflated total from the previous run.
+    When tail is supplied the function tries to extract the effective cache dir
+    from the v0.2.7+ "Effective cache dir" log line so it counts files in the
+    directory the worker is actually baking into (which may differ from the
+    current job's own cache dir when use_existing_cache resumes from another run).
+    Falls back to Cache/<name>/data/ when the log line is absent.
     """
     json_path = os.path.join(jobs_dir, log_stem + ".json")
     try:
@@ -1679,20 +1665,60 @@ def _count_png_frames(jobs_dir, log_stem, since=0.0):
     name        = job_data.get("name", "")
     if not (output_path and name and frame_end):
         return None
-    frames_dir      = os.path.join(output_path, "Renders", f"{name}_frames")
-    frames_rendered = 0
+
+    frames_baked = set()
+
+    # Try to use the effective cache dir recorded in the log (v0.2.7+).
+    if tail:
+        _m = re.search(r'Effective cache dir\s+:\s+(.+)', tail)
+        if _m:
+            _eff = _m.group(1).strip()
+            _data = os.path.join(_eff, "data")
+            if os.path.isdir(_data):
+                for f in os.listdir(_data):
+                    m = re.search(r'_(\d{4})\.vdb$', f)
+                    if m:
+                        frames_baked.add(int(m.group(1)))
+                return len(frames_baked), frame_end
+
+    # Fall back: look in this job's own cache dir.
+    data_dir = os.path.join(output_path, "Cache", name, "data")
+    if os.path.isdir(data_dir):
+        for f in os.listdir(data_dir):
+            m = re.search(r'_(\d{4})\.vdb$', f)
+            if m:
+                frames_baked.add(int(m.group(1)))
+    return len(frames_baked), frame_end
+
+
+def _count_png_frames(jobs_dir, log_stem):
+    """Return (frames_rendered, frame_end) for log_stem, or None.
+
+    Counts ALL frame_NNNN.png files regardless of mtime.  The caller subtracts
+    a baseline (set when the render stage is first detected) to measure only
+    frames rendered in the current run.  This is more robust than mtime filtering,
+    which fails when the poller first runs after some frames have already been
+    written (Blender restarted mid-batch, cached bake so render started before
+    the first poll, etc.).
+    """
+    json_path = os.path.join(jobs_dir, log_stem + ".json")
+    try:
+        with open(json_path) as fh:
+            job_data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    frame_end   = job_data.get("frame_end", 0)
+    output_path = job_data.get("output_path", "")
+    name        = job_data.get("name", "")
+    if not (output_path and name and frame_end):
+        return None
+    frames_dir = os.path.join(output_path, "Renders", f"{name}_frames")
+    count = 0
     if os.path.isdir(frames_dir):
         for f in os.listdir(frames_dir):
-            if not re.match(r'frame_\d{4}\.png$', f):
-                continue
-            if since > 0:
-                try:
-                    if os.path.getmtime(os.path.join(frames_dir, f)) < since:
-                        continue
-                except OSError:
-                    continue
-            frames_rendered += 1
-    return frames_rendered, frame_end
+            if re.match(r'frame_\d{4}\.png$', f):
+                count += 1
+    return count, frame_end
 
 
 def _format_eta(seconds):
@@ -2005,6 +2031,8 @@ def _poll_batch_progress_impl():
             s.batch_still_start_time  = 0.0
             s.batch_bake_secs_actual  = -1.0
             s.batch_render_secs_actual = -1.0
+            s.batch_bake_frame_baseline   = -1
+            s.batch_render_frame_baseline = -1
             _redraw_panels()
             if will_auto_retry:
                 bpy.app.timers.register(_auto_retry_deferred, first_interval=2.0)
@@ -2088,6 +2116,8 @@ def _poll_batch_progress_impl():
                 s.batch_still_start_time  = 0.0
                 s.batch_bake_secs_actual  = -1.0
                 s.batch_render_secs_actual = -1.0
+                s.batch_bake_frame_baseline   = -1
+                s.batch_render_frame_baseline = -1
                 s.batch_subtask_text      = ""
                 s.batch_subtask_factor    = 0.0
                 s.batch_job_text          = ""
@@ -2114,6 +2144,9 @@ def _poll_batch_progress_impl():
             # Stage start time tracking (set once per job)
             if stage_label == "Baking simulation" and s.batch_bake_start_time == 0.0:
                 s.batch_bake_start_time = now
+                if s.batch_bake_frame_baseline < 0:
+                    _bi = _count_vdb_frames(jobs_dir, log_stem, tail)
+                    s.batch_bake_frame_baseline = _bi[0] if _bi else 0
                 if not _estim["bake_start_logged"]:
                     _estim["bake_start_logged"] = True
                     _setup_actual = round(now - s.batch_job_start_time, 1) if s.batch_job_start_time > 0 else None
@@ -2126,6 +2159,9 @@ def _poll_batch_progress_impl():
                     })
             if stage_label == "Rendering animation" and s.batch_render_start_time == 0.0:
                 s.batch_render_start_time = now
+                if s.batch_render_frame_baseline < 0:
+                    _ri = _count_png_frames(jobs_dir, log_stem)
+                    s.batch_render_frame_baseline = _ri[0] if _ri else 0
                 if not _estim["render_start_logged"]:
                     _estim["render_start_logged"] = True
                     _estim_log({
@@ -2216,23 +2252,25 @@ def _poll_batch_progress_impl():
             subtask_factor = min((stage_completed + 0.5) / _TOTAL_SUBTASKS, 1.0)
 
             if stage_label == "Baking simulation":
-                bake_info = _count_vdb_frames(jobs_dir, log_stem)
+                bake_info = _count_vdb_frames(jobs_dir, log_stem, tail)
                 if bake_info:
-                    baked, total_frames = bake_info
-                    frames_baked = baked
-                    if total_frames > 0:
-                        subtask_text   = f"Baking ({baked} of {total_frames})"
-                        subtask_factor = baked / total_frames
+                    raw_baked, total_frames = bake_info
+                    bake_baseline = max(s.batch_bake_frame_baseline, 0)
+                    baked_new     = max(raw_baked - bake_baseline, 0)
+                    to_bake       = max(total_frames - bake_baseline, 1)
+                    frames_baked  = baked_new
+                    if to_bake > 0:
+                        subtask_text   = f"Baking ({baked_new} of {to_bake})"
+                        subtask_factor = baked_new / to_bake
 
             elif stage_label == "Rendering animation":
-                # Use mtime-based count (since job start) so pre-existing PNGs
-                # from a previous run are not counted as this run's progress.
-                render_info = _count_png_frames(
-                    jobs_dir, log_stem, since=s.batch_job_start_time)
+                render_info = _count_png_frames(jobs_dir, log_stem)
                 if render_info:
-                    rendered, _ = render_info
+                    raw_rendered, _ = render_info
+                    render_baseline = max(s.batch_render_frame_baseline, 0)
+                    rendered_new    = max(raw_rendered - render_baseline, 0)
                     if render_target > 0:
-                        frames_rendered = min(rendered, render_target)
+                        frames_rendered = min(rendered_new, render_target)
                         subtask_text   = f"Rendering ({frames_rendered} of {render_target})"
                         subtask_factor = frames_rendered / render_target
 
@@ -2288,8 +2326,11 @@ def _poll_batch_progress_impl():
             elif s.batch_bake_start_time > 0 and frames_baked > 0:
                 elapsed_bake = max(now - s.batch_bake_start_time, 0.0)
                 if elapsed_bake > 0:
+                    _bake_baseline = max(s.batch_bake_frame_baseline, 0)
+                    _to_bake_total = max(frame_end - _bake_baseline, 1)
+                    bake_to_go     = max(_to_bake_total - frames_baked, 0)
                     rate           = elapsed_bake / frames_baked
-                    bake_remaining = rate * max(frame_end - frames_baked, 0)
+                    bake_remaining = rate * bake_to_go
                     if not _estim["bake_rt_logged"]:
                         _estim["bake_rt_logged"] = True
                         _estim_log({
@@ -2539,6 +2580,8 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         s.batch_still_start_time  = 0.0
         s.batch_bake_secs_actual  = -1.0
         s.batch_render_secs_actual = -1.0
+        s.batch_bake_frame_baseline   = -1
+        s.batch_render_frame_baseline = -1
 
         # Launch the bat in a new console window; returns immediately.
         # cwd is set to output_path so the new cmd starts with a valid directory.
@@ -2724,6 +2767,8 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
         s.batch_still_start_time  = 0.0
         s.batch_bake_secs_actual  = -1.0
         s.batch_render_secs_actual = -1.0
+        s.batch_bake_frame_baseline   = -1
+        s.batch_render_frame_baseline = -1
 
         if not bpy.app.timers.is_registered(_poll_batch_progress):
             bpy.app.timers.register(_poll_batch_progress, first_interval=5.0)
@@ -2969,6 +3014,8 @@ class SMOKE_OT_remove_all_jobs(bpy.types.Operator):
         s.batch_still_start_time  = 0.0
         s.batch_bake_secs_actual  = -1.0
         s.batch_render_secs_actual = -1.0
+        s.batch_bake_frame_baseline   = -1
+        s.batch_render_frame_baseline = -1
 
         _redraw_panels()
 
@@ -3497,6 +3544,8 @@ def _reset_on_load(dummy=None):
         s.batch_still_start_time  = 0.0
         s.batch_bake_secs_actual  = -1.0
         s.batch_render_secs_actual = -1.0
+        s.batch_bake_frame_baseline   = -1
+        s.batch_render_frame_baseline = -1
 
 
 # ---------------------------------------------------------------------------

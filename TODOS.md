@@ -140,6 +140,44 @@ Correlate the print timestamps with timer-poll firings to confirm.
 
 ---
 
+## ~~TODO-19~~: Progress bars show 0 during bake / render — **DONE** (v0.2.8)
+
+**Observed:** Subtask bar shows "Rendering (0 of 500)" while frame_0497 is actively
+rendering.  Progress was stuck at 0 throughout the entire render; bars reset
+correctly when the job finished.
+
+**Root cause (render bar):** `_count_png_frames` used `since=batch_job_start_time`
+to exclude frames from previous runs.  `batch_job_start_time` is set when the
+poller first detects the log file.  If the log file wasn't detected until late
+(Blender restarted mid-batch, bake was skipped so render started almost
+immediately, or the file arrived via sync after many frames were rendered), all
+already-rendered frames had an mtime *before* `batch_job_start_time` and were
+filtered out.
+
+**Root cause (bake bar):** `_count_vdb_frames` always looked in
+`Cache/<current_job_name>/data/`.  When the worker bakes into an *alternate* cache
+directory (use_existing_cache + partial cache from a different job number), VDB
+files are written to that other directory and the count was always 0.
+
+**Fix:**
+- Removed the `since` mtime filter from `_count_png_frames` entirely.  Instead,
+  a `batch_render_frame_baseline` property is set (once) when the "Rendering
+  animation" stage is first detected.  Progress = (current_count − baseline),
+  capped at `render_target`.  Works correctly for: full renders (baseline=0),
+  re-renders with placeholders (baseline=existing frames), and Blender restarts
+  mid-render (baseline=frames already on disk).
+- `_count_vdb_frames` now extracts the effective cache dir from the log tail
+  (the "Effective cache dir" line added in v0.2.7) when available, so it counts
+  VDB files in the directory the worker is actually baking into.  Falls back to
+  `Cache/<name>/data/` when no log is available.
+- A `batch_bake_frame_baseline` property is set when baking starts and the bake
+  subtask shows "(new_frames of to_bake)" rather than a total count, so a partial
+  resume correctly shows e.g. "Baking (30 of 250)" rather than "Baking (280 of 500)".
+- The bake ETA uses `bake_to_go` (remaining frames adjusted for baseline) instead
+  of `frame_end − frames_baked`.
+
+---
+
 ## ~~TODO-18~~: Cache search logging and config-file false-positive — **DONE** (v0.2.7)
 
 **Observed:** Jobs with "Use Existing Cache" enabled still baked from scratch even

@@ -90,37 +90,36 @@ class TestCountPngFrames:
         assert count == 5
         assert total == 5
 
-    def test_since_zero_behaves_like_no_since(self, tmp_path):
-        jobs_dir, frames_dir = _make_job(tmp_path, frame_end=3)
-        for i in range(1, 4):
-            (frames_dir / f"frame_{i:04d}.png").write_bytes(b"")
-        count, total = _count_png_frames(str(jobs_dir), "job_0000", since=0.0)
-        assert count == 3
-        assert total == 3
-
-    def test_since_filters_old_frames(self, tmp_path):
+    def test_counts_all_frames_regardless_of_mtime(self, tmp_path):
+        # mtime filter was removed in v0.2.8; function always counts all frames.
+        # Progress uses baseline subtraction in the caller instead.
         jobs_dir, frames_dir = _make_job(tmp_path, frame_end=5)
         t_old = time.time() - 200
-        t_new = time.time()
-        cutoff = time.time() - 100   # 100 s ago
-
         for i in range(1, 6):
             f = frames_dir / f"frame_{i:04d}.png"
             f.write_bytes(b"")
-            mtime = t_old if i <= 3 else t_new   # frames 1-3 old, 4-5 new
-            os.utime(str(f), (mtime, mtime))
-
-        count, total = _count_png_frames(str(jobs_dir), "job_0000", since=cutoff)
-        assert count == 2   # only frames 4 and 5
+            os.utime(str(f), (t_old, t_old))
+        count, total = _count_png_frames(str(jobs_dir), "job_0000")
+        assert count == 5
         assert total == 5
 
-    def test_since_future_returns_zero(self, tmp_path):
+    def test_baseline_subtraction_gives_new_frames(self, tmp_path):
+        # Caller subtracts baseline to get only frames rendered in the current run.
+        jobs_dir, frames_dir = _make_job(tmp_path, frame_end=5)
+        for i in range(1, 6):
+            (frames_dir / f"frame_{i:04d}.png").write_bytes(b"")
+        count, total = _count_png_frames(str(jobs_dir), "job_0000")
+        baseline = 3
+        new_frames = max(count - baseline, 0)
+        assert new_frames == 2   # frames 4 and 5 are "new" this run
+        assert total == 5
+
+    def test_zero_baseline_means_all_frames_new(self, tmp_path):
         jobs_dir, frames_dir = _make_job(tmp_path, frame_end=3)
         for i in range(1, 4):
             (frames_dir / f"frame_{i:04d}.png").write_bytes(b"")
-        future = time.time() + 9999
-        count, total = _count_png_frames(str(jobs_dir), "job_0000", since=future)
-        assert count == 0
+        count, total = _count_png_frames(str(jobs_dir), "job_0000")
+        assert max(count - 0, 0) == 3
         assert total == 3
 
     def test_ignores_non_png_files(self, tmp_path):
