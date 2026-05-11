@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 11),
+    "version":     (0, 2, 12),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -71,8 +71,8 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.2.10"
-_EXPECTED_LAUNCHER_VERSION = "0.2.6"
+_EXPECTED_WORKER_VERSION   = "0.2.12"
+_EXPECTED_LAUNCHER_VERSION = "0.2.12"
 
 
 def _read_helper_version(path: str, var_name: str) -> str:
@@ -2561,10 +2561,10 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
                 + ", ".join(_bad),
             )
 
-        # Remove old log files so the counter starts from zero.
+        # Remove old log/done/sentinel files so the counter starts from zero.
         if os.path.isdir(jobs_dir):
             for f in os.listdir(jobs_dir):
-                if f.endswith(".log") or f.endswith(".done"):
+                if f.endswith(".log") or f.endswith(".done") or f.endswith(".worker_done"):
                     try:
                         os.remove(os.path.join(jobs_dir, f))
                     except OSError:
@@ -2745,14 +2745,15 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
         with open(bat_path, "w") as fh:
             fh.write("\n".join(bat_lines))
 
-        # Remove all .done markers for the jobs being retried (both original and
-        # any prior _retry) so they are counted as "in progress" by the poll timer.
+        # Remove all .done and .worker_done markers for the jobs being retried
+        # so they are counted as "in progress" by the poll timer.
         for base_stem, _ in failed:
             for suffix in ("", "_retry"):
-                try:
-                    os.remove(os.path.join(jobs_dir, base_stem + suffix + ".done"))
-                except OSError:
-                    pass
+                for ext in (".done", ".worker_done"):
+                    try:
+                        os.remove(os.path.join(jobs_dir, base_stem + suffix + ext))
+                    except OSError:
+                        pass
 
         # Reset progress tracking so the panel shows bars instead of the
         # "All N complete" message while the retry jobs are running.

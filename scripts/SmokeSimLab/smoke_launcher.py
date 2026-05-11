@@ -30,7 +30,7 @@ Behaviour
 No third-party dependencies — stdlib + tasklist.exe (built into Windows).
 """
 
-LAUNCHER_VERSION = "0.2.6"
+LAUNCHER_VERSION = "0.2.12"
 
 import atexit
 import ctypes
@@ -302,6 +302,10 @@ def main():
             _dlog(f"warning: could not open blender_stderr.txt: {exc}")
             _stderr_fh = None
 
+    # Record file position after the per-job header so we can read only this
+    # job's stderr when checking for Python tracebacks after exit.
+    _stderr_start_pos = _stderr_fh.tell() if _stderr_fh is not None else 0
+
     proc        = subprocess.Popen(cmd, stderr=_stderr_fh if _stderr_fh is not None else subprocess.DEVNULL)
     blender_pid = proc.pid
     print(f"[smoke_launcher] Blender PID {blender_pid}")
@@ -378,6 +382,30 @@ def main():
         _write_crashed_marker(jobs_dir, job_stem)
         _dlog(f"exit: CRASHED  exit_code={exit_code}")
         print(f"[smoke_launcher] Job {job_stem} CRASHED (exit {exit_code})")
+        sys.exit(1)
+
+    # Exit code 0: verify the worker wrote its completion sentinel.
+    # A missing sentinel means the worker never reached the end of its script —
+    # the job is a silent failure (Python exception swallowed by Blender, or a
+    # crash that somehow produced exit code 0).
+    worker_done = os.path.join(jobs_dir, job_stem + ".worker_done")
+    if not os.path.exists(worker_done):
+        # Check stderr for a Python traceback to give a more informative reason.
+        _crash_reason = "worker_done sentinel missing"
+        if _stderr_path and os.path.exists(_stderr_path):
+            try:
+                with open(_stderr_path, "r", encoding="utf-8", errors="replace") as _sf:
+                    _sf.seek(_stderr_start_pos)
+                    _this_stderr = _sf.read()
+                if "Traceback (most recent call last)" in _this_stderr:
+                    _crash_reason = "Python traceback in stderr (worker_done missing)"
+                    _dlog(f"blender_stderr contains Python traceback for this job")
+            except OSError:
+                pass
+        _save_crash_log(jobs_dir, job_stem)
+        _write_crashed_marker(jobs_dir, job_stem)
+        _dlog(f"exit: CRASHED (exit_code=0)  reason={_crash_reason}")
+        print(f"[smoke_launcher] Job {job_stem} CRASHED (exit 0 — {_crash_reason})")
         sys.exit(1)
 
     _dlog(f"exit: OK  exit_code=0")

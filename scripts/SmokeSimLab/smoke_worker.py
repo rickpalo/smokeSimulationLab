@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.2.10"
+WORKER_VERSION = "0.2.12"
 
 import bpy
 import sys
@@ -717,4 +717,15 @@ if collect_estimation_data:
 _dlog(f"exit: bake_seconds={bake_seconds:.1f}  render_seconds={render_seconds:.1f}  frames_rendered={frames_actually_rendered}")
 _log(f"[{name}] Exiting Blender.")
 _close_log()
+
+# Write completion sentinel so the launcher can detect exit-code-0 crashes.
+# The launcher treats a missing sentinel as a crash even when Blender exits 0.
+_jobs_dir  = os.path.dirname(job_path)
+_job_stem  = os.path.splitext(os.path.basename(job_path))[0]
+try:
+    with open(os.path.join(_jobs_dir, _job_stem + ".worker_done"), "w") as _wdf:
+        _wdf.write(datetime.datetime.now().isoformat() + "\n")
+except OSError:
+    pass
+
 bpy.ops.wm.quit_blender()

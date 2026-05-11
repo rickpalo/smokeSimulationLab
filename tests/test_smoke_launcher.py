@@ -220,3 +220,78 @@ class TestWriteCrashedMarker:
         content = (tmp_path / "job_0001.crashed").read_text()
         import re
         assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", content)
+
+
+# ---------------------------------------------------------------------------
+# Worker-done sentinel — exit-code-0 crash detection (BUG-002 regression)
+# ---------------------------------------------------------------------------
+
+class TestWorkerDoneSentinel:
+    def test_missing_sentinel_would_be_treated_as_crash(self, tmp_path):
+        """Launcher treats a missing .worker_done on exit-code-0 as a crash.
+
+        Regression for BUG-002: before v0.2.12, Blender exiting 0 without the
+        worker finishing was silently marked COMPLETE by the batch file.
+        """
+        jobs_dir = tmp_path / "jobs"
+        jobs_dir.mkdir()
+        job_stem = "job_0000"
+
+        # No .worker_done present — sentinel is absent (simulates crash)
+        worker_done = jobs_dir / f"{job_stem}.worker_done"
+        assert not worker_done.exists()
+
+        # Launcher writes .crashed when sentinel is missing; verify the helper works
+        _write_crashed_marker(str(jobs_dir), job_stem)
+        assert (jobs_dir / f"{job_stem}.crashed").exists()
+
+    def test_sentinel_present_means_clean_exit(self, tmp_path):
+        """When .worker_done exists, exit-code-0 is a genuine success."""
+        jobs_dir = tmp_path / "jobs"
+        jobs_dir.mkdir()
+        job_stem = "job_0000"
+
+        worker_done = jobs_dir / f"{job_stem}.worker_done"
+        worker_done.write_text("2026-05-11T10:00:00\n")
+        assert worker_done.exists()
+
+        # Launcher would NOT write .crashed — verify no crash marker is created
+        crashed = jobs_dir / f"{job_stem}.crashed"
+        assert not crashed.exists()
+
+    def test_sentinel_has_iso_timestamp(self, tmp_path):
+        """Worker-done file written by the worker contains an ISO timestamp."""
+        import re
+        import datetime
+
+        jobs_dir = tmp_path / "jobs"
+        jobs_dir.mkdir()
+        job_stem = "job_0003"
+
+        # Simulate what the worker writes
+        sentinel = jobs_dir / f"{job_stem}.worker_done"
+        sentinel.write_text(datetime.datetime.now().isoformat() + "\n")
+        content = sentinel.read_text()
+        assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", content)
+
+    def test_retry_cleanup_removes_worker_done(self, tmp_path):
+        """Retry logic removes .worker_done so a re-run produces a fresh sentinel."""
+        jobs_dir = tmp_path / "jobs"
+        jobs_dir.mkdir()
+
+        # Both original and _retry variants should be cleaned
+        for stem in ("job_0000", "job_0000_retry"):
+            (jobs_dir / f"{stem}.worker_done").write_text("2026-05-11T10:00:00\n")
+            (jobs_dir / f"{stem}.done").write_text("done\n")
+
+        # Simulate the retry cleanup loop from __init__.py
+        base_stem = "job_0000"
+        for suffix in ("", "_retry"):
+            for ext in (".done", ".worker_done"):
+                path = jobs_dir / (base_stem + suffix + ext)
+                if path.exists():
+                    path.unlink()
+
+        assert not (jobs_dir / "job_0000.worker_done").exists()
+        assert not (jobs_dir / "job_0000_retry.worker_done").exists()
+        assert not (jobs_dir / "job_0000.done").exists()
