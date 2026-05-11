@@ -30,7 +30,7 @@ Behaviour
 No third-party dependencies — stdlib + tasklist.exe (built into Windows).
 """
 
-LAUNCHER_VERSION = "0.2.12"
+LAUNCHER_VERSION = "0.2.13"
 
 import atexit
 import ctypes
@@ -41,9 +41,11 @@ import subprocess
 import sys
 import time
 
-_POLL_INTERVAL          = 0.5   # seconds between crash-dialog / stale-log checks
-_STALE_LOG_TIMEOUT      = 1800  # seconds of log inactivity before killing a stuck job
-_POST_EXIT_WERFAULT_SECS = 30   # seconds to keep checking for WerFault after exit
+_POLL_INTERVAL           = 0.5   # seconds between crash-dialog / stale-log checks
+_STARTUP_TIMEOUT         = 120   # seconds to wait for the first log write before giving up
+_STALE_LOG_TIMEOUT       = 1800  # seconds of log inactivity (after first write) before killing
+_WALL_CLOCK_TIMEOUT      = 14400 # 4-hour absolute per-job ceiling regardless of log activity
+_POST_EXIT_WERFAULT_SECS = 30    # seconds to keep checking for WerFault after exit
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +319,8 @@ def main():
         else:
             print("[smoke_launcher] Warning: could not assign Blender to Job Object")
 
-    # Stale-log watchdog state.
+    # Watchdog state.
+    _launch_time   = time.time()
     last_log_mtime = None
     stale_since    = None
 
@@ -331,20 +334,49 @@ def main():
                 _kill_pid(wer_pid, "WerFault")
             break
 
+        _elapsed = time.time() - _launch_time
+
+        # ── Wall-clock timeout (absolute per-job ceiling) ────────────────────
+        if _elapsed >= _WALL_CLOCK_TIMEOUT:
+            _dlog(f"wall-clock watchdog: elapsed={int(_elapsed)}s  "
+                  f"threshold={_WALL_CLOCK_TIMEOUT}s")
+            print(f"[smoke_launcher] Job {job_stem} exceeded "
+                  f"{_WALL_CLOCK_TIMEOUT // 3600}h wall-clock limit — killing")
+            _save_crash_log(jobs_dir, job_stem)
+            _kill_pid(blender_pid, "Blender (wall-clock)")
+            proc.wait()
+            _write_crashed_marker(jobs_dir, job_stem)
+            sys.exit(1)
+
         # ── Stale-log watchdog ───────────────────────────────────────────────
         if log_path:
             try:
                 cur_mtime = os.path.getmtime(log_path)
             except OSError:
                 cur_mtime = None
-            if cur_mtime is not None:
+
+            if cur_mtime is None:
+                # Log file not yet created — startup timeout.
+                if _elapsed >= _STARTUP_TIMEOUT:
+                    _dlog(f"startup watchdog: no log after {int(_elapsed)}s  "
+                          f"threshold={_STARTUP_TIMEOUT}s")
+                    print(f"[smoke_launcher] No log created in {int(_elapsed)}s "
+                          f"— killing stuck job {job_stem}")
+                    _save_crash_log(jobs_dir, job_stem)
+                    _kill_pid(blender_pid, "Blender (startup timeout)")
+                    proc.wait()
+                    _write_crashed_marker(jobs_dir, job_stem)
+                    sys.exit(1)
+            else:
+                # Log exists — track inactivity.
                 if cur_mtime != last_log_mtime:
                     last_log_mtime = cur_mtime
                     stale_since    = time.time()
                 elif stale_since is not None:
                     idle_secs = time.time() - stale_since
                     if idle_secs >= _STALE_LOG_TIMEOUT:
-                        _dlog(f"stale watchdog: idle={int(idle_secs)}s  threshold={_STALE_LOG_TIMEOUT}s")
+                        _dlog(f"stale watchdog: idle={int(idle_secs)}s  "
+                              f"threshold={_STALE_LOG_TIMEOUT}s")
                         print(f"[smoke_launcher] No log activity for "
                               f"{int(idle_secs)}s — killing stuck job {job_stem}")
                         _save_crash_log(jobs_dir, job_stem)

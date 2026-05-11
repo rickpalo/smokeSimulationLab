@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 12),
+    "version":     (0, 2, 13),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -72,7 +72,7 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
 _EXPECTED_WORKER_VERSION   = "0.2.12"
-_EXPECTED_LAUNCHER_VERSION = "0.2.12"
+_EXPECTED_LAUNCHER_VERSION = "0.2.13"
 
 
 def _read_helper_version(path: str, var_name: str) -> str:
@@ -872,6 +872,7 @@ class SmokeJobItem(bpy.types.PropertyGroup):
             ('RETRYING',    "Retrying",     ""),
             ('COMPLETE',    "Complete",     ""),
             ('FAILED',      "Failed",       ""),
+            ('CRASHED',     "Crashed",      ""),
         ],
         default='NOT_STARTED',
     )
@@ -882,10 +883,11 @@ class SMOKE_UL_job_log(bpy.types.UIList):
 
     _STATUS_ICONS = {
         'NOT_STARTED': 'RADIOBUT_OFF',
-        'IN_PROGRESS': 'SEQUENCE_COLOR_07',  # blue  — active / running
+        'IN_PROGRESS': 'SEQUENCE_COLOR_07',  # blue   — active / running
         'RETRYING':    'SEQUENCE_COLOR_04',  # yellow — transient error, retrying
         'COMPLETE':    'SEQUENCE_COLOR_05',  # green  — success
-        'FAILED':      'SEQUENCE_COLOR_01',  # red    — permanent failure
+        'FAILED':      'SEQUENCE_COLOR_01',  # red    — controlled failure (worker reported error)
+        'CRASHED':     'SEQUENCE_COLOR_02',  # orange — unexpected process crash
     }
 
     def draw_item(self, context, layout, data, item, icon,
@@ -1767,11 +1769,12 @@ def _update_job_log_statuses(s, jobs_dir):
 
     active_index = -1
     for idx, item in enumerate(s.job_log_items):
-        n          = f"{item.job_number - 1:04d}"   # job_number is 1-based; filenames are 0-based
-        retry_done = f"job_{n}_retry.done"
-        first_done = f"job_{n}.done"
-        retry_log  = f"job_{n}_retry.log"
-        first_log  = f"job_{n}.log"
+        n             = f"{item.job_number - 1:04d}"   # job_number is 1-based; filenames are 0-based
+        retry_done    = f"job_{n}_retry.done"
+        first_done    = f"job_{n}.done"
+        retry_log     = f"job_{n}_retry.log"
+        first_log     = f"job_{n}.log"
+        first_crashed = f"job_{n}.crashed"
 
         def _has_error(fname):
             try:
@@ -1781,13 +1784,22 @@ def _update_job_log_statuses(s, jobs_dir):
                 return False
 
         if retry_done in all_files:
+            # Retry completed — it supersedes any first-run crash.
             _job_statuses[item.job_number] = 'FAILED' if _has_error(retry_done) else 'COMPLETE'
         elif retry_log in all_files:
             _job_statuses[item.job_number] = 'RETRYING'
             if active_index < 0:
                 active_index = idx
         elif first_done in all_files:
-            _job_statuses[item.job_number] = 'FAILED' if _has_error(first_done) else 'COMPLETE'
+            # First run finished. Distinguish crash (unexpected exit) from
+            # controlled failure (worker called sys.exit(1)).
+            if first_crashed in all_files and _has_error(first_done):
+                _job_statuses[item.job_number] = 'CRASHED'
+            else:
+                _job_statuses[item.job_number] = 'FAILED' if _has_error(first_done) else 'COMPLETE'
+        elif first_crashed in all_files:
+            # Launcher wrote .crashed but batch never wrote .done (rare — launcher itself crashed).
+            _job_statuses[item.job_number] = 'CRASHED'
         elif first_log in all_files:
             _job_statuses[item.job_number] = 'IN_PROGRESS'
             if active_index < 0:
@@ -1800,15 +1812,16 @@ def _update_job_log_statuses(s, jobs_dir):
 
 
 def _compute_batch_summary(jobs_dir, elapsed_secs):
-    """Scan done files and return (line1, line2, line3, line4) summary strings.
+    """Scan done/crashed files and return (line1, line2, line3, line4) summary strings.
 
     line3 and line4 are empty strings when the respective counts are zero.
+    Crashed (unexpected process crash) is reported separately from Failed
+    (worker-controlled error exit).
     """
     try:
         all_files = os.listdir(jobs_dir)
     except OSError:
         all_files = []
-
     def _has_error(fname):
         try:
             with open(os.path.join(jobs_dir, fname)) as fh:
@@ -1816,30 +1829,39 @@ def _compute_batch_summary(jobs_dir, elapsed_secs):
         except OSError:
             return False
 
-    first_dones = [f for f in all_files if f.endswith(".done") and "_retry" not in f]
-    retry_dones = [f for f in all_files if f.endswith("_retry.done")]
+    first_dones   = [f for f in all_files if f.endswith(".done")    and "_retry" not in f]
+    retry_dones   = [f for f in all_files if f.endswith("_retry.done")]
+    # Base stems that have a .crashed marker (first-run only; retries don't go through launcher)
+    crashed_bases = {f[:-8] for f in all_files if f.endswith(".crashed") and "_retry" not in f}
 
     first_failed_stems = {f[:-5] for f in first_dones if _has_error(f)}
+    # Stems that eventually succeeded via retry
+    retry_ok_bases   = {f[:-11] for f in retry_dones if not _has_error(f)}
+    retry_fail_bases = {f[:-11] for f in retry_dones if     _has_error(f)}
+    retry_ok   = len(retry_ok_bases)
+    retry_fail = len(retry_fail_bases)
 
-    retry_ok = retry_fail = 0
-    for f in retry_dones:
-        if _has_error(f):
-            retry_fail += 1
-        else:
-            retry_ok   += 1
+    # First-run failures not resolved by a successful retry
+    unresolved = first_failed_stems - retry_ok_bases
+    total_crashed = len(unresolved & crashed_bases)
+    total_failed  = len(unresolved - crashed_bases) + retry_fail
 
-    no_retry_fail  = max(len(first_failed_stems) - (retry_ok + retry_fail), 0)
     clean_complete = len(first_dones) - len(first_failed_stems)
     total_complete = clean_complete + retry_ok
-    total_failed   = retry_fail + no_retry_fail
 
     def _n(count, noun):
         return f"{count} {noun}{'s' if count != 1 else ''}"
 
     line1 = f"All Jobs Finished — {_format_elapsed(elapsed_secs)}"
     line2 = f"{_n(total_complete, 'Job')} Complete"
-    line3 = f"{_n(retry_ok,     'Job')} Error, but Retried Successfully" if retry_ok    > 0 else ""
-    line4 = f"{_n(total_failed, 'Job')} Failed"                          if total_failed > 0 else ""
+    # line3: crashed takes priority over "retried successfully"; both can't fit in 4 lines
+    if total_crashed > 0:
+        line3 = f"{_n(total_crashed, 'Job')} Crashed"
+    elif retry_ok > 0:
+        line3 = f"{_n(retry_ok, 'Job')} Error, but Retried Successfully"
+    else:
+        line3 = ""
+    line4 = f"{_n(total_failed, 'Job')} Failed" if total_failed > 0 else ""
     return line1, line2, line3, line4
 
 

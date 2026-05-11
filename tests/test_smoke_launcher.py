@@ -8,7 +8,10 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts", "SmokeSimLab"))
 
-from smoke_launcher import _find_werfault_for_pid, _save_crash_log, _write_crashed_marker
+from smoke_launcher import (
+    _find_werfault_for_pid, _save_crash_log, _write_crashed_marker,
+    _STARTUP_TIMEOUT, _STALE_LOG_TIMEOUT, _WALL_CLOCK_TIMEOUT,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +278,7 @@ class TestWorkerDoneSentinel:
         assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", content)
 
     def test_retry_cleanup_removes_worker_done(self, tmp_path):
+
         """Retry logic removes .worker_done so a re-run produces a fresh sentinel."""
         jobs_dir = tmp_path / "jobs"
         jobs_dir.mkdir()
@@ -295,3 +299,109 @@ class TestWorkerDoneSentinel:
         assert not (jobs_dir / "job_0000.worker_done").exists()
         assert not (jobs_dir / "job_0000_retry.worker_done").exists()
         assert not (jobs_dir / "job_0000.done").exists()
+
+
+# ---------------------------------------------------------------------------
+# Watchdog timeout constants — sanity checks (BUG-002 regression)
+# ---------------------------------------------------------------------------
+
+class TestWatchdogConstants:
+    def test_startup_timeout_is_positive_and_reasonable(self):
+        """STARTUP_TIMEOUT must be positive and ≤ STALE_LOG_TIMEOUT."""
+        assert _STARTUP_TIMEOUT > 0
+        assert _STARTUP_TIMEOUT <= _STALE_LOG_TIMEOUT
+
+    def test_stale_log_timeout_is_positive(self):
+        assert _STALE_LOG_TIMEOUT > 0
+
+    def test_wall_clock_timeout_exceeds_stale_log_timeout(self):
+        """Wall-clock timeout must be larger than stale-log timeout so the
+        stale watchdog fires first for hung-but-logging jobs."""
+        assert _WALL_CLOCK_TIMEOUT > _STALE_LOG_TIMEOUT
+
+    def test_startup_timeout_less_than_wall_clock(self):
+        assert _STARTUP_TIMEOUT < _WALL_CLOCK_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# CRASHED status detection (BUG-002: CRASHED vs FAILED distinction)
+# ---------------------------------------------------------------------------
+
+class TestCrashedStatusDetection:
+    """Unit-tests for the .crashed-file → CRASHED status logic.
+
+    Mirrors the branching in _update_job_log_statuses without importing the
+    full addon (which requires bpy).  Tests encode the expected rules so that
+    any future refactor of the detection logic must update the tests.
+    """
+
+    def _detect_status(self, jobs_dir, n_str):
+        """Reproduce the status-detection logic from _update_job_log_statuses."""
+        import os
+        all_files = set(os.listdir(str(jobs_dir)))
+        retry_done    = f"job_{n_str}_retry.done"
+        first_done    = f"job_{n_str}.done"
+        retry_log     = f"job_{n_str}_retry.log"
+        first_log     = f"job_{n_str}.log"
+        first_crashed = f"job_{n_str}.crashed"
+
+        def _has_error(fname):
+            p = jobs_dir / fname
+            if not p.exists():
+                return False
+            return "error" in p.read_text().lower()
+
+        if retry_done in all_files:
+            return 'FAILED' if _has_error(retry_done) else 'COMPLETE'
+        if retry_log in all_files:
+            return 'RETRYING'
+        if first_done in all_files:
+            if first_crashed in all_files and _has_error(first_done):
+                return 'CRASHED'
+            return 'FAILED' if _has_error(first_done) else 'COMPLETE'
+        if first_crashed in all_files:
+            return 'CRASHED'
+        if first_log in all_files:
+            return 'IN_PROGRESS'
+        return 'NOT_STARTED'
+
+    def test_crash_plus_error_done_is_crashed(self, tmp_path):
+        """A .crashed file alongside an error .done is CRASHED, not FAILED."""
+        (tmp_path / "job_0000.done").write_text("error exit 11 blah\n")
+        (tmp_path / "job_0000.crashed").write_text("crashed 2026-05-11T10:00:00\n")
+        assert self._detect_status(tmp_path, "0000") == 'CRASHED'
+
+    def test_error_done_without_crashed_is_failed(self, tmp_path):
+        """An error .done without .crashed is a controlled FAILED (worker sys.exit(1))."""
+        (tmp_path / "job_0000.done").write_text("error exit 1 blah\n")
+        assert self._detect_status(tmp_path, "0000") == 'FAILED'
+
+    def test_clean_done_is_complete(self, tmp_path):
+        (tmp_path / "job_0000.done").write_text("done 2026-05-11\n")
+        assert self._detect_status(tmp_path, "0000") == 'COMPLETE'
+
+    def test_crashed_without_done_is_crashed(self, tmp_path):
+        """Launcher wrote .crashed but batch never wrote .done (launcher itself crashed)."""
+        (tmp_path / "job_0000.crashed").write_text("crashed 2026-05-11T10:00:00\n")
+        assert self._detect_status(tmp_path, "0000") == 'CRASHED'
+
+    def test_retry_done_supersedes_first_run_crash(self, tmp_path):
+        """A successful retry makes the job COMPLETE even if first run crashed."""
+        (tmp_path / "job_0000.done").write_text("error exit 11\n")
+        (tmp_path / "job_0000.crashed").write_text("crashed\n")
+        (tmp_path / "job_0000_retry.done").write_text("done\n")
+        assert self._detect_status(tmp_path, "0000") == 'COMPLETE'
+
+    def test_retry_done_with_error_is_failed(self, tmp_path):
+        """A failed retry produces FAILED regardless of first-run crash."""
+        (tmp_path / "job_0000.done").write_text("error exit 11\n")
+        (tmp_path / "job_0000.crashed").write_text("crashed\n")
+        (tmp_path / "job_0000_retry.done").write_text("error exit 1\n")
+        assert self._detect_status(tmp_path, "0000") == 'FAILED'
+
+    def test_in_progress_when_only_log_exists(self, tmp_path):
+        (tmp_path / "job_0000.log").write_text("[job] started\n")
+        assert self._detect_status(tmp_path, "0000") == 'IN_PROGRESS'
+
+    def test_not_started_when_no_files(self, tmp_path):
+        assert self._detect_status(tmp_path, "0000") == 'NOT_STARTED'

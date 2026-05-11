@@ -169,12 +169,35 @@ and the batch silently continues (or hangs).
   - `test_sentinel_has_iso_timestamp` — verifies sentinel content format
   - `test_retry_cleanup_removes_worker_done` — verifies cleanup on retry
 
-### Open Items
-- Per-job wall-clock timeout in the launcher (kills after bake+render+margin seconds).
-- UI `CRASHED` status: `_update_job_log_statuses` should show a distinct red dot when
-  `.crashed` marker is present even without a `.done` marker.
-- Pre-log hang: start a startup-timeout timer from job launch; if log file never
-  appears within 120 s, kill and write `.crashed`.
+**Attempt 3 — Startup timeout, wall-clock timeout, CRASHED UI status (v0.2.13)**
+- *Gaps addressed:*
+  - Pre-log hang: Blender starts but worker never writes the first log line.
+  - Absolute hang: Blender and worker are alive but job runs forever.
+  - UI blindspot: CRASHED jobs shown same red as FAILED; no distinct indicator.
+- *Fix (v0.2.13):*
+  - Launcher `_STARTUP_TIMEOUT = 120 s`: if log file never appears within 120 s,
+    kill Blender, write `.crashed`, exit 1.
+  - Launcher `_WALL_CLOCK_TIMEOUT = 14400 s (4 h)`: absolute per-job ceiling
+    regardless of log activity; checked every poll.
+  - Addon `SMOKE_UL_job_log._STATUS_ICONS`: added `'CRASHED': 'SEQUENCE_COLOR_02'`
+    (orange — distinct from FAILED red `SEQUENCE_COLOR_01`).
+  - Addon `SmokeJobLogItem.status` enum: added `'CRASHED'` value.
+  - Addon `_update_job_log_statuses`: sets CRASHED when `.crashed` is present
+    alongside an error `.done`; also when `.crashed` exists without any `.done`
+    (rare: launcher itself crashed before batch wrote `.done`).  A successful
+    retry supersedes the crash and shows COMPLETE.
+  - Addon `_compute_batch_summary`: counts CRASHED separately from FAILED in the
+    4-line summary; "X Jobs Crashed" appears on line3 with priority over the
+    "retried successfully" message.
+  - 12 new tests across `TestWatchdogConstants` and `TestCrashedStatusDetection`.
+- *Status:* **DEPLOYED / UNVERIFIED.**
+
+### Remaining Failure Modes (open)
+
+| Mode | Trigger | Why current code still misses it |
+|------|---------|----------------------------------|
+| **Job Object creation fails** | `ctypes.WinError`, insufficient privilege | Falls back to `SEM_NOGPFAULTERRORBOX` — may not suppress all dialogs |
+| **Blender exits and restarts** | Possible with some crash types | Launcher sees a new PID; original crash goes undetected |
 
 ---
 
