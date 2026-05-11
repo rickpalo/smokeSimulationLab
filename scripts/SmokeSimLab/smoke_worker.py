@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.2.8"
+WORKER_VERSION = "0.2.9"
 
 import bpy
 import sys
@@ -439,23 +439,10 @@ if use_existing_cache:
             _log(f"[{name}]   No candidate with data files found — using this job's cache dir")
 
 _log(f"[{name}]   Effective cache dir  : {effective_cache_dir}")
-d.cache_directory = effective_cache_dir
 
-# Enable resumable baking so a mid-bake crash can be continued on the next run.
-# Without this Blender does not store the solver checkpoint data alongside the
-# VDB output files, and bake_all() cannot resume from a partial cache.
-try:
-    d.cache_resumable = True
-except AttributeError:
-    _log(f"[{name}] WARNING: cache_resumable property not found — partial resume may not work")
-
-bpy.context.view_layer.update()
-_time.sleep(2.0)
-
-# Count baked frames in the effective cache dir.
-# Skip the config/ subdirectory — Mantaflow writes per-frame config checkpoint
-# .uni files there (config_0001.uni, config_0002.uni, …) which match the
-# frame-number pattern but contain no simulation output data.
+# Count baked frames BEFORE assigning d.cache_directory — Blender may
+# reinitialize (and clear) the Mantaflow domain when the cache path is set,
+# which would make the directory appear empty in a post-assignment walk.
 # Three outcomes:
 #   1. Complete cache (all required frames present) → skip bake entirely
 #   2. Partial cache (some frames, not all)         → resume without freeing
@@ -471,6 +458,19 @@ for _root, _dirs, files in os.walk(effective_cache_dir):
         m = re.search(r'_(\d+)\.(vdb|uni)$', f)
         if m:
             baked_frames.add(int(m.group(1)))
+
+d.cache_directory = effective_cache_dir
+
+# Enable resumable baking so a mid-bake crash can be continued on the next run.
+# Without this Blender does not store the solver checkpoint data alongside the
+# VDB output files, and bake_all() cannot resume from a partial cache.
+try:
+    d.cache_resumable = True
+except AttributeError:
+    _log(f"[{name}] WARNING: cache_resumable property not found — partial resume may not work")
+
+bpy.context.view_layer.update()
+_time.sleep(2.0)
 
 _log(f"[{name}] --- Bake decision ---")
 _log(f"[{name}]   Frame range needed : {frame_start}–{frame_end} "

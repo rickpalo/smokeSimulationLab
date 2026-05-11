@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 8),
+    "version":     (0, 2, 9),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -71,7 +71,7 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.2.8"
+_EXPECTED_WORKER_VERSION   = "0.2.9"
 _EXPECTED_LAUNCHER_VERSION = "0.2.6"
 
 
@@ -724,6 +724,7 @@ def export_batch(context):
                f"out={output_path!r}  bpy={bpy.app.version_string}")
 
     # ── Seed the Job Log list (one row per job, status=NOT_STARTED) ─────────
+    _job_statuses.clear()
     s.job_log_items.clear()
     for i, p in enumerate(jobs):
         _log_row = s.job_log_items.add()
@@ -890,13 +891,11 @@ class SMOKE_UL_job_log(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon,
                   active_data, active_propname):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
-            # Guard against RNA race: if the item is transiently zeroed during
-            # a timer write, show a placeholder rather than an empty row.
-            if not item.job_name and item.job_number == 0:
-                layout.label(text="…")
-                return
+            if not item.job_name:
+                return  # transiently-zeroed RNA item; skip rather than show blank row
+            status = _job_statuses.get(item.job_number, item.status)
             split = layout.split(factor=0.10, align=True)
-            split.label(icon=self._STATUS_ICONS.get(item.status, 'NONE'), text="")
+            split.label(icon=self._STATUS_ICONS.get(status, 'NONE'), text="")
             inner = split.split(factor=0.22, align=True)
             inner.label(text=str(item.job_number))
             inner.label(text=item.job_name)
@@ -1748,7 +1747,7 @@ def _format_elapsed(secs):
 
 def _update_job_log_statuses(s, jobs_dir):
     """Refresh each SmokeJobItem status and drive auto-scroll."""
-    global _last_auto_index
+    global _last_auto_index, _job_statuses
 
     # Detect manual scroll: if job_log_index moved since we last wrote it,
     # the user dragged the list — disable auto-scroll for this run.
@@ -1776,18 +1775,18 @@ def _update_job_log_statuses(s, jobs_dir):
                 return False
 
         if retry_done in all_files:
-            item.status = 'FAILED' if _has_error(retry_done) else 'COMPLETE'
+            _job_statuses[item.job_number] = 'FAILED' if _has_error(retry_done) else 'COMPLETE'
         elif retry_log in all_files:
-            item.status = 'RETRYING'
+            _job_statuses[item.job_number] = 'RETRYING'
             if active_index < 0:
                 active_index = idx
         elif first_done in all_files:
-            item.status = 'FAILED' if _has_error(first_done) else 'COMPLETE'
+            _job_statuses[item.job_number] = 'FAILED' if _has_error(first_done) else 'COMPLETE'
         elif first_log in all_files:
-            item.status = 'IN_PROGRESS'
+            _job_statuses[item.job_number] = 'IN_PROGRESS'
             if active_index < 0:
                 active_index = idx
-        # else: leave as NOT_STARTED
+        # else: leave as NOT_STARTED (no entry → draw_item falls back to item.status)
 
     if s.job_log_auto_scroll and active_index >= 0:
         s.job_log_index  = active_index
@@ -1837,6 +1836,12 @@ def _compute_batch_summary(jobs_dir, elapsed_secs):
     line4 = f"{_n(total_failed, 'Job')} Failed"                          if total_failed > 0 else ""
     return line1, line2, line3, line4
 
+
+# ---------------------------------------------------------------------------
+# Job log status cache — keyed by job_number (1-based).
+# _update_job_log_statuses writes here instead of to item.status directly,
+# avoiding the timer–draw RNA race that blanks CollectionProperty rows.
+_job_statuses: dict = {}   # {job_number: status_string}
 
 # ---------------------------------------------------------------------------
 # Job log auto-scroll: last index the timer wrote, so we can detect manual scrolls.
@@ -2162,6 +2167,11 @@ def _poll_batch_progress_impl():
                 if s.batch_render_frame_baseline < 0:
                     _ri = _count_png_frames(jobs_dir, log_stem)
                     s.batch_render_frame_baseline = _ri[0] if _ri else 0
+                    _output_path = os.path.dirname(jobs_dir)
+                    _debug_log(s.collect_debug_log, _output_path, "poller",
+                               f"render baseline set: {s.batch_render_frame_baseline} "
+                               f"existing PNGs; log_stem={log_stem!r} "
+                               f"target={_ri[1] if _ri else '?'}")
                 if not _estim["render_start_logged"]:
                     _estim["render_start_logged"] = True
                     _estim_log({
@@ -2269,6 +2279,9 @@ def _poll_batch_progress_impl():
                     raw_rendered, _ = render_info
                     render_baseline = max(s.batch_render_frame_baseline, 0)
                     rendered_new    = max(raw_rendered - render_baseline, 0)
+                    _debug_log(s.collect_debug_log, os.path.dirname(jobs_dir), "poller",
+                               f"render poll: raw={raw_rendered} baseline={render_baseline} "
+                               f"new={rendered_new} target={render_target}")
                     if render_target > 0:
                         frames_rendered = min(rendered_new, render_target)
                         subtask_text   = f"Rendering ({frames_rendered} of {render_target})"
@@ -2991,6 +3004,7 @@ class SMOKE_OT_remove_all_jobs(bpy.types.Operator):
         s.batch_progress         = ""
         s.show_job_log           = False
         s.job_log_auto_scroll    = True
+        _job_statuses.clear()
         s.job_log_items.clear()
         s.batch_total            = 0
         s.batch_jobs_dir         = ""
@@ -3521,6 +3535,7 @@ def _reset_on_load(dummy=None):
         s.batch_progress         = ""
         s.show_job_log           = False
         s.job_log_auto_scroll    = True
+        _job_statuses.clear()
         s.job_log_items.clear()
         s.batch_total          = 0
         s.batch_jobs_dir       = ""
