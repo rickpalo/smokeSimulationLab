@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 13),
+    "version":     (0, 2, 14),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -892,21 +892,29 @@ class SMOKE_UL_job_log(bpy.types.UIList):
 
     def draw_item(self, context, layout, data, item, icon,
                   active_data, active_propname):
-        if self.layout_type in {'DEFAULT', 'COMPACT'}:
-            # Read job_number from the RNA item only to use as a key/index.
-            # All display text comes from module-level _job_log_rows / _job_statuses
-            # so that timer writes to SmokeSettings never blank the row.
-            job_number = item.job_number          # 0 when RNA item is transiently zeroed
-            idx        = job_number - 1           # 0-based index into _job_log_rows
-            if job_number == 0 or idx >= len(_job_log_rows):
-                return
-            _, job_name = _job_log_rows[idx]
-            status      = _job_statuses.get(job_number, item.status)
-            split = layout.split(factor=0.10, align=True)
-            split.label(icon=self._STATUS_ICONS.get(status, 'NONE'), text="")
-            inner = split.split(factor=0.22, align=True)
-            inner.label(text=str(job_number))
-            inner.label(text=job_name)
+        if self.layout_type not in {'DEFAULT', 'COMPACT'}:
+            return
+        # Use the C pointer to locate this item's position in the collection.
+        # item.job_number is NOT read here because it is an RNA IntProperty that
+        # returns 0 (the RNA default) whenever Blender re-evaluates SmokeSettings
+        # in response to any timer write — causing every active row to go blank.
+        # as_pointer() returns the raw C address, which is stable regardless of
+        # Python-level RNA property re-evaluation.
+        item_ptr = item.as_pointer()
+        idx = next(
+            (i for i, it in enumerate(data.job_log_items)
+             if it.as_pointer() == item_ptr),
+            -1,
+        )
+        if idx < 0 or idx >= len(_job_log_rows):
+            return
+        job_number, job_name = _job_log_rows[idx]
+        status = _job_statuses.get(job_number, 'NOT_STARTED')
+        split = layout.split(factor=0.10, align=True)
+        split.label(icon=self._STATUS_ICONS.get(status, 'NONE'), text="")
+        inner = split.split(factor=0.22, align=True)
+        inner.label(text=str(job_number))
+        inner.label(text=job_name)
 
     def draw_filter(self, context, layout):
         pass  # suppress the filter / sort bar
