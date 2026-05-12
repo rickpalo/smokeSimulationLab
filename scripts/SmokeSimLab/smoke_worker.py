@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.2.12"
+WORKER_VERSION = "0.2.15"
 
 import bpy
 import sys
@@ -421,7 +421,16 @@ for _root, _dirs, files in os.walk(effective_cache_dir):
         if m:
             baked_frames.add(int(m.group(1)))
 
-d.cache_directory = effective_cache_dir
+# Only reassign if the path actually changed.  Reassigning the same path causes
+# Mantaflow to reinitialize the domain and physically delete existing VDB files,
+# destroying a perfectly good cache (BUG-004, recurring in SKIP BAKE path).
+_norm_cur = os.path.normcase(os.path.normpath(d.cache_directory))
+_norm_eff = os.path.normcase(os.path.normpath(effective_cache_dir))
+if _norm_cur != _norm_eff:
+    d.cache_directory = effective_cache_dir
+    _log(f"[{name}] Domain cache_directory updated → {effective_cache_dir}")
+else:
+    _log(f"[{name}] Domain cache_directory unchanged — skipping assignment to preserve VDB files")
 
 # Enable resumable baking so a mid-bake crash can be continued on the next run.
 # Without this Blender does not store the solver checkpoint data alongside the
@@ -506,17 +515,43 @@ else:
     _log(f"[{name}] Bake complete in {bake_seconds:.0f}s.")
     _time.sleep(2.0)
 
-# Verify cache is populated before proceeding to render
-existing_cache_files = []
-for root, dirs, files in os.walk(effective_cache_dir):
-    for f in files:
-        if f.endswith('.vdb') or f.endswith('.uni'):
-            existing_cache_files.append(os.path.join(root, f))
-
-_log(f"[{name}] Cache files found: {len(existing_cache_files)}")
-if len(existing_cache_files) == 0:
-    _log(f"[{name}] ERROR: No cache files under {effective_cache_dir} — skipping render")
-    sys.exit(1)
+# Verify cache is populated before proceeding to render.
+# Use _count_data_files (excludes config/ checkpoint files) so the count is
+# meaningful regardless of domain version.
+_post_bake_count = _count_data_files(effective_cache_dir)
+_log(f"[{name}] Cache data files found: {_post_bake_count}")
+if _post_bake_count == 0:
+    if bake_skipped:
+        # SKIP BAKE decided there was a full cache, but the cache is now empty.
+        # Mantaflow reinitializes the domain (and deletes VDB files) whenever
+        # cache_directory is assigned — even to the same path.  Change 1 guards
+        # against the equal-path case, but if the paths differed the assignment
+        # still ran and wiped the files.  Fall back to a full bake rather than
+        # aborting the job (BUG-004 fallback, v0.2.15).
+        _log(f"[{name}] WARNING: Cache empty after SKIP BAKE — Mantaflow likely "
+             f"reinitialized during cache_directory assignment. Falling back to full bake.")
+        rebaked_frames = set(range(frame_start, frame_end + 1))
+        bake_skipped   = False
+        _log(f"[{name}] Freeing previous cache and baking from scratch (fallback)...")
+        bpy.ops.fluid.free_all()
+        _time.sleep(2.0)
+        _log(f"[{name}] Baking (fallback)...")
+        bake_start   = _time.time()
+        _bake_result = bpy.ops.fluid.bake_all()
+        bake_seconds = _time.time() - bake_start
+        if 'FINISHED' not in _bake_result:
+            _log(f"[{name}] ERROR: Fallback bake did not finish (result: {_bake_result})")
+            sys.exit(1)
+        _log(f"[{name}] Fallback bake complete in {bake_seconds:.0f}s.")
+        _time.sleep(2.0)
+        _post_bake_count = _count_data_files(effective_cache_dir)
+        _log(f"[{name}] Cache data files after fallback bake: {_post_bake_count}")
+        if _post_bake_count == 0:
+            _log(f"[{name}] ERROR: No cache files after fallback bake — cannot render")
+            sys.exit(1)
+    else:
+        _log(f"[{name}] ERROR: No cache files under {effective_cache_dir} — skipping render")
+        sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Update text objects (after bake — includes bake time)

@@ -16,7 +16,7 @@ new attempt is appended under the same issue.
 
 ## BUG-001: Job Log Rows Go Blank
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.11)  
+**Status:** `DEPLOYED / UNVERIFIED` (v0.2.14)  
 **TODOS:** TODO-5, TODO-17, TODO-21  
 **Files:** `__init__.py` — `SMOKE_UL_job_log.draw_item`, `_update_job_log_statuses`
 
@@ -70,7 +70,7 @@ running, completes).
   may trigger Blender to re-evaluate the entire PropertyGroup, momentarily returning
   RNA defaults for ALL CollectionProperty item fields — not just `status`.
 
-**Attempt 4 — Move ALL display data to module-level state (v0.2.11, current)**
+**Attempt 4 — Move ALL display data to module-level state (v0.2.11)**
 - *Hypothesis:* The invariant must be: `draw_item` reads **nothing** that the
   timer writes.  The only safe RNA read is `item.job_number` (a simple integer
   used as a key; if 0, skip the row).  All text data must come from module-level
@@ -83,7 +83,27 @@ running, completes).
     - `job_name = _job_log_rows[idx][1]` — never from RNA.
     - `status = _job_statuses.get(job_number, item.status)`.
   - `_job_log_rows.clear()` added to all 3 reset paths.
-- *Status:* **DEPLOYED / UNVERIFIED.** Awaiting user confirmation in a real batch.
+- *Result:* **INADEQUATE.** User confirmed blank rows persisted in v0.2.11.
+- *Revised analysis:* `draw_item` still read `item.job_number` from RNA to use
+  as the index into `_job_log_rows`.  When the timer wrote any `SmokeSettings`
+  property (e.g. `s.batch_progress`, `s.job_log_index`), Blender re-evaluated
+  the entire PropertyGroup, zeroing `item.job_number` transiently during the
+  draw pass.  `job_number == 0` triggered the early-return guard, blanking the row.
+
+**Attempt 5 — as_pointer() for row identification (v0.2.14)**
+- *Hypothesis:* Reading `item.job_number` from RNA is the final remaining
+  unsafe read in `draw_item`.  The only RNA value completely immune to
+  re-evaluation zeroing is the raw C pointer returned by `item.as_pointer()`.
+  Use the pointer to find the item's index into `_job_log_rows`; never read
+  any RNA property value for display logic.
+- *Code examined:* `draw_item` in `SMOKE_UL_job_log`.
+- *Action (v0.2.14):*
+  - `draw_item` captures `item_ptr = item.as_pointer()` before any RNA reads.
+  - Linear search `_job_log_rows` by pointer: `next(i for i, it in enumerate(data.job_log_items) if it.as_pointer() == item_ptr, -1)`.
+  - `job_number, job_name = _job_log_rows[idx]` — neither is read from RNA.
+  - `status = _job_statuses.get(job_number, 'NOT_STARTED')` — no RNA fallback.
+- *Status:* **DEPLOYED / UNVERIFIED.** Batch was actively running when committed;
+  user has not yet confirmed in a fresh run.
 
 ### Root Cause (confirmed hypothesis)
 Any RNA property write on `SmokeSettings` from the poll timer can cause Blender
@@ -258,8 +278,8 @@ cause not yet confirmed — requires `debug_log.txt` analysis.
 
 ## BUG-004: baked_frames = 0 Despite data_files = 1000
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.9)  
-**Files:** `smoke_worker.py` — bake decision block
+**Status:** `DEPLOYED / UNVERIFIED` (v0.2.15)  
+**Files:** `smoke_worker.py` — bake decision block, post-bake verification block
 
 ### Symptoms
 Cache search log reports `ACCEPT ... data_files=1000` (confirmed 500 VDB pairs
@@ -267,9 +287,13 @@ exist).  Immediately after, bake decision log reports `Data frames found: 0`,
 `Cache dir is empty`, and takes `FULL BAKE` path, destroying and rebaking a
 complete 500-frame cache.
 
+Second recurrence (2026-05-11): SKIP BAKE decision correctly logged, but
+post-bake verification found 0 files and `sys.exit(1)` was called.  The cache
+was present at decision time and gone by the render phase.
+
 ### Investigation
 
-**Single attempt — d.cache_directory clears VDB files**
+**Attempt 1 — d.cache_directory clears VDB files (v0.2.9)**
 - *Hypothesis:* Setting `d.cache_directory = effective_cache_dir` (line 442 at
   the time) triggers Blender/Mantaflow to reinitialize the fluid domain, which
   deletes the existing VDB data files in that directory as part of initialization.
@@ -277,19 +301,65 @@ complete 500-frame cache.
   1000 files.  The `baked_frames` walk ran AFTER the assignment (after
   `view_layer.update()` + `sleep(2.0)`) and found an empty directory.
 - *Evidence:* Chronological ordering in the log matches exactly — "ACCEPT ... 1000"
-  then "Data frames found: 0".  No other code runs between those log lines that
-  could explain the discrepancy.
+  then "Data frames found: 0".  No other code runs between those log lines.
 - *Fix (v0.2.9):* Moved the `baked_frames` `os.walk` to BEFORE
   `d.cache_directory = effective_cache_dir`.
+- *Result:* **REGRESSED.** Fix corrected the bake DECISION (now correctly says
+  "SKIP BAKE"), but a second `d.cache_directory =` assignment still existed later
+  in the SKIP BAKE path (the unconditional assignment at the old line 424), which
+  again triggered Mantaflow reinitialization.  Post-bake verification found 0 files.
+
+**Attempt 2 — Path-equality guard, Change 1 (v0.2.15)**
+- *Root cause (recurring):* `d.cache_directory = effective_cache_dir` ran
+  unconditionally even when the path was already set to the correct value.
+  Mantaflow reinitializes the domain (deleting VDB files) on every assignment,
+  even to the same path.
+- *Evidence:* job_0000.log (2026-05-11): `data_files=1000` → SKIP BAKE →
+  `Cache files found: 0` → ERROR.  Assignment at ~line 424 is the only code
+  between those log lines.
+- *Fix (v0.2.15, Change 1):* Added path-equality guard before the assignment:
+  ```python
+  _norm_cur = os.path.normcase(os.path.normpath(d.cache_directory))
+  _norm_eff = os.path.normcase(os.path.normpath(effective_cache_dir))
+  if _norm_cur != _norm_eff:
+      d.cache_directory = effective_cache_dir
+  ```
+  Assignment skipped when paths are already equal → Mantaflow does not reinitialize
+  → VDB files preserved.
+
+**Attempt 2 — Fallback bake, Change 2 (v0.2.15)**
+- *Risk:* If paths were genuinely different (domain pointed at a wrong directory),
+  Change 1 allows the assignment, which will again delete VDB files.
+  The SKIP BAKE decision was made against the correct cache dir but the domain
+  now points at empty space.
+- *Fix (v0.2.15, Change 2):* Replaced post-bake `sys.exit(1)` with recovery logic:
+  - Count post-bake files using `_count_data_files(effective_cache_dir)`.
+  - If count == 0 AND `bake_skipped` is True: log warning, set `rebaked_frames`
+    to all frames, clear `bake_skipped`, call `free_all()` + `bake_all()`,
+    re-verify.  If still 0 after fallback bake → `sys.exit(1)`.
+  - If count == 0 AND `bake_skipped` is False: `sys.exit(1)` (regular bake ran
+    but produced no output — unrecoverable without manual intervention).
 
 ### Root Cause
-**Confirmed (by code inspection and log analysis):** Mantaflow reinitializes
-and clears the cache directory when `d.cache_directory` is assigned.  Frame count
-must be captured before domain property assignment.
+**Confirmed:** Mantaflow reinitializes and clears the cache directory on every
+`d.cache_directory = ...` assignment, even if the value is identical to the
+current one.  All `baked_frames` capture and SKIP BAKE decisions must complete
+before any domain property assignment.
 
 ### Tests Added
-None — requires Blender runtime to test.  Manual verification: re-run a job with
-`use_existing_cache = True` on a complete cache and confirm "SKIP BAKE" is logged.
+`TestBug004PathEqualityGuard` (5 tests, v0.2.15):
+- Equal paths → guard fires (no assignment).
+- Different paths → assignment allowed.
+- Trailing slash normalized.
+- Case-insensitive on Windows.
+- Double-slash normalized.
+
+`TestBug004FallbackBakeLogic` (5 tests, v0.2.15):
+- SKIP BAKE + 0 files → fallback triggered.
+- Full bake + 0 files → sys.exit.
+- Non-zero files → no intervention.
+- `_count_data_files` excludes `config/` dir.
+- `_count_data_files` returns 0 for empty dir.
 
 ---
 

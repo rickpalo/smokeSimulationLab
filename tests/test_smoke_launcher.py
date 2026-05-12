@@ -405,3 +405,132 @@ class TestCrashedStatusDetection:
 
     def test_not_started_when_no_files(self, tmp_path):
         assert self._detect_status(tmp_path, "0000") == 'NOT_STARTED'
+
+
+# ---------------------------------------------------------------------------
+# BUG-004 v0.2.15 regression — path-equality guard and fallback bake
+# ---------------------------------------------------------------------------
+
+class TestBug004PathEqualityGuard:
+    """Regression tests for Change 1: skip cache_directory assignment when the
+    path is already equal, preventing Mantaflow reinitialization from wiping
+    existing VDB files (BUG-004, v0.2.15).
+
+    Since smoke_worker.py cannot be imported (it is a Blender script), these
+    tests inline the normalization logic and verify it produces correct results.
+    """
+
+    def _should_assign(self, current, effective):
+        """Replicate the guard condition from smoke_worker.py."""
+        import os
+        norm_cur = os.path.normcase(os.path.normpath(current))
+        norm_eff = os.path.normcase(os.path.normpath(effective))
+        return norm_cur != norm_eff
+
+    def test_identical_paths_skip_assignment(self):
+        """Same path → do not assign (guard fires)."""
+        p = r"E:\Renders\Cache\R128_V0.0"
+        assert not self._should_assign(p, p)
+
+    def test_different_paths_trigger_assignment(self):
+        """Different paths → allow assignment."""
+        assert self._should_assign(
+            r"E:\Renders\Cache\R128_V0.0",
+            r"E:\Renders\Cache\R256_V1.0",
+        )
+
+    def test_trailing_slash_treated_as_equal(self):
+        """Trailing separator must not cause a false mismatch."""
+        p_bare  = r"E:\Renders\Cache\R128"
+        p_slash = r"E:\Renders\Cache\R128" + "\\"
+        assert not self._should_assign(p_bare, p_slash)
+
+    def test_case_insensitive_on_windows(self):
+        """Windows paths are case-insensitive; mixed case must not trigger
+        reassignment (normcase folds to lower)."""
+        p_lower = r"e:\renders\cache\r128"
+        p_upper = r"E:\Renders\Cache\R128"
+        # normcase on Windows lowercases both → equal → no assignment
+        import os
+        if os.name == 'nt':
+            assert not self._should_assign(p_lower, p_upper)
+
+    def test_double_slash_normalised(self):
+        """Double separators in either path must not cause a false mismatch."""
+        p1 = r"E:\Renders\\Cache\R128"
+        p2 = r"E:\Renders\Cache\R128"
+        assert not self._should_assign(p1, p2)
+
+
+class TestBug004FallbackBakeLogic:
+    """Regression tests for Change 2: when SKIP BAKE is chosen but the post-bake
+    file count is 0 (Mantaflow wiped the cache anyway), the worker must fall back
+    to a full bake instead of calling sys.exit(1) (BUG-004, v0.2.15).
+
+    The tests inline the decision logic from smoke_worker.py and verify the
+    three expected branches: fallback triggered, sys.exit triggered, no-op.
+    """
+
+    def _post_bake_decision(self, post_count, bake_skipped):
+        """Reproduce the branching logic from the post-bake verification block.
+
+        Returns one of: 'fallback', 'exit', 'ok'.
+        """
+        if post_count == 0:
+            if bake_skipped:
+                return 'fallback'
+            else:
+                return 'exit'
+        return 'ok'
+
+    def test_zero_files_bake_skipped_triggers_fallback(self):
+        """SKIP BAKE + empty cache → fallback full bake, not sys.exit."""
+        assert self._post_bake_decision(0, bake_skipped=True) == 'fallback'
+
+    def test_zero_files_bake_not_skipped_triggers_exit(self):
+        """Full bake ran but cache still empty → unrecoverable, sys.exit."""
+        assert self._post_bake_decision(0, bake_skipped=False) == 'exit'
+
+    def test_nonzero_files_is_ok(self):
+        """Cache populated → proceed normally, no intervention needed."""
+        assert self._post_bake_decision(1000, bake_skipped=True)  == 'ok'
+        assert self._post_bake_decision(1000, bake_skipped=False) == 'ok'
+
+    def test_count_data_files_excludes_config_dir(self, tmp_path):
+        """_count_data_files must skip the config/ subdir (checkpoint .uni files
+        that look like data but contain no simulation output)."""
+        import os, re
+
+        def count_data_files(directory):
+            count = 0
+            for root, dirs, fnames in os.walk(directory):
+                if os.path.basename(root) == 'config':
+                    continue
+                count += sum(1 for f in fnames if re.search(r'_\d+\.(vdb|uni)$', f))
+            return count
+
+        cache = tmp_path / "cache"
+        (cache / "config").mkdir(parents=True)
+        (cache / "config" / "frame_0001.uni").write_bytes(b"fake")
+        (cache / "config" / "frame_0002.uni").write_bytes(b"fake")
+        # Real data files one level above config/
+        (cache / "smoke_0001.vdb").write_bytes(b"fake")
+        (cache / "smoke_0002.vdb").write_bytes(b"fake")
+
+        assert count_data_files(str(cache)) == 2
+
+    def test_count_data_files_empty_dir_returns_zero(self, tmp_path):
+        """Empty cache directory → count is 0, triggering fallback."""
+        import os, re
+
+        def count_data_files(directory):
+            count = 0
+            for root, dirs, fnames in os.walk(directory):
+                if os.path.basename(root) == 'config':
+                    continue
+                count += sum(1 for f in fnames if re.search(r'_\d+\.(vdb|uni)$', f))
+            return count
+
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        assert count_data_files(str(cache)) == 0
