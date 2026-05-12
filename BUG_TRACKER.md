@@ -16,7 +16,7 @@ new attempt is appended under the same issue.
 
 ## BUG-001: Job Log Rows Go Blank
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.14)  
+**Status:** `DEPLOYED / UNVERIFIED` (v0.2.16)  
 **TODOS:** TODO-5, TODO-17, TODO-21  
 **Files:** `__init__.py` — `SMOKE_UL_job_log.draw_item`, `_update_job_log_statuses`
 
@@ -102,15 +102,39 @@ running, completes).
   - Linear search `_job_log_rows` by pointer: `next(i for i, it in enumerate(data.job_log_items) if it.as_pointer() == item_ptr, -1)`.
   - `job_number, job_name = _job_log_rows[idx]` — neither is read from RNA.
   - `status = _job_statuses.get(job_number, 'NOT_STARTED')` — no RNA fallback.
-- *Status:* **DEPLOYED / UNVERIFIED.** Batch was actively running when committed;
-  user has not yet confirmed in a fresh run.
+- *Result:* **INADEQUATE.** User confirmed blank rows still occurred.
+- *Revised analysis:* The pointer comparison `item.as_pointer() == it.as_pointer()`
+  never matches.  Blender's UIList implementation either passes a copy of the
+  item's C data to `draw_item` (not the original collection node), or the
+  Python wrappers for `data.job_log_items` produce different C addresses than
+  the `item` passed by the UIList draw loop.  The linear scan always returns
+  `idx = -1` → early return → blank row.
+  Secondary issue: `_update_job_log_statuses` still read `item.job_number` from
+  RNA to key `_job_statuses`, so status entries were written under key 0 when
+  RNA zeroing occurred.
+
+**Attempt 6 — UIList `index` parameter (v0.2.16)**
+- *Root cause (final):* Blender's UIList passes an `index` parameter to
+  `draw_item` — the item's 0-based position in the displayed list.  Since we
+  apply no filtering, this equals the collection index.  Every previous attempt
+  tried to RE-DERIVE this index from RNA or C pointers, all of which are
+  unreliable.  Blender already computed the correct index and offers it for free.
+- *Code examined:* Blender Python API `UIList.draw_item` signature.
+- *Action (v0.2.16):*
+  - `draw_item` signature extended to `(..., index=0)`.
+  - `index` used directly: `_job_log_rows[index]` — zero RNA reads, zero
+    pointer comparisons, zero search loops.
+  - `_update_job_log_statuses` converted to `for idx in range(len(s.job_log_items))`
+    with `job_number = _job_log_rows[idx][0]` — eliminates the last remaining
+    `item.job_number` RNA read in the hot path.
+- *Status:* **DEPLOYED / UNVERIFIED.** Awaiting user confirmation.
 
 ### Root Cause (confirmed hypothesis)
 Any RNA property write on `SmokeSettings` from the poll timer can cause Blender
 to re-evaluate the PropertyGroup, returning RNA defaults for `CollectionProperty`
-item sub-fields during the concurrent draw pass.  The only complete fix is to
-ensure `draw_item` reads nothing from RNA items except the minimum integer key
-needed to look up module-level display data.
+item sub-fields during the concurrent draw pass.  The correct fix is to use the
+`index` parameter that Blender's UIList passes to `draw_item` — it is computed
+by Blender's internal draw loop and does not touch RNA property values.
 
 ### Tests Added
 None — this is a Blender-internal draw/RNA issue with no testable pure-Python

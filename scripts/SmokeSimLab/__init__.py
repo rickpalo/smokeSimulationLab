@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 15),
+    "version":     (0, 2, 16),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -891,24 +891,15 @@ class SMOKE_UL_job_log(bpy.types.UIList):
     }
 
     def draw_item(self, context, layout, data, item, icon,
-                  active_data, active_propname):
+                  active_data, active_propname, index=0):
         if self.layout_type not in {'DEFAULT', 'COMPACT'}:
             return
-        # Use the C pointer to locate this item's position in the collection.
-        # item.job_number is NOT read here because it is an RNA IntProperty that
-        # returns 0 (the RNA default) whenever Blender re-evaluates SmokeSettings
-        # in response to any timer write — causing every active row to go blank.
-        # as_pointer() returns the raw C address, which is stable regardless of
-        # Python-level RNA property re-evaluation.
-        item_ptr = item.as_pointer()
-        idx = next(
-            (i for i, it in enumerate(data.job_log_items)
-             if it.as_pointer() == item_ptr),
-            -1,
-        )
-        if idx < 0 or idx >= len(_job_log_rows):
+        # Blender passes `index` — the item's position in the displayed list.
+        # Since we apply no filtering, this equals the collection index and maps
+        # directly to _job_log_rows.  No RNA property reads needed at all.
+        if index >= len(_job_log_rows):
             return
-        job_number, job_name = _job_log_rows[idx]
+        job_number, job_name = _job_log_rows[index]
         status = _job_statuses.get(job_number, 'NOT_STARTED')
         split = layout.split(factor=0.10, align=True)
         split.label(icon=self._STATUS_ICONS.get(status, 'NONE'), text="")
@@ -1776,8 +1767,13 @@ def _update_job_log_statuses(s, jobs_dir):
         return
 
     active_index = -1
-    for idx, item in enumerate(s.job_log_items):
-        n             = f"{item.job_number - 1:04d}"   # job_number is 1-based; filenames are 0-based
+    for idx in range(len(s.job_log_items)):
+        if idx >= len(_job_log_rows):
+            break
+        # Read job_number from module-level state, not from RNA (item.job_number
+        # can return 0 when Blender re-evaluates SmokeSettings mid-timer-write).
+        job_number    = _job_log_rows[idx][0]
+        n             = f"{job_number - 1:04d}"   # job_number is 1-based; filenames are 0-based
         retry_done    = f"job_{n}_retry.done"
         first_done    = f"job_{n}.done"
         retry_log     = f"job_{n}_retry.log"
@@ -1793,26 +1789,26 @@ def _update_job_log_statuses(s, jobs_dir):
 
         if retry_done in all_files:
             # Retry completed — it supersedes any first-run crash.
-            _job_statuses[item.job_number] = 'FAILED' if _has_error(retry_done) else 'COMPLETE'
+            _job_statuses[job_number] = 'FAILED' if _has_error(retry_done) else 'COMPLETE'
         elif retry_log in all_files:
-            _job_statuses[item.job_number] = 'RETRYING'
+            _job_statuses[job_number] = 'RETRYING'
             if active_index < 0:
                 active_index = idx
         elif first_done in all_files:
             # First run finished. Distinguish crash (unexpected exit) from
             # controlled failure (worker called sys.exit(1)).
             if first_crashed in all_files and _has_error(first_done):
-                _job_statuses[item.job_number] = 'CRASHED'
+                _job_statuses[job_number] = 'CRASHED'
             else:
-                _job_statuses[item.job_number] = 'FAILED' if _has_error(first_done) else 'COMPLETE'
+                _job_statuses[job_number] = 'FAILED' if _has_error(first_done) else 'COMPLETE'
         elif first_crashed in all_files:
             # Launcher wrote .crashed but batch never wrote .done (rare — launcher itself crashed).
-            _job_statuses[item.job_number] = 'CRASHED'
+            _job_statuses[job_number] = 'CRASHED'
         elif first_log in all_files:
-            _job_statuses[item.job_number] = 'IN_PROGRESS'
+            _job_statuses[job_number] = 'IN_PROGRESS'
             if active_index < 0:
                 active_index = idx
-        # else: leave as NOT_STARTED (no entry → draw_item falls back to item.status)
+        # else: no entry → draw_item defaults to NOT_STARTED
 
     if s.job_log_auto_scroll and active_index >= 0:
         s.job_log_index  = active_index
