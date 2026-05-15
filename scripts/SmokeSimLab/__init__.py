@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 16),
+    "version":     (0, 2, 17),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -71,7 +71,7 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.2.15"
+_EXPECTED_WORKER_VERSION   = "0.2.17"
 _EXPECTED_LAUNCHER_VERSION = "0.2.13"
 
 
@@ -891,18 +891,23 @@ class SMOKE_UL_job_log(bpy.types.UIList):
     }
 
     def draw_item(self, context, layout, data, item, icon,
-                  active_data, active_propname, index=0):
+                  active_data, active_propname, index=0, _flt_flag=0):
         if self.layout_type not in {'DEFAULT', 'COMPACT'}:
             return
         # Blender passes `index` — the item's position in the displayed list.
         # Since we apply no filtering, this equals the collection index and maps
         # directly to _job_log_rows.  No RNA property reads needed at all.
+        # flt_flag=0 accepts Blender 5.x passing it as a positional argument.
         if index >= len(_job_log_rows):
             return
         job_number, job_name = _job_log_rows[index]
         status = _job_statuses.get(job_number, 'NOT_STARTED')
+        status_icon = self._STATUS_ICONS.get(status, 'NONE')
         split = layout.split(factor=0.10, align=True)
-        split.label(icon=self._STATUS_ICONS.get(status, 'NONE'), text="")
+        try:
+            split.label(icon=status_icon, text="")
+        except Exception:
+            split.label(icon='NONE', text="")
         inner = split.split(factor=0.22, align=True)
         inner.label(text=str(job_number))
         inner.label(text=job_name)
@@ -2602,8 +2607,12 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         s.show_job_log           = True
         s.job_log_auto_scroll    = True
         _last_auto_index         = 0
-        for _it in s.job_log_items:
-            _it.status = 'NOT_STARTED'
+        _job_statuses.clear()
+        # Repopulate _job_log_rows if it was lost (e.g. addon reload between
+        # Export and Run).  job_log_items is the persistent source of truth.
+        if not _job_log_rows and s.job_log_items:
+            for _it in s.job_log_items:
+                _job_log_rows.append((_it.job_number, _it.job_name))
         s.batch_total          = len(job_files)
         s.batch_jobs_dir       = jobs_dir
         s.batch_progress       = f"0 of {len(job_files)} job(s) complete"
@@ -3600,6 +3609,31 @@ def _reset_on_load(dummy=None):
         s.batch_render_frame_baseline = -1
 
 
+@bpy.app.handlers.persistent
+def _restore_job_log_on_load(_dummy=None):
+    """Repopulate _job_log_rows from saved job_log_items after a blend file loads.
+
+    _reset_on_load clears _job_log_rows (module-level Python state, not saved
+    in the blend file).  If _job_log_rows is somehow empty while job_log_items
+    is not — e.g. due to addon reload ordering — this handler re-syncs them so
+    draw_item never returns blank rows for existing items.
+    """
+    global _job_log_rows
+    _job_log_rows.clear()
+    try:
+        scenes = bpy.data.scenes
+    except AttributeError:
+        return
+    for scene in scenes:
+        s = getattr(scene, "smoke_settings", None)
+        if s is None:
+            continue
+        for _item in s.job_log_items:
+            _job_log_rows.append((_item.job_number, _item.job_name))
+        if _job_log_rows:
+            break
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -3632,6 +3666,10 @@ def register():
     bpy.types.Scene.smoke_settings = bpy.props.PointerProperty(type=SmokeSettings)
     if _reset_on_load not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_reset_on_load)
+    # Runs after _reset_on_load: re-syncs _job_log_rows from saved job_log_items
+    # if any items survived the reset (e.g. due to addon-reload ordering).
+    if _restore_job_log_on_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_restore_job_log_on_load)
     _reset_on_load()  # also reset when scripts are reloaded
 
 
@@ -3639,6 +3677,8 @@ def unregister():
     """Unregister all classes and remove the Scene property."""
     if _reset_on_load in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_reset_on_load)
+    if _restore_job_log_on_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_restore_job_log_on_load)
     if bpy.app.timers.is_registered(_poll_batch_progress):
         bpy.app.timers.unregister(_poll_batch_progress)
     for c in reversed(classes):

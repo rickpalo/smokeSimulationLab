@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.2.15"
+WORKER_VERSION = "0.2.17"
 
 import bpy
 import sys
@@ -426,8 +426,10 @@ for _root, _dirs, files in os.walk(effective_cache_dir):
 # destroying a perfectly good cache (BUG-004, recurring in SKIP BAKE path).
 _norm_cur = os.path.normcase(os.path.normpath(d.cache_directory))
 _norm_eff = os.path.normcase(os.path.normpath(effective_cache_dir))
+_assignment_ran = False
 if _norm_cur != _norm_eff:
     d.cache_directory = effective_cache_dir
+    _assignment_ran = True
     _log(f"[{name}] Domain cache_directory updated → {effective_cache_dir}")
 else:
     _log(f"[{name}] Domain cache_directory unchanged — skipping assignment to preserve VDB files")
@@ -442,6 +444,27 @@ except AttributeError:
 
 bpy.context.view_layer.update()
 _time.sleep(2.0)
+
+# If the cache_directory assignment ran, the Mantaflow domain was
+# reinitialized and VDB files at the target path were wiped.  Re-walk to
+# get post-assignment reality so the bake decision is correct.
+if _assignment_ran:
+    _pre_assign_count = len(baked_frames)
+    baked_frames = set()
+    _all_cache_files = []
+    for _root, _dirs, files in os.walk(effective_cache_dir):
+        subdir = os.path.basename(_root)
+        for f in files:
+            _all_cache_files.append(f)
+            if subdir == 'config':
+                continue
+            m = re.search(r'_(\d+)\.(vdb|uni)$', f)
+            if m:
+                baked_frames.add(int(m.group(1)))
+    if _pre_assign_count > 0 and len(baked_frames) == 0:
+        _log(f"[{name}] NOTE: Domain reassignment wiped cache "
+             f"({_pre_assign_count} frames before assignment, 0 after). "
+             f"Bake decision will reflect empty cache.")
 
 _log(f"[{name}] --- Bake decision ---")
 _log(f"[{name}]   Frame range needed : {frame_start}–{frame_end} "

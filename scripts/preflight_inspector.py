@@ -178,10 +178,29 @@ if _s is not None:
 else:
     s = None
 
-# ── 2. Fluid domains ────────────────────────────────────────────────────────
-_section(lines, "2. Fluid Domains in Scene")
+# ── 2. Expected cache status ─────────────────────────────────────────────────
+_section(lines, "2. Expected Cache Status")
+
+# The worker sets cache_directory at runtime; the domain's current path is
+# irrelevant here.  What matters is whether the expected path already has files.
 
 domains_found = []
+if _expected_cache:
+    _exp_exists     = os.path.isdir(_expected_cache)
+    _exp_file_count = _count_data_files(_expected_cache) if _exp_exists else 0
+    lines.append(f"  Expected cache path : {_expected_cache}")
+    lines.append(f"  Directory exists    : {_yesno(_exp_exists)}")
+    lines.append(f"  Data files found    : {_exp_file_count}")
+    if _exp_file_count > 0:
+        lines.append(f"  → With 'Use Existing Cache' ON:  worker will attempt to reuse / resume")
+    else:
+        lines.append(f"  → Worker will run a full bake (no reusable data found)")
+else:
+    lines.append("  (cannot compute — addon not loaded or output_path not set)")
+
+# Collect domain info (informational only — path set by worker at runtime).
+lines.append("")
+lines.append("  Fluid domain objects (informational — cache_directory set by worker):")
 for obj in bpy.data.objects:
     for mod in obj.modifiers:
         if mod.type != 'FLUID':
@@ -206,39 +225,18 @@ for obj in bpy.data.objects:
 
         cache_dir     = getattr(domain_settings, 'cache_directory', '') or ''
         cache_dir_abs = bpy.path.abspath(cache_dir)
-        exists        = os.path.isdir(cache_dir_abs)
-        file_count    = _count_data_files(cache_dir_abs) if exists else 0
 
-        if _expected_cache:
-            same_path  = _norm(cache_dir_abs) == _norm(_expected_cache)
-            bug004_msg = (
-                "SAFE — paths equal, BUG-004 guard will skip assignment"
-                if same_path
-                else "DIFFERENT PATH — assignment will run (necessary, but wipes files at current dir)"
-            )
-        else:
-            same_path  = None
-            bug004_msg = "cannot check — addon not loaded"
-
-        lines.append(f"\nObject        : {obj.name}  [{mod.name}]")
-        lines.append(f"  Domain type   : {getattr(domain_settings, 'domain_type', 'n/a')}")
-        lines.append(f"  cache_dir raw : {cache_dir!r}")
-        lines.append(f"  cache_dir abs : {cache_dir_abs}")
-        lines.append(f"  Dir exists    : {_yesno(exists)}")
-        lines.append(f"  Data files    : {file_count}")
-        lines.append(f"  BUG-004       : {bug004_msg}")
-        if _expected_cache:
-            lines.append(f"  Path match    : {_yesno(same_path)} (expected: {_expected_cache})")
+        lines.append(f"    {obj.name} [{mod.name}]  current cache_dir: {cache_dir_abs!r}")
 
         domains_found.append({
             'obj':        obj.name,
             'cache_dir':  cache_dir_abs,
-            'exists':     exists,
-            'file_count': file_count,
+            'exists':     os.path.isdir(cache_dir_abs),
+            'file_count': _count_data_files(cache_dir_abs) if os.path.isdir(cache_dir_abs) else 0,
         })
 
 if not domains_found:
-    lines.append("  (no fluid domains found in scene)")
+    lines.append("    (no fluid domains found in scene)")
 
 # ── 3. Cache directory inventory ────────────────────────────────────────────
 _section(lines, "3. Cache Directory Inventory")
@@ -283,13 +281,13 @@ if not domains_found:
     lines.append("  WARN  No fluid domains found in scene")
     _warn += 1
 
-for d in domains_found:
-    if not d['exists']:
-        lines.append(f"  INFO  {d['obj']}: cache missing → full bake will run")
-    elif d['file_count'] == 0:
-        lines.append(f"  INFO  {d['obj']}: cache empty → full bake will run")
+if _expected_cache:
+    if _exp_file_count > 0:
+        lines.append(f"  OK    Expected cache has {_exp_file_count} data files — bake can be reused")
     else:
-        lines.append(f"  OK    {d['obj']}: {d['file_count']} data files ready")
+        lines.append(f"  INFO  Expected cache is empty or missing — full bake will run")
+else:
+    lines.append(f"  INFO  Expected cache path unknown — cannot assess bake status")
 
 lines.append("")
 if _warn == 0:
