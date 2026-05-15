@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.2.17"
+WORKER_VERSION = "0.2.18"
 
 import bpy
 import sys
@@ -25,6 +25,7 @@ import time as _time
 import datetime
 import atexit
 import subprocess
+import shutil
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -402,16 +403,58 @@ if use_existing_cache:
 
 _log(f"[{name}]   Effective cache dir  : {effective_cache_dir}")
 
-# Count baked frames BEFORE assigning d.cache_directory — Blender may
-# reinitialize (and clear) the Mantaflow domain when the cache path is set,
-# which would make the directory appear empty in a post-assignment walk.
-# Three outcomes:
-#   1. Complete cache (all required frames present) → skip bake entirely
-#   2. Partial cache (some frames, not all)         → resume without freeing
-#   3. No data frames (or use_existing_cache off)  → free + fresh bake
-baked_frames = set()
+# ---------------------------------------------------------------------------
+# Pre-assignment presave
+# ---------------------------------------------------------------------------
+# Mantaflow physically deletes VDB files at the target path whenever
+# d.cache_directory is assigned — even to the same value.  The path-equality
+# guard below skips the assignment when paths are already equal (no wipe).
+# When paths DIFFER the assignment is unavoidable, but we can protect
+# existing data by renaming the target directory out of the way first.
+#
+# Restore strategy (chosen after the bake decision below):
+#   SKIP BAKE  →  rename _presave_dir straight back           (instant, no I/O)
+#   RESUME     →  move VDB files from _presave_dir into the
+#                 newly-created effective_cache_dir            (keep fresh config/)
+#   FULL BAKE  →  discard _presave_dir
+
+_norm_cur = os.path.normcase(os.path.normpath(d.cache_directory))
+_norm_eff = os.path.normcase(os.path.normpath(effective_cache_dir))
+_paths_differ = (_norm_cur != _norm_eff)
+
+_presave_dir    = effective_cache_dir + "_presave"
+_presave_active = False
+
+if _paths_differ and use_existing_cache:
+    _existing_count = (
+        _count_data_files(effective_cache_dir)
+        if os.path.isdir(effective_cache_dir) else 0
+    )
+    if _existing_count > 0:
+        _log(f"[{name}] Cache presave: paths differ — renaming existing cache to protect "
+             f"{_existing_count} data file(s) from Mantaflow domain-reassignment wipe")
+        _log(f"[{name}]   FROM : {effective_cache_dir}")
+        _log(f"[{name}]   TO   : {_presave_dir}")
+        if os.path.isdir(_presave_dir):
+            _log(f"[{name}]   NOTE: stale presave directory found — removing it first")
+            shutil.rmtree(_presave_dir, ignore_errors=True)
+        try:
+            os.rename(effective_cache_dir, _presave_dir)
+            _presave_active = True
+            _log(f"[{name}] Cache presave: rename complete — existing data is safe")
+        except OSError as _e:
+            _log(f"[{name}] WARNING: Cache presave rename failed ({_e}) — "
+                 f"Mantaflow may wipe existing cache on reassignment")
+    else:
+        _log(f"[{name}] Cache presave: no existing data files at target path — presave not needed")
+
+# Walk for baked_frames.  If presave is active the data is in _presave_dir;
+# otherwise walk the target directory as usual.
+_walk_dir = _presave_dir if _presave_active else effective_cache_dir
+_log(f"[{name}] Walking for existing frames: {_walk_dir}")
+baked_frames    = set()
 _all_cache_files = []
-for _root, _dirs, files in os.walk(effective_cache_dir):
+for _root, _dirs, files in os.walk(_walk_dir):
     subdir = os.path.basename(_root)
     for f in files:
         _all_cache_files.append(f)
@@ -420,23 +463,24 @@ for _root, _dirs, files in os.walk(effective_cache_dir):
         m = re.search(r'_(\d+)\.(vdb|uni)$', f)
         if m:
             baked_frames.add(int(m.group(1)))
+_log(f"[{name}]   Found {len(baked_frames)} baked frame(s)")
 
-# Only reassign if the path actually changed.  Reassigning the same path causes
-# Mantaflow to reinitialize the domain and physically delete existing VDB files,
-# destroying a perfectly good cache (BUG-004, recurring in SKIP BAKE path).
-_norm_cur = os.path.normcase(os.path.normpath(d.cache_directory))
-_norm_eff = os.path.normcase(os.path.normpath(effective_cache_dir))
-_assignment_ran = False
-if _norm_cur != _norm_eff:
+# ---------------------------------------------------------------------------
+# Assign cache directory
+# ---------------------------------------------------------------------------
+# If presave is active, the existing data has been moved aside so the
+# assignment now initialises a fresh empty directory — nothing useful to wipe.
+if _paths_differ:
     d.cache_directory = effective_cache_dir
-    _assignment_ran = True
-    _log(f"[{name}] Domain cache_directory updated → {effective_cache_dir}")
+    _log(f"[{name}] Domain cache_directory assigned → {effective_cache_dir}")
+    if _presave_active:
+        _log(f"[{name}]   Presaved data was moved aside; Mantaflow initialised a fresh empty directory")
+    else:
+        _log(f"[{name}]   No presave active — Mantaflow reinitialised the domain at this path")
 else:
-    _log(f"[{name}] Domain cache_directory unchanged — skipping assignment to preserve VDB files")
+    _log(f"[{name}] Domain cache_directory unchanged (paths equal) — skipping assignment to preserve VDB files")
 
 # Enable resumable baking so a mid-bake crash can be continued on the next run.
-# Without this Blender does not store the solver checkpoint data alongside the
-# VDB output files, and bake_all() cannot resume from a partial cache.
 try:
     d.cache_resumable = True
 except AttributeError:
@@ -445,27 +489,9 @@ except AttributeError:
 bpy.context.view_layer.update()
 _time.sleep(2.0)
 
-# If the cache_directory assignment ran, the Mantaflow domain was
-# reinitialized and VDB files at the target path were wiped.  Re-walk to
-# get post-assignment reality so the bake decision is correct.
-if _assignment_ran:
-    _pre_assign_count = len(baked_frames)
-    baked_frames = set()
-    _all_cache_files = []
-    for _root, _dirs, files in os.walk(effective_cache_dir):
-        subdir = os.path.basename(_root)
-        for f in files:
-            _all_cache_files.append(f)
-            if subdir == 'config':
-                continue
-            m = re.search(r'_(\d+)\.(vdb|uni)$', f)
-            if m:
-                baked_frames.add(int(m.group(1)))
-    if _pre_assign_count > 0 and len(baked_frames) == 0:
-        _log(f"[{name}] NOTE: Domain reassignment wiped cache "
-             f"({_pre_assign_count} frames before assignment, 0 after). "
-             f"Bake decision will reflect empty cache.")
-
+# ---------------------------------------------------------------------------
+# Bake decision
+# ---------------------------------------------------------------------------
 _log(f"[{name}] --- Bake decision ---")
 _log(f"[{name}]   Frame range needed : {frame_start}–{frame_end} "
      f"({frame_end - frame_start + 1} frames)")
@@ -490,20 +516,71 @@ else:
 bake_complete = all(f in baked_frames for f in range(frame_start, frame_end + 1))
 
 # rebaked_frames: frame numbers whose cache was RECOMPUTED this run.
-# Existing renders for these frames must NOT be used as placeholders, because
-# the new bake may produce different smoke data than the old render.
+# Existing renders for these frames must NOT be reused as placeholders.
 rebaked_frames = set()
 
 if use_existing_cache and bake_complete:
-    _log(f"[{name}]   Decision           : SKIP BAKE — all {frame_end - frame_start + 1} frames confirmed")
+    _log(f"[{name}]   Decision : SKIP BAKE — all {frame_end - frame_start + 1} frames confirmed")
+    if _presave_active:
+        # Restore the presaved cache so the render engine can read the VDB files.
+        # The render engine reads VDB files directly; Mantaflow's internal state
+        # after the assignment is irrelevant for rendering.
+        # Step 1: remove the fresh empty directory Mantaflow just created.
+        _log(f"[{name}] SKIP BAKE restore: removing Mantaflow-created empty directory")
+        _log(f"[{name}]   Removing : {effective_cache_dir}")
+        try:
+            if os.path.isdir(effective_cache_dir):
+                shutil.rmtree(effective_cache_dir)
+        except OSError as _e:
+            _log(f"[{name}] ERROR: Could not remove empty cache directory ({_e})")
+            sys.exit(1)
+        # Step 2: rename presave back to the expected path.
+        _log(f"[{name}] SKIP BAKE restore: renaming presave back to cache path")
+        _log(f"[{name}]   FROM : {_presave_dir}")
+        _log(f"[{name}]   TO   : {effective_cache_dir}")
+        try:
+            os.rename(_presave_dir, effective_cache_dir)
+        except OSError as _e:
+            _log(f"[{name}] ERROR: Could not rename presave back to cache path ({_e})")
+            sys.exit(1)
+        _restored_count = _count_data_files(effective_cache_dir)
+        _log(f"[{name}] SKIP BAKE restore: complete — {_restored_count} data file(s) ready for render")
     bake_seconds = 0.0
     bake_skipped = True
 
 elif use_existing_cache and baked_frames:
     rebaked_frames = set(range(frame_start, frame_end + 1)) - baked_frames
     bake_skipped   = False
-    _log(f"[{name}]   Decision           : RESUME — {len(baked_frames)} frames present, "
+    _log(f"[{name}]   Decision : RESUME — {len(baked_frames)} frames present, "
          f"{len(rebaked_frames)} to bake")
+    if _presave_active:
+        # Merge presaved VDB data files into the newly-initialised directory.
+        # We keep the fresh Mantaflow config/ (it knows the domain is at this
+        # path) and restore the VDB files so Mantaflow can detect them and
+        # resume from the last baked frame rather than starting over.
+        _log(f"[{name}] RESUME: merging presaved VDB files into new cache directory")
+        _log(f"[{name}]   FROM : {_presave_dir}  (VDB data files only — config/ excluded)")
+        _log(f"[{name}]   INTO : {effective_cache_dir}  (fresh Mantaflow config/ preserved)")
+        _merge_count = 0
+        try:
+            for _proot, _pdirs, _pfiles in os.walk(_presave_dir):
+                if os.path.basename(_proot) == 'config':
+                    continue  # keep the fresh config/ Mantaflow just wrote
+                for _pf in _pfiles:
+                    if re.search(r'_\d+\.(vdb|uni)$', _pf):
+                        _psrc    = os.path.join(_proot, _pf)
+                        _prel    = os.path.relpath(_proot, _presave_dir)
+                        _pdstdir = os.path.join(effective_cache_dir, _prel)
+                        os.makedirs(_pdstdir, exist_ok=True)
+                        os.replace(_psrc, os.path.join(_pdstdir, _pf))
+                        _merge_count += 1
+            shutil.rmtree(_presave_dir, ignore_errors=True)
+            _log(f"[{name}] RESUME: merge complete — moved {_merge_count} data file(s) to cache dir")
+            _log(f"[{name}]   NOTE: Mantaflow will attempt to resume from existing frames; "
+                 f"if it re-bakes from scratch the result will still be correct (just slower)")
+        except OSError as _e:
+            _log(f"[{name}] WARNING: Presave merge failed ({_e}) — "
+                 f"bake will proceed; Mantaflow may re-bake all frames from scratch")
     _log(f"[{name}] Baking...")
     bake_start   = _time.time()
     _bake_result = bpy.ops.fluid.bake_all()
@@ -517,17 +594,17 @@ elif use_existing_cache and baked_frames:
 else:
     rebaked_frames = set(range(frame_start, frame_end + 1))
     bake_skipped   = False
-    if effective_cache_dir != cache_dir:
-        effective_cache_dir = cache_dir
-        d.cache_directory   = cache_dir
-    if use_existing_cache:
-        _log(f"[{name}]   Decision           : FULL BAKE — use_existing_cache on but no data frames found")
+    if _presave_active:
+        _log(f"[{name}]   Decision : FULL BAKE — discarding presave (no usable existing frames)")
+        shutil.rmtree(_presave_dir, ignore_errors=True)
+        _log(f"[{name}]   Presave discarded: {_presave_dir}")
+    elif use_existing_cache:
+        _log(f"[{name}]   Decision : FULL BAKE — use_existing_cache on but no data frames found")
     else:
-        _log(f"[{name}]   Decision           : FULL BAKE — use_existing_cache disabled")
+        _log(f"[{name}]   Decision : FULL BAKE — use_existing_cache disabled")
     _log(f"[{name}] Freeing previous cache and baking from scratch...")
     bpy.ops.fluid.free_all()
     _time.sleep(2.0)
-
     _log(f"[{name}] Baking...")
     bake_start   = _time.time()
     _bake_result = bpy.ops.fluid.bake_all()
@@ -539,42 +616,11 @@ else:
     _time.sleep(2.0)
 
 # Verify cache is populated before proceeding to render.
-# Use _count_data_files (excludes config/ checkpoint files) so the count is
-# meaningful regardless of domain version.
 _post_bake_count = _count_data_files(effective_cache_dir)
 _log(f"[{name}] Cache data files found: {_post_bake_count}")
 if _post_bake_count == 0:
-    if bake_skipped:
-        # SKIP BAKE decided there was a full cache, but the cache is now empty.
-        # Mantaflow reinitializes the domain (and deletes VDB files) whenever
-        # cache_directory is assigned — even to the same path.  Change 1 guards
-        # against the equal-path case, but if the paths differed the assignment
-        # still ran and wiped the files.  Fall back to a full bake rather than
-        # aborting the job (BUG-004 fallback, v0.2.15).
-        _log(f"[{name}] WARNING: Cache empty after SKIP BAKE — Mantaflow likely "
-             f"reinitialized during cache_directory assignment. Falling back to full bake.")
-        rebaked_frames = set(range(frame_start, frame_end + 1))
-        bake_skipped   = False
-        _log(f"[{name}] Freeing previous cache and baking from scratch (fallback)...")
-        bpy.ops.fluid.free_all()
-        _time.sleep(2.0)
-        _log(f"[{name}] Baking (fallback)...")
-        bake_start   = _time.time()
-        _bake_result = bpy.ops.fluid.bake_all()
-        bake_seconds = _time.time() - bake_start
-        if 'FINISHED' not in _bake_result:
-            _log(f"[{name}] ERROR: Fallback bake did not finish (result: {_bake_result})")
-            sys.exit(1)
-        _log(f"[{name}] Fallback bake complete in {bake_seconds:.0f}s.")
-        _time.sleep(2.0)
-        _post_bake_count = _count_data_files(effective_cache_dir)
-        _log(f"[{name}] Cache data files after fallback bake: {_post_bake_count}")
-        if _post_bake_count == 0:
-            _log(f"[{name}] ERROR: No cache files after fallback bake — cannot render")
-            sys.exit(1)
-    else:
-        _log(f"[{name}] ERROR: No cache files under {effective_cache_dir} — skipping render")
-        sys.exit(1)
+    _log(f"[{name}] ERROR: No cache files under {effective_cache_dir} — cannot render")
+    sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Update text objects (after bake — includes bake time)
