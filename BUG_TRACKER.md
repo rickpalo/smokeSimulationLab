@@ -16,7 +16,7 @@ new attempt is appended under the same issue.
 
 ## BUG-001: Job Log Rows Go Blank
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.16)  
+**Status:** `DEPLOYED / UNVERIFIED` (v0.2.19 — stable icons + Unicode prefix + alert)  
 **TODOS:** TODO-5, TODO-17, TODO-21  
 **Files:** `__init__.py` — `SMOKE_UL_job_log.draw_item`, `_update_job_log_statuses`
 
@@ -129,12 +129,33 @@ running, completes).
     `item.job_number` RNA read in the hot path.
 - *Status:* **DEPLOYED / UNVERIFIED.** Awaiting user confirmation.
 
+**Attempt 7 — Blender 5.1.1 icon availability (v0.2.17 + v0.2.19)**
+- *New symptom in Blender 5.1.1:* `SEQUENCE_COLOR_XX` icons do not exist in this
+  version.  Using them causes `draw_item` to raise silently, leaving rows blank again.
+- *Fix (v0.2.17):*
+  - `draw_item` signature extended to `(..., index=0, _flt_flag=0)` — Blender 5.x
+    passes `flt_flag` as a 9th positional argument; without `_flt_flag`, the call
+    raised `TypeError` on every row.
+- *Fix (v0.2.19):*
+  - `_STATUS_ICONS` dict replaced `SEQUENCE_COLOR_XX` with stable alternatives:
+    `PLAY`, `FILE_REFRESH`, `CHECKMARK`, `CANCEL`, `ERROR`, `RADIOBUT_OFF`.
+  - Added `_STATUS_PREFIX` dict with Unicode status characters (`▶ `, `↻ `, `✓ `,
+    `✗ `, `⚠ `) prepended to the job name — visible even if the icon fails.
+  - `layout.alert = True` applied for FAILED/CRASHED rows (red background tint as
+    additional indicator independent of icon rendering).
+  - `item.status` RNA fallback removed from `_job_statuses.get()` call (defaults to
+    `'NOT_STARTED'` — no RNA read).
+- *Status:* **DEPLOYED / UNVERIFIED.** Run a batch in Blender 5.1.1 and confirm rows
+  show status icons/prefix throughout.
+
 ### Root Cause (confirmed hypothesis)
 Any RNA property write on `SmokeSettings` from the poll timer can cause Blender
 to re-evaluate the PropertyGroup, returning RNA defaults for `CollectionProperty`
 item sub-fields during the concurrent draw pass.  The correct fix is to use the
 `index` parameter that Blender's UIList passes to `draw_item` — it is computed
-by Blender's internal draw loop and does not touch RNA property values.
+by Blender's internal draw loop and does not touch RNA property values.  In
+Blender 5.x, additionally `SEQUENCE_COLOR_XX` icons are unavailable and must be
+replaced with stable alternatives.
 
 ### Tests Added
 None — this is a Blender-internal draw/RNA issue with no testable pure-Python
@@ -143,12 +164,8 @@ visible throughout.
 
 ### Open Questions
 - Does the fix hold when `s.job_log_index` is written for auto-scroll?  That
-  write is still happening from the timer (line ~1793).  If blanking recurs,
-  move auto-scroll index to a module-level variable and apply it from a 0-second
-  one-shot timer scheduled at the end of each poll.
-- Should `draw_item` skip the `item.status` fallback entirely and default to
-  `'NOT_STARTED'` when not in `_job_statuses`?  The fallback reads RNA, which
-  could return "" and be absent from `_STATUS_ICONS`.
+  write is still happening from the timer.  If blanking recurs, move auto-scroll
+  index to a module-level variable and apply it from a 0-second one-shot timer.
 
 ---
 
@@ -247,7 +264,7 @@ and the batch silently continues (or hangs).
 
 ## BUG-003: Render Progress Bar Stuck at 0
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.8); diagnostic logging added v0.2.9  
+**Status:** `DEPLOYED / UNVERIFIED` (v0.2.19 — mtime-based counting)  
 **TODOS:** TODO-19  
 **Files:** `__init__.py` — `_poll_batch_progress_impl`, `_count_png_frames`
 
@@ -281,22 +298,34 @@ Observed as "0 of 500" in one run and "0 of 4" (placeholder run) in another.
   and `rendered_new` on every render-progress poll when "Collect Debug Log" is on.
 - *Status:* **Awaiting debug_log.txt from next run with debug logging enabled.**
 
+**Attempt 2 — start_time mtime filter (v0.2.19)**
+- *Root cause for "0 of 4":* When re-rendering existing PNGs (overwrite, not add),
+  the total PNG count in the frames directory never changes — so baseline subtraction
+  always yields 0.  The "0 of 500" fix (Attempt 1) did not cover this scenario.
+- *Fix (v0.2.19):*
+  - `_count_png_frames(jobs_dir, log_stem, start_time=None)` — added optional
+    `start_time` parameter.  When provided, only PNGs with `mtime >= start_time - 10.0`
+    are counted (10 s buffer for filesystem clock skew).
+  - Render-poll call passes `start_time=s.batch_job_start_time` when `> 0`.
+  - When `start_time` is active, the count IS the "new frames" count directly — no
+    baseline subtraction needed; baseline subtraction removed from this path.
+  - When `start_time` is None (baseline-setting call), all PNGs are counted regardless
+    of mtime — existing behavior preserved.
+- *Status:* **DEPLOYED / UNVERIFIED.**
+
 ### Root Cause
-Partially confirmed for the "0 of 500" case (mtime filter).  "0 of 4" root
-cause not yet confirmed — requires `debug_log.txt` analysis.
+Confirmed for the "0 of 500" case: mtime filter was too aggressive (excluded recent
+frames).  Confirmed root cause for "0 of 4" case: PNG overwrite leaves total count
+unchanged; baseline subtraction gives 0 forever.  Both cases now handled by the
+`start_time` mtime filter in v0.2.19.
 
-### Tests Added / Updated
-- `test_since_zero_behaves_like_no_since`, `test_since_filters_old_frames`,
-  `test_since_future_returns_zero` — replaced with baseline-subtraction tests:
-  `test_counts_all_frames_regardless_of_mtime`, `test_baseline_subtraction_gives_new_frames`,
-  `test_zero_baseline_means_all_frames_new` (in `tests/test_progress_helpers.py`).
-
-### Open Questions
-- Is the frames directory path computed correctly for the active log stem?
-  (confirmed matches CMD output in one case, but worth re-checking for retry logs
-  where `log_stem` = `job_0001_retry` but JSON is `job_0001.json`)
-- Does `_count_png_frames` return `None` for retry-log stems?  If so, the baseline
-  is never set and `rendered_new` stays 0.
+### Tests Added / Updated (v0.2.19)
+- `test_start_time_filters_old_files` — files with mtime < start_time-10 not counted
+- `test_start_time_counts_new_files_only` — only recently-written files counted
+- `test_start_time_overwrite_scenario` — regression for "0 of 500" overwrite case
+- `test_counts_all_frames_when_no_start_time` — without start_time, all files counted
+  (baseline-setting behavior unchanged)
+(All in `tests/test_progress_helpers.py`.)
 
 ---
 

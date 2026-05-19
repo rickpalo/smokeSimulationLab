@@ -4,7 +4,7 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
-## 🔴 TODO-20 (HIGH PRIORITY): Crashes not being caught / logged
+## ~~TODO-20~~ (substantially addressed v0.2.12–v0.2.13): Crashes not being caught / logged
 
 **Observed (2026-05-11):** Blender crashes are still occurring during batch runs and
 are not being recorded — no crash log written, launcher does not detect the crash,
@@ -42,9 +42,19 @@ and the job log UI shows no FAILED indicator.
 - Consider writing a `.crashed` sentinel file (distinct from `.done`) that the UI
   timer shows as a red CRASHED state in the job log.
 
+**Resolution (v0.2.12–v0.2.13):**
+- `job_NNNN.worker_done` sentinel written by the worker before `quit_blender()`;
+  absence on exit-0 → CRASHED status in the UI (v0.2.12).
+- Startup timeout (120 s) kills Blender if log never appears; wall-clock timeout
+  (4 h) kills if job runs forever (v0.2.13).
+- CRASHED (unexpected crash) shown as `ERROR` icon + ⚠ prefix, distinct from
+  FAILED (controlled error exit) shown as `CANCEL` icon + ✗ prefix (v0.2.13/v0.2.19).
+- Remaining gap: Blender-restarts-itself scenario still undetected. Documented in
+  BUG_TRACKER.md BUG-002.
+
 ---
 
-## 🔴 TODO-21 (HIGH PRIORITY): Job Log rows blank for in-progress and completed jobs
+## ~~TODO-21 / TODO-5 / TODO-17~~: Job Log rows blank for in-progress and completed jobs — **DONE** (v0.2.16+, v0.2.19)
 
 **Observed (2026-05-11):** After v0.2.9's `_job_statuses` dict fix (which moved
 `item.status` writes out of the poll timer), rows for IN_PROGRESS and COMPLETE jobs
@@ -154,7 +164,7 @@ IndentationError was invisible partly because the stale worker was silently used
 
 ---
 
-## TODO-5 / TODO-17: Job Log rows go blank on status transition
+## ~~TODO-5 / TODO-17~~: Job Log rows go blank on status transition — **DONE** (see TODO-21 above)
 
 **Observed behaviour (TODO-5, original):**  
 Job 1 is visible immediately after Export Batch.  After scrolling the list or
@@ -202,6 +212,14 @@ Correlate the print timestamps with timer-poll firings to confirm.
 
 **Files:** `scripts/SmokeSimLab/__init__.py` — `_update_job_log_statuses`,
 `SMOKE_UL_job_log.draw_item`, `_poll_batch_progress_impl`, `SMOKE_PT_panel.draw`.
+
+**Resolution:**
+- v0.2.16: `draw_item` uses Blender's `index` parameter directly (no RNA reads for
+  job number); `_update_job_log_statuses` keyed off `_job_log_rows[idx]` not RNA.
+- v0.2.17: `_flt_flag=0` added to `draw_item` signature for Blender 5.x compat.
+- v0.2.19: `SEQUENCE_COLOR_XX` icons replaced with stable alternatives; Unicode
+  status prefix added; `layout.alert = True` for error rows.
+  Status: DEPLOYED / UNVERIFIED — awaiting production batch run confirmation.
 
 ---
 

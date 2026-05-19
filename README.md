@@ -1,6 +1,6 @@
 # SmokeSimLab
 
-A Blender 4.x addon for batch smoke simulation parameter sweeping.
+A Blender 4.x/5.x addon for batch smoke simulation parameter sweeping.
 
 SmokeSimLab automates the tedious process of testing many different smoke simulation settings. You define parameter ranges in a panel, click Export Batch, and a Windows batch file runs every combination — baking the simulation, rendering a playblast animation and a final still, and logging results to CSV for comparison.
 
@@ -14,19 +14,28 @@ SmokeSimLab automates the tedious process of testing many different smoke simula
 - **Two iteration modes:**
   - _Limited Combinations_ — vary one parameter at a time while all others hold at their default value (far fewer jobs)
   - _All Combinations_ — full Cartesian product of all ranges
+- **Iterate Both On and Off** — include a direct on/off comparison for Dissolve and Noise within a single batch
 - **Per-job outputs:** MP4 playblast, PNG final still, and a row in `results.csv`
 - **In-render text object updates** — scene FONT objects display the current parameter values in each render
 - **Cycles GPU rendering** (OptiX → CUDA → HIP fallback) in background mode, or EEVEE in windowed mode
 - **OpenVDB + Blosc cache** format for compact, fast cache files
 - **Per-job log files** so nothing is lost if the batch window closes
+- **Crash-safe launcher** (`smoke_launcher.py`) — detects WerFault crash dialogs, saves crash logs, and marks the job as failed rather than hanging
+- **Job Log panel** — live status display (Not Started / In Progress / Retrying / Complete / Failed / Crashed) with auto-scroll to the active job
+- **Progress bars** — real-time bake and render progress with ETA estimates
+- **Settings presets** — save and load named `.smokesettings` files for easy recall of parameter configurations
+- **Use Existing Cache** — resume or skip bakes when a matching cache already exists
+- **Use Placeholders** — render with existing cache and insert placeholder images for uncached frames
+- **Auto Retry Failed** — automatically re-runs failed jobs once before marking them as failed
+- **Reset To Defaults** — restore all settings and clear the job log with one click
 
 ---
 
 ## Requirements
 
-- **Blender 4.0 or later** (tested on Blender 4.5.5 LTS)
+- **Blender 4.0 or later** (tested on Blender 4.5.5 LTS and 5.1.1)
 - **Windows** (the batch launcher is a `.bat` file; Linux/Mac support requires a shell script adaptation)
-- An NVIDIA GPU with OptiX support is recommended for fast playblast rendering but is not required
+- An NVIDIA GPU with OptiX support is recommended for fast Cycles rendering but is not required
 
 ---
 
@@ -51,7 +60,7 @@ SmokeSimLab automates the tedious process of testing many different smoke simula
 7. Click **Export Batch** — this writes files to your output folder.
 8. Double-click `run_smoke_batch.bat` in Windows Explorer.
 
-Each job opens a fresh Blender instance, bakes the simulation, renders, and exits. You can monitor progress by watching the `jobs/` folder fill with `.log` files.
+Each job opens a fresh Blender instance, bakes the simulation, renders, and exits. You can monitor progress in the **Job Log** section of the panel, which updates automatically as jobs complete.
 
 ---
 
@@ -61,20 +70,22 @@ Each job opens a fresh Blender instance, bakes the simulation, renders, and exit
 <output_path>/
     run_smoke_batch.bat         ← double-click to run
     smoke_worker.py             ← copy of the worker script (do not edit)
+    smoke_launcher.py           ← crash-safe wrapper (do not edit)
     jobs/
         job_0000.json           ← parameters for job 0
         job_0000.log            ← console output from job 0
+        job_0000.done           ← written by batch when job exits
         job_0001.json
         job_0001.log
         ...
     Renders/
-        R64_V1.0_A1.0_...0000.mp4   ← playblast animation
-        R64_V1.0_A1.0_...0000.png   ← final still frame
-        results.csv                  ← all job parameters + bake times
+        R64_V0.0_A1.0_....mp4  ← playblast animation
+        R64_V0.0_A1.0_....png  ← final still frame
+        results.csv             ← all job parameters + bake times
     Cache/
-        R64_V1.0_A1.0_...0000/      ← per-job simulation cache
+        R64_V0.0_A1.0_.../      ← per-job simulation cache
             Data/
-            Noise/                   ← (if noise enabled)
+            Noise/              ← (if noise enabled)
 ```
 
 ---
@@ -89,13 +100,15 @@ The longest side of the fluid domain grid. Higher = more detail, much longer bak
 
 | Parameter        | Blender Attribute | Default | Description                                                  |
 | ---------------- | ----------------- | ------- | ------------------------------------------------------------ |
-| Vorticity        | `d.vorticity`     | 1.0     | Turbulent swirling detail. 0 = smooth, higher = more chaotic |
+| Vorticity        | `d.vorticity`     | 0.0     | Turbulent swirling detail. 0 = smooth, higher = more chaotic |
 | Buoyancy Density | `d.alpha`         | 1.0     | How much smoke density drives upward buoyancy                |
 | Buoyancy Heat    | `d.beta`          | 1.0     | How much temperature drives upward buoyancy                  |
 
 ### Dissolve
 
 When enabled, smoke fades out over time. Controlled by dissolve speed (frames) and optional logarithmic (slow) mode.
+
+Enable **Iterate Both On and Off** to include one additional job with dissolve disabled — useful for direct on/off comparisons in a single batch run.
 
 ### Noise
 
@@ -104,8 +117,10 @@ Adds high-resolution turbulent detail on top of the base simulation. Controlled 
 | Parameter      | Blender Attribute   | Default | Description                                     |
 | -------------- | ------------------- | ------- | ----------------------------------------------- |
 | Scale          | `d.noise_scale`     | 2       | Upres factor — how much finer the noise grid is |
-| Strength       | `d.noise_strength`  | 1.0     | Intensity of the noise detail                   |
-| Position Scale | `d.noise_pos_scale` | 1.0     | Spatial frequency of the noise pattern          |
+| Strength       | `d.noise_strength`  | 2.0     | Intensity of the noise detail                   |
+| Position Scale | `d.noise_pos_scale` | 2.0     | Spatial frequency of the noise pattern          |
+
+Enable **Iterate Both On and Off** to include one additional job with noise disabled.
 
 ### Iteration Modes
 
@@ -164,28 +179,31 @@ Set the object names in the **Text Objects** section. Objects not found in the s
 ## Troubleshooting
 
 **Export Batch shows "smoke_worker.py not found"**
-Re-install the addon — both `__init__.py` and `smoke_worker.py` must be installed together.
+Re-install the addon — `__init__.py`, `smoke_worker.py`, and `smoke_launcher.py` must all be installed together.
 
 **Batch crashes immediately with EXCEPTION_ACCESS_VIOLATION**
-Your installed Blender addons may be crashing in background mode. The `--factory-startup` flag should prevent this, but some addons ignore it. Check `jobs/job_0000.log` for the last output line before the crash.
+Your installed Blender addons may be crashing in background mode. The `--factory-startup` flag should prevent this, but some addons ignore it. Check `jobs/job_0000.log` for the last output line before the crash. The `blender_stderr.txt` file in the output folder may also contain the traceback.
 
 **Cache files found: 0 after bake**
 The Mantaflow bake completed but wrote nothing to disk. This can happen if the cache directory path contains special characters, or if the domain settings were not applied correctly. Check the log for error messages.
 
 **Playblast takes 20+ minutes**
-The Cycles sample count is set to 32 by default. For faster playblasts at the cost of quality, edit `smoke_worker.py` and reduce `scene.cycles.samples = 32` to a lower value such as 8 or 16. Re-export after changing the worker.
+The Cycles sample count defaults to 16. For faster playblasts at the cost of quality, reduce the **Render Samples** value in the Render Settings section of the panel before exporting.
 
 **Physics panel resolution is greyed out after batch**
 The domain is pointing at a job cache directory. Click **Free All** in Physics Properties → Fluid, then point the cache directory back to your working folder.
+
+**Job Log rows appear blank**
+This was a known issue (BUG-001) in Blender 5.x caused by unavailable `SEQUENCE_COLOR_XX` icons. Fixed in v0.2.19 with stable icon replacements and Unicode status prefixes. Re-install the addon if you are seeing blank rows.
 
 ---
 
 ## Known Limitations
 
-- `bpy.ops.fluid.bake_all()` crashes in `--background` mode on some Blender 4.5 builds with certain addons installed. `--factory-startup` resolves this in most cases.
+- `bpy.ops.fluid.bake_all()` crashes in `--background` mode on some Blender builds with certain addons installed. `--factory-startup` resolves this in most cases.
 - EEVEE rendering is not available in background mode — use Cycles GPU instead, or switch to windowed mode.
-- Cache files baked in Blender 4.x may not be readable in Blender 5.x due to the compression format change (LZMA → ZSTD). Re-bake when upgrading Blender versions.
 - The batch launcher is Windows-only (`.bat`). Linux/Mac users can adapt the launcher to use a shell script.
+- Resuming a bake after a Blender upgrade may fail if the VDB format changed between versions. Re-bake from scratch in that case.
 
 ---
 
@@ -197,4 +215,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-Bug reports and pull requests are welcome on the [GitHub repository](https://github.com/YOUR_USERNAME/SmokeSimLab).
+Bug reports and pull requests are welcome on the [GitHub repository](https://github.com/rickpalo/SmokeSimLab).

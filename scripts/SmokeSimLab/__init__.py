@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 18),
+    "version":     (0, 2, 20),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -71,7 +71,7 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.2.17"
+_EXPECTED_WORKER_VERSION   = "0.2.18"
 _EXPECTED_LAUNCHER_VERSION = "0.2.13"
 
 
@@ -213,7 +213,6 @@ def _settings_dict(s):
 
 def _apply_settings_dict(s, data):
     """Apply a settings snapshot dict to SmokeSettings *s*."""
-    import json
     s.iteration_mode = data.get("iteration_mode", "LIMITED")
     s.use_dissolve   = data.get("use_dissolve",   False)
     s.slow_dissolve  = data.get("slow_dissolve",  False)
@@ -246,7 +245,6 @@ def _apply_settings_dict(s, data):
 
 def _load_settings_from_path(s, path):
     """Load and apply a .smokesettings file; update tracking properties."""
-    import json, os
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -259,7 +257,6 @@ def _load_settings_from_path(s, path):
 
 def _is_settings_dirty(s):
     """Return True if current settings differ from the last saved/loaded snapshot."""
-    import json
     if not s.settings_file_path:
         return False
     snap = s.settings_snapshot
@@ -275,7 +272,6 @@ def _settings_files_enum_items(self, _context):
     This avoids issues with spaces, backslashes, or long Windows paths being
     used as Blender EnumProperty identifiers.
     """
-    import os
     folder = self.settings_search_path
     if not folder and self.output_path:
         folder = bpy.path.abspath(self.output_path)
@@ -294,7 +290,6 @@ def _settings_files_enum_items(self, _context):
 
 def _on_settings_enum_update(self, _context):
     """Update callback for settings_file_enum — auto-load when selection changes."""
-    import os
     stem = self.settings_file_enum
     if not stem:
         return
@@ -503,9 +498,9 @@ def generate_jobs_all(s):
     if s.use_dissolve:
         dissolve_states = [(True, s.slow_dissolve, param("dissolve_speed"))]
         if s.iterate_dissolve_both:
-            dissolve_states.append((False, s.slow_dissolve, [s.dissolve_speed]))
+            dissolve_states.append((False, s.slow_dissolve, [expand_param(s, "dissolve_speed")[0]]))
     else:
-        dissolve_states = [(False, s.slow_dissolve, [s.dissolve_speed])]
+        dissolve_states = [(False, s.slow_dissolve, [expand_param(s, "dissolve_speed")[0]])]
 
     # Build the set of (use_noise, nu, ns, nss) states.
     if s.use_noise:
@@ -515,14 +510,14 @@ def generate_jobs_all(s):
                          param("noise_spatial_scale"))]
         if s.iterate_noise_both:
             noise_states.append((False,
-                                  [s.noise_upres],
-                                  [s.noise_strength],
-                                  [s.noise_spatial_scale]))
+                                  [expand_param(s, "noise_upres")[0]],
+                                  [expand_param(s, "noise_strength")[0]],
+                                  [expand_param(s, "noise_spatial_scale")[0]]))
     else:
         noise_states = [(False,
-                         [s.noise_upres],
-                         [s.noise_strength],
-                         [s.noise_spatial_scale])]
+                         [expand_param(s, "noise_upres")[0]],
+                         [expand_param(s, "noise_strength")[0]],
+                         [expand_param(s, "noise_spatial_scale")[0]])]
 
     for (use_d, slow_d, dissolve) in dissolve_states:
         for (use_n, nu, ns, nss) in noise_states:
@@ -616,6 +611,22 @@ def _blend_domain_resolution(domain_obj):
     return 0
 
 
+def _find_next_job_index(jobs_dir):
+    """Return the next available job index given a jobs directory.
+
+    Scans for job_NNNN.json files and returns max(existing_index) + 1,
+    or 0 if no job files exist yet.
+    """
+    if not os.path.isdir(jobs_dir):
+        return 0
+    indices = [
+        int(m.group(1))
+        for f in os.listdir(jobs_dir)
+        if (m := re.match(r'^job_(\d{4})\.json$', f))
+    ]
+    return max(indices) + 1 if indices else 0
+
+
 def export_batch(context):
     """
     Prepare all batch job files and write the Windows .bat launcher.
@@ -645,18 +656,25 @@ def export_batch(context):
     output_path = bpy.path.abspath(s.output_path)
     jobs_dir    = os.path.join(output_path, "jobs")
 
-    # Clear the jobs folder so stale jobs from a previous export don't linger.
-    # Fall back to per-file deletion if rmtree hits a PermissionError (e.g. a
-    # _retry.log held open by a still-running Blender process).
-    if os.path.isdir(jobs_dir):
-        try:
-            shutil.rmtree(jobs_dir)
-        except PermissionError:
-            for _fn in os.listdir(jobs_dir):
-                try:
-                    os.unlink(os.path.join(jobs_dir, _fn))
-                except OSError:
-                    pass
+    is_append = (s.export_mode == 'APPEND')
+
+    # In append mode find the highest existing job index so new jobs continue
+    # the numbering sequence without overwriting any previous results.
+    job_start_index = _find_next_job_index(jobs_dir) if is_append else 0
+
+    # Clear the jobs folder in replace mode so stale jobs from a previous
+    # export don't linger.  Fall back to per-file deletion if rmtree hits a
+    # PermissionError (e.g. a _retry.log held open by a running Blender).
+    if not is_append:
+        if os.path.isdir(jobs_dir):
+            try:
+                shutil.rmtree(jobs_dir)
+            except PermissionError:
+                for _fn in os.listdir(jobs_dir):
+                    try:
+                        os.unlink(os.path.join(jobs_dir, _fn))
+                    except OSError:
+                        pass
     os.makedirs(jobs_dir, exist_ok=True)
 
     # Use the currently running Blender instance
@@ -704,13 +722,19 @@ def export_batch(context):
         shutil.copy2(src_launcher, dest_launcher)
 
     # ── Write .bat header ────────────────────────────────────────────────────
+    total_jobs = job_start_index + len(jobs)
+    _bat_header = (
+        f"SmokeSimLab batch - {len(jobs)} new job(s) (total {total_jobs})"
+        if is_append else
+        f"SmokeSimLab batch - {len(jobs)} job(s)"
+    )
     bat_lines = [
         "@echo off",
         # Switch to the bat file's own directory so cmd always has a valid cwd,
         # regardless of what working directory Blender or the shell inherited.
         'cd /d "%~dp0"',
         "setlocal enabledelayedexpansion",
-        f"echo SmokeSimLab batch - {len(jobs)} job(s)",
+        f"echo {_bat_header}",
         "echo.",
         "set ERRORS=0",
         "",
@@ -718,14 +742,19 @@ def export_batch(context):
 
     _dbg = s.collect_debug_log
     _debug_log(_dbg, output_path, "addon",
-               f"export_batch: {len(jobs)} job(s)  blend={bpy.data.filepath!r}  "
-               f"out={output_path!r}  bpy={bpy.app.version_string}")
+               f"export_batch: {'append' if is_append else 'replace'}  "
+               f"{len(jobs)} new job(s) starting at {job_start_index}  "
+               f"blend={bpy.data.filepath!r}  out={output_path!r}  "
+               f"bpy={bpy.app.version_string}")
 
     # ── Seed the Job Log list (one row per job, status=NOT_STARTED) ─────────
-    _job_statuses.clear()
-    _job_log_rows.clear()
-    s.job_log_items.clear()
-    for i, p in enumerate(jobs):
+    # In replace mode clear all existing log state first.
+    if not is_append:
+        _job_statuses.clear()
+        _job_log_rows.clear()
+        s.job_log_items.clear()
+    for i_offset, p in enumerate(jobs):
+        i = job_start_index + i_offset
         _log_row = s.job_log_items.add()
         _log_row.job_number = i + 1
         _log_row.job_name   = make_name(p)
@@ -733,7 +762,8 @@ def export_batch(context):
         _job_log_rows.append((i + 1, make_name(p)))
 
     # ── Write one JSON + one .bat entry per job ──────────────────────────────
-    for i, p in enumerate(jobs):
+    for i_offset, p in enumerate(jobs):
+        i         = job_start_index + i_offset
         name      = make_name(p)
         job_path  = os.path.join(jobs_dir, f"job_{i:04d}.json")
         log_path  = os.path.join(jobs_dir, f"job_{i:04d}.log")
@@ -772,7 +802,7 @@ def export_batch(context):
 
         with open(job_path, "w") as fh:
             json.dump(job_data, fh, indent=2)
-        _debug_log(_dbg, output_path, "addon", f"job {i}: {name}  params={p}")
+        _debug_log(_dbg, output_path, "addon", f"job {i} ({i_offset+1}/{len(jobs)}): {name}  params={p}")
 
         # smoke_launcher.py wraps Blender, detects crash dialogs (WerFault),
         # saves crash logs, and exits non-zero so the batch marks the job failed.
@@ -793,7 +823,7 @@ def export_batch(context):
             )
 
         bat_lines += [
-            f"echo === Job {i+1}/{len(jobs)}: {name} ===",
+            f"echo === Job {i+1}/{total_jobs}: {name} ===",
             run_cmd,
             "if errorlevel 1 (",
             "    echo   WARNING: job exited with error",
@@ -881,13 +911,27 @@ class SmokeJobItem(bpy.types.PropertyGroup):
 class SMOKE_UL_job_log(bpy.types.UIList):
     """Job Log list — one row per exported job, colour-coded by status."""
 
+    # Icons that work reliably across Blender 4.x and 5.x.
+    # SEQUENCE_COLOR_XX icons are unavailable in Blender 5.1.1 and cause
+    # silent row blanking, so they have been replaced with stable alternatives.
     _STATUS_ICONS = {
         'NOT_STARTED': 'RADIOBUT_OFF',
-        'IN_PROGRESS': 'SEQUENCE_COLOR_07',  # blue   — active / running
-        'RETRYING':    'SEQUENCE_COLOR_04',  # yellow — transient error, retrying
-        'COMPLETE':    'SEQUENCE_COLOR_05',  # green  — success
-        'FAILED':      'SEQUENCE_COLOR_01',  # red    — controlled failure (worker reported error)
-        'CRASHED':     'SEQUENCE_COLOR_02',  # orange — unexpected process crash
+        'IN_PROGRESS': 'PLAY',
+        'RETRYING':    'FILE_REFRESH',
+        'COMPLETE':    'CHECKMARK',
+        'FAILED':      'CANCEL',
+        'CRASHED':     'ERROR',
+    }
+
+    # Unicode prefix prepended to the job name for a second colour-free status
+    # indicator that is visible even when icons fail to render.
+    _STATUS_PREFIX = {
+        'NOT_STARTED': '',
+        'IN_PROGRESS': '▶ ',   # ▶
+        'RETRYING':    '↻ ',   # ↻
+        'COMPLETE':    '✓ ',   # ✓
+        'FAILED':      '✗ ',   # ✗
+        'CRASHED':     '⚠ ',   # ⚠
     }
 
     def draw_item(self, context, layout, data, item, icon,
@@ -897,12 +941,16 @@ class SMOKE_UL_job_log(bpy.types.UIList):
         # Blender passes `index` — the item's position in the displayed list.
         # Since we apply no filtering, this equals the collection index and maps
         # directly to _job_log_rows.  No RNA property reads needed at all.
-        # flt_flag=0 accepts Blender 5.x passing it as a positional argument.
+        # _flt_flag=0 accepts Blender 5.x passing it as a positional argument.
         if index >= len(_job_log_rows):
             return
         job_number, job_name = _job_log_rows[index]
         status = _job_statuses.get(job_number, 'NOT_STARTED')
-        status_icon = self._STATUS_ICONS.get(status, 'NONE')
+        status_icon   = self._STATUS_ICONS.get(status, 'NONE')
+        status_prefix = self._STATUS_PREFIX.get(status, '')
+        # Alert tint (red background) for terminal error states.
+        if status in ('FAILED', 'CRASHED'):
+            layout.alert = True
         split = layout.split(factor=0.10, align=True)
         try:
             split.label(icon=status_icon, text="")
@@ -910,7 +958,7 @@ class SMOKE_UL_job_log(bpy.types.UIList):
             split.label(icon='NONE', text="")
         inner = split.split(factor=0.22, align=True)
         inner.label(text=str(job_number))
-        inner.label(text=job_name)
+        inner.label(text=status_prefix + job_name)
 
     def draw_filter(self, context, layout):
         pass  # suppress the filter / sort bar
@@ -1332,6 +1380,16 @@ class SmokeSettings(bpy.types.PropertyGroup):
 
     # ── Status / UI state ────────────────────────────────────────────────────
 
+    export_mode: bpy.props.EnumProperty(
+        name="Export Mode",
+        description="Whether to replace all existing jobs or add new ones after them",
+        items=[
+            ('REPLACE', "Replace", "Clear all existing jobs and start fresh"),
+            ('APPEND',  "Append",  "Add new jobs after the existing ones, keeping previous results"),
+        ],
+        default='REPLACE',
+    )
+
     last_export_info: bpy.props.StringProperty(
         default="",
         description="Status message shown after the last Export Batch operation",
@@ -1425,7 +1483,11 @@ class SMOKE_OT_export_batch(bpy.types.Operator):
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
 
-        msg = f"Exported {count} job(s) to {bat_path}"
+        total = len(s.job_log_items)
+        if s.export_mode == 'APPEND':
+            msg = f"Appended {count} job(s) — {total} total  [{bat_path}]"
+        else:
+            msg = f"Exported {count} job(s) to {bat_path}"
         s.last_export_info = msg
         self.report({'INFO'}, msg)
         return {'FINISHED'}
@@ -1499,7 +1561,6 @@ class SMOKE_OT_save_settings(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
-        import json, os
         s    = context.scene.smoke_settings
         path = os.path.normpath(self.filepath)
         if not path.endswith(".smokesettings"):
@@ -1539,7 +1600,6 @@ class SMOKE_OT_load_settings(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
-        import os
         s = context.scene.smoke_settings
         _load_settings_from_path(s, self.filepath)
         if s.settings_file_path:
@@ -1551,8 +1611,9 @@ class SMOKE_OT_load_settings(bpy.types.Operator):
 class SMOKE_OT_add_value(bpy.types.Operator):
     """Add a new entry to a parameter explicit-value list."""
 
-    bl_idname = "smoke.add_value"
-    bl_label  = "Add Value"
+    bl_idname  = "smoke.add_value"
+    bl_label   = "Add Value"
+    bl_options = {'REGISTER', 'UNDO'}
 
     param: bpy.props.StringProperty()
 
@@ -1588,8 +1649,9 @@ class SMOKE_OT_add_value(bpy.types.Operator):
 class SMOKE_OT_remove_value(bpy.types.Operator):
     """Remove checked items from a parameter list, or the highlighted item if none are checked."""
 
-    bl_idname = "smoke.remove_value"
-    bl_label  = "Remove Value"
+    bl_idname  = "smoke.remove_value"
+    bl_label   = "Remove Value"
+    bl_options = {'REGISTER', 'UNDO'}
 
     param: bpy.props.StringProperty()
 
@@ -1634,16 +1696,27 @@ _LOG_DONE_MARKERS = ("Done. Results", "Performance record written to perf_log")
 def _find_running_log(jobs_dir):
     """Return (log_file, log_stem, tail) for the current active job, or None.
 
-    A job is considered finished if its log tail contains a done marker OR a
-    .done file exists.  The done-marker check handles the sync-lag window where
-    .done has not yet arrived on this machine even though the job completed.
+    A job is considered finished if its log tail contains a done marker, a
+    .done file exists, OR a higher-numbered .done stem exists (sequential batch
+    guarantee: if job_0005.done is present, job_0003 must already be complete).
+    The higher-stem check handles the crash-without-.done case where a stale log
+    would otherwise shadow all later jobs.
     """
     try:
         all_files = set(os.listdir(jobs_dir))
     except OSError:
         return None
+
+    # Build the set of all stems that have a .done file, for the sequential check.
+    done_stems = {f[:-5] for f in all_files if f.endswith(".done")}
+
     for log_file in reversed(sorted(f for f in all_files if f.endswith(".log"))):
-        if log_file[:-4] + ".done" in all_files:
+        log_stem = log_file[:-4]
+        if log_stem + ".done" in all_files:
+            continue
+        # Sequential batch: if any higher-numbered done stem exists, this log
+        # is from a job that already completed (even if its .done never arrived).
+        if any(s > log_stem for s in done_stems):
             continue
         try:
             with open(os.path.join(jobs_dir, log_file), "r", errors="replace") as fh:
@@ -1652,7 +1725,7 @@ def _find_running_log(jobs_dir):
             continue
         if any(marker in tail for marker in _LOG_DONE_MARKERS):
             continue
-        return log_file, log_file[:-4], tail
+        return log_file, log_stem, tail
     return None
 
 
@@ -1702,15 +1775,15 @@ def _count_vdb_frames(jobs_dir, log_stem, tail=None):
     return len(frames_baked), frame_end
 
 
-def _count_png_frames(jobs_dir, log_stem):
+def _count_png_frames(jobs_dir, log_stem, start_time=None):
     """Return (frames_rendered, frame_end) for log_stem, or None.
 
-    Counts ALL frame_NNNN.png files regardless of mtime.  The caller subtracts
-    a baseline (set when the render stage is first detected) to measure only
-    frames rendered in the current run.  This is more robust than mtime filtering,
-    which fails when the poller first runs after some frames have already been
-    written (Blender restarted mid-batch, cached bake so render started before
-    the first poll, etc.).
+    When start_time is provided (a time.time() value), only PNGs with an mtime
+    >= start_time - 10.0 are counted.  This correctly handles re-render runs
+    where PNGs are overwritten rather than added — the total file count stays
+    constant so the baseline approach shows "0 of N" forever.  Pass
+    start_time=s.batch_job_start_time for the per-poll progress call; omit it
+    (or pass None) for the baseline-setting call at render-stage entry.
     """
     json_path = os.path.join(jobs_dir, log_stem + ".json")
     try:
@@ -1726,8 +1799,15 @@ def _count_png_frames(jobs_dir, log_stem):
     frames_dir = os.path.join(output_path, "Renders", f"{name}_frames")
     count = 0
     if os.path.isdir(frames_dir):
+        mtime_cutoff = (start_time - 10.0) if start_time else None
         for f in os.listdir(frames_dir):
             if re.match(r'frame_\d{4}\.png$', f):
+                if mtime_cutoff is not None:
+                    try:
+                        if os.path.getmtime(os.path.join(frames_dir, f)) < mtime_cutoff:
+                            continue
+                    except OSError:
+                        continue
                 count += 1
     return count, frame_end
 
@@ -1755,6 +1835,15 @@ def _format_elapsed(secs):
     if m > 0:
         return f"{m} min"
     return f"{s} sec"
+
+
+def _has_error(jobs_dir, fname):
+    """Return True if fname in jobs_dir contains the word 'error'."""
+    try:
+        with open(os.path.join(jobs_dir, fname)) as fh:
+            return "error" in fh.read().lower()
+    except OSError:
+        return False
 
 
 def _update_job_log_statuses(s, jobs_dir):
@@ -1785,16 +1874,9 @@ def _update_job_log_statuses(s, jobs_dir):
         first_log     = f"job_{n}.log"
         first_crashed = f"job_{n}.crashed"
 
-        def _has_error(fname):
-            try:
-                with open(os.path.join(jobs_dir, fname)) as fh:
-                    return "error" in fh.read().lower()
-            except OSError:
-                return False
-
         if retry_done in all_files:
             # Retry completed — it supersedes any first-run crash.
-            _job_statuses[job_number] = 'FAILED' if _has_error(retry_done) else 'COMPLETE'
+            _job_statuses[job_number] = 'FAILED' if _has_error(jobs_dir, retry_done) else 'COMPLETE'
         elif retry_log in all_files:
             _job_statuses[job_number] = 'RETRYING'
             if active_index < 0:
@@ -1802,10 +1884,10 @@ def _update_job_log_statuses(s, jobs_dir):
         elif first_done in all_files:
             # First run finished. Distinguish crash (unexpected exit) from
             # controlled failure (worker called sys.exit(1)).
-            if first_crashed in all_files and _has_error(first_done):
+            if first_crashed in all_files and _has_error(jobs_dir, first_done):
                 _job_statuses[job_number] = 'CRASHED'
             else:
-                _job_statuses[job_number] = 'FAILED' if _has_error(first_done) else 'COMPLETE'
+                _job_statuses[job_number] = 'FAILED' if _has_error(jobs_dir, first_done) else 'COMPLETE'
         elif first_crashed in all_files:
             # Launcher wrote .crashed but batch never wrote .done (rare — launcher itself crashed).
             _job_statuses[job_number] = 'CRASHED'
@@ -1831,22 +1913,15 @@ def _compute_batch_summary(jobs_dir, elapsed_secs):
         all_files = os.listdir(jobs_dir)
     except OSError:
         all_files = []
-    def _has_error(fname):
-        try:
-            with open(os.path.join(jobs_dir, fname)) as fh:
-                return "error" in fh.read().lower()
-        except OSError:
-            return False
-
     first_dones   = [f for f in all_files if f.endswith(".done")    and "_retry" not in f]
     retry_dones   = [f for f in all_files if f.endswith("_retry.done")]
     # Base stems that have a .crashed marker (first-run only; retries don't go through launcher)
     crashed_bases = {f[:-8] for f in all_files if f.endswith(".crashed") and "_retry" not in f}
 
-    first_failed_stems = {f[:-5] for f in first_dones if _has_error(f)}
+    first_failed_stems = {f[:-5] for f in first_dones if _has_error(jobs_dir, f)}
     # Stems that eventually succeeded via retry
-    retry_ok_bases   = {f[:-11] for f in retry_dones if not _has_error(f)}
-    retry_fail_bases = {f[:-11] for f in retry_dones if     _has_error(f)}
+    retry_ok_bases   = {f[:-11] for f in retry_dones if not _has_error(jobs_dir, f)}
+    retry_fail_bases = {f[:-11] for f in retry_dones if     _has_error(jobs_dir, f)}
     retry_ok   = len(retry_ok_bases)
     retry_fail = len(retry_fail_bases)
 
@@ -1929,14 +2004,13 @@ def _debug_log(enabled: bool, output_path: str, component: str, msg: str) -> Non
 
 def _estim_log(record: dict) -> None:
     """Append one JSON record to <output_path>/estim_log.jsonl."""
-    import json as _j
     op = _estim["output_path"]
     if not op:
         return
     record.setdefault("ts", round(time.time(), 2))
     try:
         with open(os.path.join(op, "estim_log.jsonl"), "a", encoding="utf-8") as fh:
-            fh.write(_j.dumps(record) + "\n")
+            fh.write(json.dumps(record) + "\n")
     except OSError:
         pass
 
@@ -2313,14 +2387,22 @@ def _poll_batch_progress_impl():
                         subtask_factor = baked_new / to_bake
 
             elif stage_label == "Rendering animation":
-                render_info = _count_png_frames(jobs_dir, log_stem)
+                _start_t    = s.batch_job_start_time if s.batch_job_start_time > 0 else None
+                render_info = _count_png_frames(jobs_dir, log_stem, start_time=_start_t)
                 if render_info:
                     raw_rendered, _ = render_info
-                    render_baseline = max(s.batch_render_frame_baseline, 0)
-                    rendered_new    = max(raw_rendered - render_baseline, 0)
-                    _debug_log(s.collect_debug_log, os.path.dirname(jobs_dir), "poller",
-                               f"render poll: raw={raw_rendered} baseline={render_baseline} "
-                               f"new={rendered_new} target={render_target}")
+                    if _start_t is not None:
+                        # mtime-filtered: count is "new only" — baseline subtraction not needed
+                        rendered_new = raw_rendered
+                        _debug_log(s.collect_debug_log, os.path.dirname(jobs_dir), "poller",
+                                   f"render poll (mtime): raw={raw_rendered} "
+                                   f"new={rendered_new} target={render_target}")
+                    else:
+                        render_baseline = max(s.batch_render_frame_baseline, 0)
+                        rendered_new    = max(raw_rendered - render_baseline, 0)
+                        _debug_log(s.collect_debug_log, os.path.dirname(jobs_dir), "poller",
+                                   f"render poll: raw={raw_rendered} baseline={render_baseline} "
+                                   f"new={rendered_new} target={render_target}")
                     if render_target > 0:
                         frames_rendered = min(rendered_new, render_target)
                         subtask_text   = f"Rendering ({frames_rendered} of {render_target})"
@@ -3085,6 +3167,27 @@ class SMOKE_OT_remove_all_jobs(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SMOKE_OT_reset_to_defaults(bpy.types.Operator):
+    """Reset ALL SmokeSimLab settings to factory defaults."""
+
+    bl_idname      = "smoke.reset_to_defaults"
+    bl_label       = "Reset To Defaults"
+    bl_description = (
+        "Reset ALL SmokeSimLab settings to factory defaults: simulation parameters, "
+        "render settings, output path, domain object, utilities toggles, and job log "
+        "are all cleared.  This cannot be undone."
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        _reset_on_load()
+        _redraw_panels()
+        self.report({'INFO'}, "SmokeSimLab: all settings reset to defaults")
+        return {'FINISHED'}
+
+
 # ---------------------------------------------------------------------------
 # Panel helpers
 # ---------------------------------------------------------------------------
@@ -3128,7 +3231,6 @@ def _sub_param_ui(box, s, name, label):
 
 def _settings_ui(layout, s):
     """Draw the preset save/load row at the top of Simulation Parameters."""
-    import os
     row = layout.row(align=True)
     row.prop(s, "settings_file_enum", text="")
     if _is_settings_dirty(s):
@@ -3376,6 +3478,8 @@ class SMOKE_PT_panel(bpy.types.Panel):
         row = layout.row()
         row.prop(s, "render_mode",    text="Render Engine")
         row.prop(s, "render_samples", text="Samples")
+        row_mode = layout.row(align=True)
+        row_mode.prop(s, "export_mode", expand=True)
         layout.operator(
             "smoke.export_batch",
             text=f"Export Batch  ({job_count} jobs)",
@@ -3468,6 +3572,10 @@ class SMOKE_PT_panel(bpy.types.Panel):
             box_util.prop(s, "collect_debug_log")
             box_util.separator()
             box_util.operator("smoke.remove_all_jobs", text="Remove All Jobs", icon='TRASH')
+            box_util.separator()
+            row_reset = box_util.row()
+            row_reset.alert = True
+            row_reset.operator("smoke.reset_to_defaults", text="Reset To Defaults", icon='LOOP_BACK')
 
 
 # ---------------------------------------------------------------------------
@@ -3655,6 +3763,7 @@ classes = [
     SMOKE_OT_retry_failed,
     SMOKE_OT_setup_results,
     SMOKE_OT_remove_all_jobs,
+    SMOKE_OT_reset_to_defaults,
     SMOKE_PT_panel,
 ]
 

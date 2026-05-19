@@ -6,8 +6,10 @@
 smokeSimulationLab/          ← repo root
 ├── SmokeSimLab/
 │   ├── __init__.py          ← addon code
-│   └── smoke_worker.py      ← headless batch worker
+│   ├── smoke_worker.py      ← headless batch worker
+│   └── smoke_launcher.py    ← crash-safe launcher wrapper
 ├── documentation/
+├── tests/
 ├── README.md
 ├── LICENSE
 └── .gitignore
@@ -27,43 +29,56 @@ Open `SmokeSimLab/__init__.py` and bump the version in `bl_info`:
 ```python
 bl_info = {
     ...
-    "version": (1, 3, 0),   # <-- change this
+    "version": (0, 2, 21),   # <-- change this
     ...
 }
 ```
 
 Use the format `(major, minor, patch)`:
-- **patch** (1.2.1) — small bug fixes
-- **minor** (1.3.0) — new features, backwards compatible
-- **major** (2.0.0) — breaking changes
+- **patch** (0.2.x) — small bug fixes, test additions, documentation updates
+- **minor** (0.x.0) — new features, backwards compatible
+- **major** (x.0.0) — breaking changes
+
+Also update `WORKER_VERSION` in `smoke_worker.py` and `LAUNCHER_VERSION` in
+`smoke_launcher.py` if those files changed, and keep `_EXPECTED_WORKER_VERSION`
+/ `_EXPECTED_LAUNCHER_VERSION` in `__init__.py` in sync with them.
 
 ### 2. Copy your updated scripts into the repo folder
 
 ```
-scripts/SmokeSimLab/__init__.py   →   SmokeSimLab/__init__.py
+scripts/SmokeSimLab/__init__.py       →   SmokeSimLab/__init__.py
 scripts/SmokeSimLab/smoke_worker.py   →   SmokeSimLab/smoke_worker.py
+scripts/SmokeSimLab/smoke_launcher.py →   SmokeSimLab/smoke_launcher.py
 ```
 
-### 3. Commit your changes
+### 3. Run tests
 
 ```bash
-git add SmokeSimLab/__init__.py SmokeSimLab/smoke_worker.py
-git commit -m "Release v1.3.0 — description of what changed"
+python -m pytest tests/
 ```
 
-### 4. Tag the commit and push
+All tests must pass before tagging a release.
+
+### 4. Commit your changes
 
 ```bash
-git tag v1.3.0
+git add SmokeSimLab/__init__.py SmokeSimLab/smoke_worker.py SmokeSimLab/smoke_launcher.py
+git commit -m "v0.2.21: description of what changed"
+```
+
+### 5. Tag the commit and push
+
+```bash
+git tag v0.2.21
 git push origin main --tags
 ```
 
-The tag must start with `v` followed by numbers, e.g. `v1.3.0`.
+The tag must start with `v` followed by numbers, e.g. `v0.2.21`.
 Pushing the tag triggers the GitHub Actions release workflow automatically.
 
-### 5. Check the release on GitHub
+### 6. Check the release on GitHub
 
-Go to: https://github.com/rickpalo/smokeSimulationLab/releases
+Go to: https://github.com/rickpalo/SmokeSimLab/releases
 
 GitHub Actions will create the release and attach `SmokeSimLab.zip`
 (the installable Blender addon) within a minute or two.
@@ -73,8 +88,8 @@ GitHub Actions will create the release and attach `SmokeSimLab.zip`
 ## If you need to redo a release tag
 
 ```bash
-git tag -d v1.3.0                    # delete local tag
-git push origin :refs/tags/v1.3.0   # delete remote tag
+git tag -d v0.2.21                    # delete local tag
+git push origin :refs/tags/v0.2.21   # delete remote tag
 # then re-tag and push as normal
 ```
 
@@ -84,6 +99,17 @@ git push origin :refs/tags/v1.3.0   # delete remote tag
 
 | Version | Notes |
 |---------|-------|
-| 1.0.0   | Initial release |
-| 1.1.0   | Added alpha/beta buoyancy parameters, float epsilon fix |
-| 1.2.0   | Added Limited/All Combinations iteration mode, docs button |
+| 0.1.0   | Initial internal release |
+| 0.2.0   | Crash detection, launcher watchdog, log sentinel |
+| 0.2.5   | stderr capture to blender_stderr.txt |
+| 0.2.7   | config/ false-positive fix (BUG-006) |
+| 0.2.10  | Param-derived names — no more _0000 suffix (BUG-005) |
+| 0.2.12  | worker_done sentinel; CRASHED status distinct from FAILED |
+| 0.2.13  | Startup + wall-clock watchdog timeouts |
+| 0.2.14  | Job log blanking fix via as_pointer() row identification |
+| 0.2.15  | BUG-004 SKIP BAKE cache wipe fix (path equality check) |
+| 0.2.16  | Pre-flight inspector; improved addon detection |
+| 0.2.17  | flt_flag fix for Blender 5.x draw_item signature |
+| 0.2.18  | BUG-004 presave/rename approach replacing path-equality check |
+| 0.2.19  | Stable icons (Blender 5.1.1); Unicode status prefix; stale-log detection; mtime-based render progress; Reset To Defaults operator |
+| 0.2.20  | Fix iterate_both AttributeError; extract _has_error; remove redundant imports; bl_options on value list operators; make_name + iterate_both regression tests |

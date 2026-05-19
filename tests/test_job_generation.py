@@ -1,10 +1,10 @@
-"""Tests for expand_param, generate_jobs_limited, and generate_jobs_all."""
+"""Tests for expand_param, generate_jobs_limited, generate_jobs_all, and make_name."""
 import sys, os
 import types
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-from SmokeSimLab import expand_param, generate_jobs_limited, generate_jobs_all
+from SmokeSimLab import expand_param, generate_jobs_limited, generate_jobs_all, make_name
 
 
 # ---------------------------------------------------------------------------
@@ -408,3 +408,127 @@ class TestIterateNoiseBoth:
         assert (True,  False) in state_pairs
         assert (False, True)  in state_pairs
         assert (False, False) in state_pairs
+
+    # ── Regression: iterate_both off-pass used undefined properties ──────────
+    # Before the fix, the "off" pass in generate_jobs_all referenced s.dissolve_speed,
+    # s.noise_upres, etc. — which don't exist as Blender RNA properties (only the
+    # _begin variants are registered).  The fix uses expand_param(s, name)[0].
+    # These tests verify that:
+    #  (a) the off-pass job carries the correct _begin value
+    #  (b) generate_jobs_all does not raise AttributeError when the shorthand
+    #      attribute is absent (simulating the Blender RNA environment)
+
+    def test_all_dissolve_off_job_uses_begin_value(self):
+        # dissolve_speed_begin=99 (non-default); the off-pass job must use 99,
+        # not the base default of 5.
+        s = _make_settings(
+            use_dissolve=True,
+            iterate_dissolve_both=True,
+            dissolve_speed_begin=99,
+            dissolve_speed_end=99,
+        )
+        jobs = list(generate_jobs_all(s))
+        off_jobs = [j for j in jobs if not j["use_dissolve"]]
+        assert len(off_jobs) == 1
+        assert off_jobs[0]["dissolve_speed"] == 99
+
+    def test_all_noise_off_job_uses_begin_values(self):
+        # Verify all three noise params in the off-pass come from _begin.
+        s = _make_settings(
+            use_noise=True,
+            iterate_noise_both=True,
+            noise_upres_begin=8,      noise_upres_end=8,
+            noise_strength_begin=3.5, noise_strength_end=3.5,
+            noise_spatial_scale_begin=1.5, noise_spatial_scale_end=1.5,
+        )
+        jobs = list(generate_jobs_all(s))
+        off_jobs = [j for j in jobs if not j["use_noise"]]
+        assert len(off_jobs) == 1
+        assert off_jobs[0]["noise_upres"]         == 8
+        assert off_jobs[0]["noise_strength"]       == pytest.approx(3.5)
+        assert off_jobs[0]["noise_spatial_scale"]  == pytest.approx(1.5)
+
+    def test_all_no_shorthand_attr_does_not_raise(self):
+        # Simulate Blender: remove the base shorthand attributes so that only
+        # _begin variants exist.  This would have caused AttributeError before the fix.
+        s = _make_settings(
+            use_dissolve=True,
+            iterate_dissolve_both=True,
+            use_noise=True,
+            iterate_noise_both=True,
+        )
+        del s.dissolve_speed
+        del s.noise_upres
+        del s.noise_strength
+        del s.noise_spatial_scale
+        # Must not raise AttributeError.
+        jobs = list(generate_jobs_all(s))
+        assert len(jobs) == 4  # (dissolve on/off) × (noise on/off)
+
+
+# ---------------------------------------------------------------------------
+# make_name
+# ---------------------------------------------------------------------------
+
+class TestMakeName:
+    def _base_params(self, **overrides):
+        p = {
+            "resolution":          64,
+            "vorticity":           0.0,
+            "alpha":               1.0,
+            "beta":                1.0,
+            "dissolve_speed":      5,
+            "noise_upres":         2,
+            "noise_strength":      2.0,
+            "noise_spatial_scale": 2.0,
+            "use_dissolve":        True,
+            "slow_dissolve":       False,
+            "use_noise":           True,
+        }
+        p.update(overrides)
+        return p
+
+    def test_basic_format(self):
+        p = self._base_params()
+        name = make_name(p)
+        assert name == "R64_V0.0_A1.0_B1.0_D5_N2_NS2.0_SC2.0"
+
+    def test_dissolve_off(self):
+        p = self._base_params(use_dissolve=False)
+        name = make_name(p)
+        assert "D-OFF" in name
+        assert "D5" not in name
+
+    def test_noise_off(self):
+        p = self._base_params(use_noise=False)
+        name = make_name(p)
+        assert "N-OFF" in name
+        assert "N2" not in name
+
+    def test_both_off(self):
+        p = self._base_params(use_dissolve=False, use_noise=False)
+        name = make_name(p)
+        assert "D-OFF" in name
+        assert "N-OFF" in name
+
+    def test_float_rounding(self):
+        # Floats are rounded to 2 decimal places in the name.
+        p = self._base_params(vorticity=0.333333, alpha=-0.666667)
+        name = make_name(p)
+        assert "V0.33" in name
+        assert "A-0.67" in name
+
+    def test_resolution_is_integer(self):
+        p = self._base_params(resolution=128.0)
+        name = make_name(p)
+        assert name.startswith("R128_")
+
+    def test_same_params_same_name(self):
+        p1 = self._base_params(resolution=256, vorticity=1.5)
+        p2 = self._base_params(resolution=256, vorticity=1.5)
+        assert make_name(p1) == make_name(p2)
+
+    def test_different_params_different_names(self):
+        p1 = self._base_params(resolution=64)
+        p2 = self._base_params(resolution=128)
+        assert make_name(p1) != make_name(p2)
