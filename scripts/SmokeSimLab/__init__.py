@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 23),
+    "version":     (0, 2, 24),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -268,6 +268,21 @@ def _is_settings_dirty(s):
     return json.dumps(_settings_dict(s), sort_keys=True) != snap
 
 
+# Sentinel for "no preset selected". A non-empty identifier sidesteps a
+# Blender quirk where assigning "" to a dynamic EnumProperty can hit the
+# "enum \"\" not found in ()" TypeError even when the items list nominally
+# contains a blank-id entry — the special handling of empty identifiers is
+# inconsistent across operations. The display name stays blank so the UI
+# still shows nothing in the dropdown when no preset is active.
+_SETTINGS_ENUM_SENTINEL = "__none__"
+
+# Module-level reference to the items list. Required: Blender's dynamic
+# EnumProperty docs explicitly warn that Python must keep a reference to
+# strings returned from the callback or Blender will crash / see ()
+# instead of the actual items.
+_settings_items_cache: list = [(_SETTINGS_ENUM_SENTINEL, "", "")]
+
+
 def _settings_files_enum_items(self, _context):
     """EnumProperty items — list .smokesettings files in the preset search path.
 
@@ -275,11 +290,13 @@ def _settings_files_enum_items(self, _context):
     This avoids issues with spaces, backslashes, or long Windows paths being
     used as Blender EnumProperty identifiers.
     """
+    global _settings_items_cache
     folder = self.settings_search_path
     if not folder and self.output_path:
         folder = bpy.path.abspath(self.output_path)
-    # First item: blank name so the button shows blank when no preset is active.
-    items = [('', "", "")]
+    # First item: blank-display sentinel so the dropdown reads as empty
+    # whenever no preset has been explicitly loaded/saved/selected.
+    items = [(_SETTINGS_ENUM_SENTINEL, "", "")]
     if folder and os.path.isdir(folder):
         try:
             for fname in sorted(os.listdir(folder)):
@@ -288,13 +305,14 @@ def _settings_files_enum_items(self, _context):
                     items.append((stem, stem, fname))
         except OSError:
             pass
+    _settings_items_cache = items   # keep strings alive across the callback boundary
     return items
 
 
 def _on_settings_enum_update(self, _context):
     """Update callback for settings_file_enum — auto-load when selection changes."""
     stem = self.settings_file_enum
-    if not stem:
+    if not stem or stem == _SETTINGS_ENUM_SENTINEL:
         return
     folder = self.settings_search_path
     if not folder and self.output_path:
@@ -427,6 +445,7 @@ def generate_jobs_limited(s):
     if s.use_noise:
         sweepable += ["noise_upres", "noise_strength", "noise_spatial_scale"]
 
+    yielded = False
     for param_name in sweepable:
         use_list  = getattr(s, param_name + "_use_list",  False)
         use_range = getattr(s, param_name + "_use_range", False)
@@ -450,6 +469,7 @@ def generate_jobs_limited(s):
         for v in vals:
             job = dict(base)
             job[param_name] = v
+            yielded = True
             yield job
 
     # Iterate-both: append one comparison job with the feature toggled off.
@@ -459,13 +479,23 @@ def generate_jobs_limited(s):
         base = _default_job(s)
         job  = dict(base)
         job["use_dissolve"] = False
+        yielded = True
         yield job
 
     if s.use_noise and s.iterate_noise_both:
         base = _default_job(s)
         job  = dict(base)
         job["use_noise"] = False
+        yielded = True
         yield job
+
+    # Fallback: if no axis sweep produced jobs and no iterate-both pass was
+    # configured, emit a single baseline job. Otherwise a user with only
+    # single-value parameters would see "0 jobs" and a disabled Export button,
+    # which is surprising — testing one specific param combination is a valid
+    # use case and should not require enabling All Combinations mode.
+    if not yielded:
+        yield _default_job(s)
 
 
 def generate_jobs_all(s):
@@ -1298,7 +1328,7 @@ class SmokeSettings(bpy.types.PropertyGroup):
             "consistent as resolution changes. "
             "Formula: density = base_density × (job_resolution / default_resolution)"
         ),
-        default=False,
+        default=True,
     )
 
     use_placeholders: bpy.props.BoolProperty(
@@ -1510,6 +1540,16 @@ class SMOKE_OT_export_batch(bpy.types.Operator):
             self.report({'ERROR'},
                         "List values out of bounds — fix before exporting: "
                         + "; ".join(violations))
+            return {'CANCELLED'}
+
+        # Defensive: refuse to export 0 jobs even when called from script.
+        # The UI button is disabled when count == 0, but the operator can
+        # still be invoked via bpy.ops, and we shouldn't report success when
+        # nothing was written. generate_jobs is cheap (pure Python iteration).
+        if not any(True for _ in generate_jobs(s)):
+            self.report({'ERROR'},
+                        "Nothing to export — configure at least one parameter "
+                        "or enable iterate-both.")
             return {'CANCELLED'}
 
         try:
@@ -3545,7 +3585,13 @@ class SMOKE_PT_panel(bpy.types.Panel):
         row.prop(s, "render_samples", text="Samples")
         row_mode = layout.row(align=True)
         row_mode.prop(s, "export_mode", expand=True)
-        layout.operator(
+        export_row = layout.row()
+        # Grey out the button when no jobs would be created so the user can't
+        # click it and get a misleading "Exported 0 job(s)" success message.
+        # In LIMITED mode the fallback baseline ensures count >= 1, so this
+        # only fires in pathological cases (e.g. all-empty lists in ALL mode).
+        export_row.enabled = job_count > 0
+        export_row.operator(
             "smoke.export_batch",
             text=f"Export Batch  ({job_count} jobs)",
             icon='EXPORT',
@@ -3723,7 +3769,7 @@ def _reset_on_load(dummy=None):
         s.settings_file_path   = ""
         s.settings_search_path = ""
         s.settings_snapshot    = ""
-        s.settings_file_enum   = ""
+        s.settings_file_enum   = _SETTINGS_ENUM_SENTINEL
 
         # ── Text objects ──────────────────────────────────────────────────────
         s.text_resolution = "Resolution_Text"
@@ -3734,7 +3780,7 @@ def _reset_on_load(dummy=None):
         # ── Render / export settings ──────────────────────────────────────────
         s.render_mode        = 'CYCLES'
         s.render_samples     = 16
-        s.maintain_density   = False
+        s.maintain_density   = True
         s.iteration_mode     = 'LIMITED'
         s.use_placeholders   = False
         s.use_existing_cache = False

@@ -123,8 +123,16 @@ class TestExpandParam:
 # ---------------------------------------------------------------------------
 
 class TestGenerateJobsLimited:
-    def test_no_sweeps_yields_no_jobs(self):
-        assert list(generate_jobs_limited(_make_settings())) == []
+    def test_no_sweeps_yields_one_baseline_job(self):
+        # When no axis is swept and no iterate-both is configured, the
+        # generator falls back to a single baseline job rather than yielding
+        # nothing. Testing one specific param combination is a valid use case
+        # and should not require enabling All Combinations mode.
+        jobs = list(generate_jobs_limited(_make_settings()))
+        assert len(jobs) == 1
+        # The single job uses every axis's default value.
+        for param, expected in _BASE_VALUES.items():
+            assert jobs[0][param] == expected, f"{param}: expected {expected}, got {jobs[0][param]}"
 
     def test_single_item_list_yields_one_job(self):
         # Regression: previously a 1-item list + 4 zero-step gas params produced 4 jobs.
@@ -143,13 +151,25 @@ class TestGenerateJobsLimited:
         )
         assert len(list(generate_jobs_limited(s))) == 3
 
-    def test_zero_step_range_yields_no_jobs(self):
-        # Range enabled but step=0 produces no variation — not swept.
+    def test_zero_step_range_yields_one_baseline_job(self):
+        # Range enabled but step=0 produces no variation — not a real sweep,
+        # so the fallback emits one baseline job (matching no-sweeps behavior).
         s = _make_settings(
             vorticity_use_range=True,
             vorticity_begin=0.5, vorticity_end=2.0, vorticity_step=0,
         )
-        assert list(generate_jobs_limited(s)) == []
+        jobs = list(generate_jobs_limited(s))
+        assert len(jobs) == 1
+
+    def test_no_sweeps_baseline_not_emitted_when_iterate_both_active(self):
+        # iterate_both already adds an explicit comparison job, so the
+        # fallback baseline must NOT also fire — otherwise we'd get an
+        # unintended extra job.
+        s = _make_settings(use_dissolve=True, iterate_dissolve_both=True)
+        jobs = list(generate_jobs_limited(s))
+        # Exactly one off-pass job, no extra baseline.
+        assert len(jobs) == 1
+        assert jobs[0]["use_dissolve"] is False
 
     def test_nonzero_range_yields_correct_count(self):
         s = _make_settings(
@@ -180,12 +200,16 @@ class TestGenerateJobsLimited:
             assert job["vorticity"] == pytest.approx(0.0)
 
     def test_dissolve_ignored_when_disabled(self):
+        # use_dissolve=False means the range is ignored; with no other sweeps
+        # the fallback emits one baseline job with dissolve disabled.
         s = _make_settings(
             use_dissolve=False,
             dissolve_speed_use_range=True,
             dissolve_speed_begin=10, dissolve_speed_end=50, dissolve_speed_step=10,
         )
-        assert list(generate_jobs_limited(s)) == []
+        jobs = list(generate_jobs_limited(s))
+        assert len(jobs) == 1
+        assert jobs[0]["use_dissolve"] is False
 
     def test_dissolve_swept_when_enabled(self):
         s = _make_settings(
@@ -196,12 +220,16 @@ class TestGenerateJobsLimited:
         assert len(list(generate_jobs_limited(s))) == 3
 
     def test_noise_ignored_when_disabled(self):
+        # use_noise=False means the range is ignored; with no other sweeps
+        # the fallback emits one baseline job with noise disabled.
         s = _make_settings(
             use_noise=False,
             noise_strength_use_range=True,
             noise_strength_begin=0.5, noise_strength_end=1.5, noise_strength_step=0.5,
         )
-        assert list(generate_jobs_limited(s)) == []
+        jobs = list(generate_jobs_limited(s))
+        assert len(jobs) == 1
+        assert jobs[0]["use_noise"] is False
 
     def test_noise_swept_when_enabled(self):
         s = _make_settings(
