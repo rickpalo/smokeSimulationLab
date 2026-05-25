@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.2.18"
+WORKER_VERSION = "0.2.23"
 
 import bpy
 import sys
@@ -307,6 +307,26 @@ _dlog(f"domain: {domain_name}  res={obj.modifiers[0].domain_settings.resolution_
 
 d = mod.domain_settings
 
+# Fix-2 diagnostic: log d.cache_directory as the .blend was saved, before any
+# worker assignment.  If across-batch reuse misses because Mantaflow nests
+# files under a hashed sub-path (cache_fluid_<hash>/data/), the saved path
+# will reveal that pattern.  Also log all top-level entries in the target
+# cache dir so we can see what Mantaflow actually left there last time.
+_log(f"[{name}] Domain cache_directory at startup (from .blend): {d.cache_directory!r}")
+try:
+    _existing = sorted(os.listdir(cache_dir)) if os.path.isdir(cache_dir) else []
+    _log(f"[{name}] Target cache_dir top-level entries before any change: {_existing}")
+    for _sub in _existing:
+        _full = os.path.join(cache_dir, _sub)
+        if os.path.isdir(_full):
+            try:
+                _kids = sorted(os.listdir(_full))[:6]
+                _log(f"[{name}]   {_sub}/ -> {len(_kids)} entries (first few): {_kids}")
+            except OSError:
+                pass
+except OSError as _e:
+    _log(f"[{name}] (could not list cache_dir: {_e})")
+
 # ---------------------------------------------------------------------------
 # Apply simulation parameters
 # ---------------------------------------------------------------------------
@@ -400,6 +420,22 @@ if use_existing_cache:
             for f in _fs if re.search(r'_\d+\.uni$', f)
         )
         _log(f"[{name}]   Cache dir empty  config_uni={n_cfg} — will bake from scratch")
+        # Fix-2 diagnostic: enumerate EVERY file under cache_dir, grouped by
+        # extension and parent.  If our regex r'_\d+\.(vdb|uni)$' misses real
+        # bake output (e.g. files Mantaflow named differently in a newer
+        # Blender), this listing will surface them.
+        _all = []
+        for _root, _dirs, _files in os.walk(cache_dir):
+            for _f in _files:
+                _all.append(os.path.relpath(os.path.join(_root, _f), cache_dir))
+        if _all:
+            _log(f"[{name}]   Diagnostic: {len(_all)} file(s) present at cache_dir but none match regex:")
+            for _p in _all[:20]:
+                _log(f"[{name}]     {_p}")
+            if len(_all) > 20:
+                _log(f"[{name}]     ... and {len(_all)-20} more")
+        else:
+            _log(f"[{name}]   Diagnostic: cache_dir contains zero files of any kind")
 
 _log(f"[{name}]   Effective cache dir  : {effective_cache_dir}")
 
@@ -472,7 +508,13 @@ _log(f"[{name}]   Found {len(baked_frames)} baked frame(s)")
 # assignment now initialises a fresh empty directory — nothing useful to wipe.
 if _paths_differ:
     d.cache_directory = effective_cache_dir
+    # Fix-2 diagnostic: read back d.cache_directory to confirm Mantaflow
+    # accepted the value verbatim (some Blender builds rewrite it to an
+    # absolute path with hash, breaking subsequent path-equality checks).
+    _readback = d.cache_directory
     _log(f"[{name}] Domain cache_directory assigned → {effective_cache_dir}")
+    if _readback != effective_cache_dir:
+        _log(f"[{name}]   WARNING: read-back differs from assignment: {_readback!r}")
     if _presave_active:
         _log(f"[{name}]   Presaved data was moved aside; Mantaflow initialised a fresh empty directory")
     else:
@@ -810,9 +852,16 @@ _perf = {
     "render_secs_per_frame":   round(render_seconds / frames_actually_rendered, 6) if frames_actually_rendered > 0 else None,
     "render_secs_per_pixel_frame": round(render_seconds / (_pixels * frames_actually_rendered), 12) if frames_actually_rendered > 0 and _pixels > 0 else None,
 }
-if collect_estimation_data:
+# Skip low-resolution data: per-job overhead dominates at res<=64, so the
+# implied rate is ~5x higher than at res=128 and contaminates the fitted
+# constants. Below this threshold the absolute time saved by a better
+# estimate is small anyway, so we just accept the placeholder error.
+_PERF_MIN_RESOLUTION = 64  # samples are kept when resolution > this
+if collect_estimation_data and _res > _PERF_MIN_RESOLUTION:
     _append_perf_record(output_path, _perf)
     _log(f"[{name}] Performance record written to perf_log.json")
+elif collect_estimation_data:
+    _log(f"[{name}] perf_log.json: skipped (res={_res} <= {_PERF_MIN_RESOLUTION})")
 
 # ---------------------------------------------------------------------------
 # Exit
