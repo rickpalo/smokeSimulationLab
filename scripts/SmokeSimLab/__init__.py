@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 2, 21),
+    "version":     (0, 2, 22),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -127,15 +127,18 @@ _SETUP_SECS_DEFAULT  =  10.0   # seconds for setup / cache phase
 _STILL_SECS_DEFAULT  =  30.0   # seconds for final still frame
 
 # Bake estimate: bake_secs ≈ _BAKE_RATE_PER_RES3_FRAME × resolution³ × frames
-# Derived from: 0.25 s/frame baseline at resolution=64 → 0.25/(64³) ≈ 9.54e-7
-# Update _BAKE_RATE_PER_RES3_FRAME from perf_log.json once real data is available.
-_BAKE_RATE_PER_RES3_FRAME = 6.6247e-07  # s / (res^3 * frame)  — placeholder
+# Calibrated from perf_log.json (May-2026, 164 samples, res 32–512).  The
+# implied rate is not constant across resolutions (cv=75%, see analyze_estim):
+# res=128 baseline media is the dominant workload, so we use its median.  At
+# very low resolutions (32) the per-cell rate is ~5× higher because per-job
+# overhead dominates — known model limitation.
+_BAKE_RATE_PER_RES3_FRAME = 1.8261e-07  # s / (res^3 * frame); median of 119 res=128 samples
 
 # Render estimate: render_secs ≈ rate × width × height × frames
-# Derived from: 15 s/frame baseline at 1920×1080 → 15/2073600 ≈ 7.23e-9
-# Update these from perf_log.json once real data is available.
-_RENDER_RATE_CYCLES_PER_PIXEL_FRAME = 7.23e-9  # s / (pixel * frame) — placeholder
-_RENDER_RATE_EEVEE_PER_PIXEL_FRAME  = 1.0425e-6  # s / (pixel * frame) — placeholder (2× faster guess)
+# CYCLES: no real data yet — kept as placeholder derived from 15 s/frame at 1920×1080.
+# EEVEE:  calibrated from 167 samples (cv=27%, median 7.92e-07).
+_RENDER_RATE_CYCLES_PER_PIXEL_FRAME = 7.23e-9    # s / (pixel * frame) — placeholder
+_RENDER_RATE_EEVEE_PER_PIXEL_FRAME  = 7.9239e-07 # s / (pixel * frame); median of 167 EEVEE samples
 
 # Legacy flat rates kept as fallback when resolution/dimensions are unknown.
 _BAKE_RATE_DEFAULT   =   1.0  # s/frame at unspecified resolution
@@ -1387,19 +1390,19 @@ class SmokeSettings(bpy.types.PropertyGroup):
     batch_summary_line2:  bpy.props.StringProperty(default="")
     batch_summary_line3:  bpy.props.StringProperty(default="")
     batch_summary_line4:  bpy.props.StringProperty(default="")
-    batch_start_time:     bpy.props.FloatProperty(default=0.0)
+    # Per-stage absolute Unix timestamps live in _batch_times (module-level
+    # dict), not RNA — bpy.props.FloatProperty is single-precision and loses
+    # ~64 sec of precision on a 10-digit Unix epoch, producing negative deltas
+    # in estim_log.  See _bt / _bt_set helpers.
     batch_time_remaining: bpy.props.StringProperty(default="")
     batch_job_log_key:    bpy.props.StringProperty(default="")
-    batch_job_start_time: bpy.props.FloatProperty(default=0.0)
     batch_frame_end:      bpy.props.IntProperty(default=0)
     batch_jobs_elapsed:      bpy.props.FloatProperty(default=0.0)
     batch_resolution:        bpy.props.IntProperty(default=0)
     batch_render_width:      bpy.props.IntProperty(default=0)
     batch_render_height:     bpy.props.IntProperty(default=0)
     batch_render_mode:       bpy.props.StringProperty(default="CYCLES")
-    batch_bake_start_time:   bpy.props.FloatProperty(default=0.0)
-    batch_render_start_time: bpy.props.FloatProperty(default=0.0)
-    batch_still_start_time:  bpy.props.FloatProperty(default=0.0)
+    batch_bake_secs_actual:  bpy.props.FloatProperty(default=-1.0)
     batch_bake_secs_actual:  bpy.props.FloatProperty(default=-1.0)
     batch_render_secs_actual: bpy.props.FloatProperty(default=-1.0)
     batch_bake_frame_baseline:   bpy.props.IntProperty(default=-1)
@@ -1815,7 +1818,7 @@ def _count_png_frames(jobs_dir, log_stem, start_time=None):
     >= start_time - 10.0 are counted.  This correctly handles re-render runs
     where PNGs are overwritten rather than added — the total file count stays
     constant so the baseline approach shows "0 of N" forever.  Pass
-    start_time=s.batch_job_start_time for the per-poll progress call; omit it
+    start_time=_bt("job_start_time") for the per-poll progress call; omit it
     (or pass None) for the baseline-setting call at render-stage entry.
     """
     json_path = os.path.join(jobs_dir, log_stem + ".json")
@@ -1983,6 +1986,35 @@ def _compute_batch_summary(jobs_dir, elapsed_secs):
 
 
 # ---------------------------------------------------------------------------
+# Batch-stage Unix timestamps.  Module-level (Python float64) instead of
+# bpy.props.FloatProperty: Blender FloatProperty is single-precision and a
+# 10-digit Unix epoch rounds to the nearest ~128 sec grid point, so
+# (now - stored) yields up to ±64 sec of noise — sometimes negative.  These
+# values are transient (cleared by Run Batch and on file load) and never
+# need to persist, so they live here in module state.
+_batch_times: dict = {
+    "start_time":        0.0,
+    "job_start_time":    0.0,
+    "bake_start_time":   0.0,
+    "render_start_time": 0.0,
+    "still_start_time":  0.0,
+}
+
+def _bt(key):
+    """Read a batch timing value (full-precision Unix timestamp, 0.0 if unset)."""
+    return _batch_times.get(key, 0.0)
+
+def _bt_set(key, value):
+    """Write a batch timing value (use time.time() values directly)."""
+    _batch_times[key] = value
+
+def _bt_reset_all():
+    """Reset every batch timing value to 0.0 (called on file load / Run Batch)."""
+    for k in _batch_times:
+        _batch_times[k] = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Job log display data — populated at export, never touched by the timer.
 # draw_item reads from these dicts/lists instead of from CollectionProperty
 # item fields, so no RNA read of item data happens during a draw pass that
@@ -2147,7 +2179,7 @@ def _poll_batch_progress_impl():
                 "event":        "batch_complete",
                 "jobs":         total,
                 "errors":       errors,
-                "elapsed_secs": round(time.time() - s.batch_start_time, 1),
+                "elapsed_secs": round(time.time() - _bt("start_time"), 1),
             })
             _estim["batch_logged"] = False   # allow logging for any future run
 
@@ -2155,7 +2187,7 @@ def _poll_batch_progress_impl():
                 s.batch_summary_line1 = s.batch_summary_line2 = ""
                 s.batch_summary_line3 = s.batch_summary_line4 = ""
             else:
-                elapsed = time.time() - s.batch_start_time
+                elapsed = time.time() - _bt("start_time")
                 l1, l2, l3, l4 = _compute_batch_summary(jobs_dir, elapsed)
                 s.batch_summary_line1 = l1
                 s.batch_summary_line2 = l2
@@ -2170,16 +2202,16 @@ def _poll_batch_progress_impl():
             s.batch_jobs_dir       = ""
             s.batch_time_remaining = ""
             s.batch_job_log_key       = ""
-            s.batch_job_start_time    = 0.0
+            _bt_set("job_start_time", 0.0)
             s.batch_frame_end         = 0
             s.batch_jobs_elapsed      = 0.0
             s.batch_resolution        = 0
             s.batch_render_width      = 0
             s.batch_render_height     = 0
             s.batch_render_mode       = "CYCLES"
-            s.batch_bake_start_time   = 0.0
-            s.batch_render_start_time = 0.0
-            s.batch_still_start_time  = 0.0
+            _bt_set("bake_start_time", 0.0)
+            _bt_set("render_start_time", 0.0)
+            _bt_set("still_start_time", 0.0)
             s.batch_bake_secs_actual  = -1.0
             s.batch_render_secs_actual = -1.0
             s.batch_bake_frame_baseline   = -1
@@ -2226,8 +2258,8 @@ def _poll_batch_progress_impl():
             # then reset per-job timer and load frame count for the new job.
             if log_file != s.batch_job_log_key:
                 # Estimation log: previous job complete (if there was one).
-                if _estim["job_key"] and not _estim["job_done_logged"] and s.batch_job_start_time > 0:
-                    _prev_elapsed = round(now - s.batch_job_start_time, 1)
+                if _estim["job_key"] and not _estim["job_done_logged"] and _bt("job_start_time") > 0:
+                    _prev_elapsed = round(now - _bt("job_start_time"), 1)
                     _estim_log({
                         "event":        "job_complete",
                         "job":          _estim["job_name"],
@@ -2242,10 +2274,10 @@ def _poll_batch_progress_impl():
                     })
                 _estim_reset_job(log_file)
 
-                if s.batch_job_log_key and s.batch_job_start_time > 0:
-                    s.batch_jobs_elapsed += max(now - s.batch_job_start_time, 0.0)
+                if s.batch_job_log_key and _bt("job_start_time") > 0:
+                    s.batch_jobs_elapsed += max(now - _bt("job_start_time"), 0.0)
                 s.batch_job_log_key    = log_file
-                s.batch_job_start_time = now
+                _bt_set("job_start_time", now)
                 json_path = os.path.join(jobs_dir, log_stem + ".json")
                 try:
                     with open(json_path) as fh:
@@ -2262,9 +2294,9 @@ def _poll_batch_progress_impl():
                     s.batch_render_width  = 0
                     s.batch_render_height = 0
                     s.batch_render_mode   = "CYCLES"
-                s.batch_bake_start_time   = 0.0
-                s.batch_render_start_time = 0.0
-                s.batch_still_start_time  = 0.0
+                _bt_set("bake_start_time", 0.0)
+                _bt_set("render_start_time", 0.0)
+                _bt_set("still_start_time", 0.0)
                 s.batch_bake_secs_actual  = -1.0
                 s.batch_render_secs_actual = -1.0
                 s.batch_bake_frame_baseline   = -1
@@ -2275,7 +2307,7 @@ def _poll_batch_progress_impl():
                 s.batch_job_factor        = 0.0
 
             frame_end      = max(s.batch_frame_end, 1)
-            elapsed_in_job = max(now - s.batch_job_start_time, 0.0) if s.batch_job_start_time > 0 else 0.0
+            elapsed_in_job = max(now - _bt("job_start_time"), 0.0) if _bt("job_start_time") > 0 else 0.0
 
             # Determine current stage from log tail.
             # Use rightmost (most recently written) keyword match, not the
@@ -2293,14 +2325,14 @@ def _poll_batch_progress_impl():
                     stage_completed = completed
 
             # Stage start time tracking (set once per job)
-            if stage_label == "Baking simulation" and s.batch_bake_start_time == 0.0:
-                s.batch_bake_start_time = now
+            if stage_label == "Baking simulation" and _bt("bake_start_time") == 0.0:
+                _bt_set("bake_start_time", now)
                 if s.batch_bake_frame_baseline < 0:
                     _bi = _count_vdb_frames(jobs_dir, log_stem, tail)
                     s.batch_bake_frame_baseline = _bi[0] if _bi else 0
                 if not _estim["bake_start_logged"]:
                     _estim["bake_start_logged"] = True
-                    _setup_actual = round(now - s.batch_job_start_time, 1) if s.batch_job_start_time > 0 else None
+                    _setup_actual = round(now - _bt("job_start_time"), 1) if _bt("job_start_time") > 0 else None
                     _estim_log({
                         "event":            "bake_start",
                         "job":              _estim["job_name"],
@@ -2308,8 +2340,8 @@ def _poll_batch_progress_impl():
                         "setup_actual_secs": _setup_actual,
                         "setup_est_secs":   _SETUP_SECS_DEFAULT,
                     })
-            if stage_label == "Rendering animation" and s.batch_render_start_time == 0.0:
-                s.batch_render_start_time = now
+            if stage_label == "Rendering animation" and _bt("render_start_time") == 0.0:
+                _bt_set("render_start_time", now)
                 if s.batch_render_frame_baseline < 0:
                     _ri = _count_png_frames(jobs_dir, log_stem)
                     s.batch_render_frame_baseline = _ri[0] if _ri else 0
@@ -2327,8 +2359,8 @@ def _poll_batch_progress_impl():
                         "bake_actual_secs": round(s.batch_bake_secs_actual, 1)
                                            if s.batch_bake_secs_actual >= 0 else None,
                     })
-            if stage_label == "Rendering still" and s.batch_still_start_time == 0.0:
-                s.batch_still_start_time = now
+            if stage_label == "Rendering still" and _bt("still_start_time") == 0.0:
+                _bt_set("still_start_time", now)
                 if not _estim["still_start_logged"]:
                     _estim["still_start_logged"] = True
                     _estim_log({
@@ -2350,8 +2382,8 @@ def _poll_batch_progress_impl():
                             "source":      "cache_skip",
                             "default_est": _estim["est_bake_0"],
                         })
-                elif stage_completed >= 2 and s.batch_bake_start_time > 0:
-                    s.batch_bake_secs_actual = now - s.batch_bake_start_time
+                elif stage_completed >= 2 and _bt("bake_start_time") > 0:
+                    s.batch_bake_secs_actual = now - _bt("bake_start_time")
                     if not _estim["bake_done_logged"]:
                         _estim["bake_done_logged"] = True
                         _res3 = s.batch_resolution ** 3 if s.batch_resolution > 0 else 0
@@ -2371,8 +2403,8 @@ def _poll_batch_progress_impl():
                         })
             if (s.batch_render_secs_actual < 0
                     and stage_completed >= 3
-                    and s.batch_render_start_time > 0):
-                s.batch_render_secs_actual = now - s.batch_render_start_time
+                    and _bt("render_start_time") > 0):
+                s.batch_render_secs_actual = now - _bt("render_start_time")
                 if not _estim["render_done_logged"]:
                     _estim["render_done_logged"] = True
                     _render_px = s.batch_render_width * s.batch_render_height
@@ -2420,7 +2452,7 @@ def _poll_batch_progress_impl():
                         subtask_factor = baked_new / to_bake
 
             elif stage_label == "Rendering animation":
-                _start_t    = s.batch_job_start_time if s.batch_job_start_time > 0 else None
+                _start_t    = _bt("job_start_time") if _bt("job_start_time") > 0 else None
                 render_info = _count_png_frames(jobs_dir, log_stem, start_time=_start_t)
                 if render_info:
                     raw_rendered, _ = render_info
@@ -2481,8 +2513,8 @@ def _poll_batch_progress_impl():
                 })
 
             # Setup: done once any timed stage has started or bake was skipped
-            if (s.batch_bake_start_time > 0 or s.batch_bake_secs_actual >= 0
-                    or s.batch_render_start_time > 0 or s.batch_still_start_time > 0):
+            if (_bt("bake_start_time") > 0 or s.batch_bake_secs_actual >= 0
+                    or _bt("render_start_time") > 0 or _bt("still_start_time") > 0):
                 setup_remaining = 0.0
             else:
                 setup_remaining = max(_SETUP_SECS_DEFAULT - elapsed_in_job, 0.0)
@@ -2490,8 +2522,8 @@ def _poll_batch_progress_impl():
             # Bake: actual → real-time rate estimate → default
             if s.batch_bake_secs_actual >= 0:
                 bake_remaining = 0.0
-            elif s.batch_bake_start_time > 0 and frames_baked > 0:
-                elapsed_bake = max(now - s.batch_bake_start_time, 0.0)
+            elif _bt("bake_start_time") > 0 and frames_baked > 0:
+                elapsed_bake = max(now - _bt("bake_start_time"), 0.0)
                 if elapsed_bake > 0:
                     _bake_baseline = max(s.batch_bake_frame_baseline, 0)
                     _to_bake_total = max(frame_end - _bake_baseline, 1)
@@ -2522,8 +2554,8 @@ def _poll_batch_progress_impl():
             # time against the default estimate to avoid dropping to 0.
             if s.batch_render_secs_actual >= 0:
                 render_remaining = 0.0
-            elif s.batch_render_start_time > 0 and 0 < frames_rendered < render_target:
-                elapsed_render = max(now - s.batch_render_start_time, 0.0)
+            elif _bt("render_start_time") > 0 and 0 < frames_rendered < render_target:
+                elapsed_render = max(now - _bt("render_start_time"), 0.0)
                 if elapsed_render > 0:
                     rate             = elapsed_render / frames_rendered
                     render_remaining = rate * max(render_target - frames_rendered, 0)
@@ -2542,20 +2574,20 @@ def _poll_batch_progress_impl():
                         })
                 else:
                     render_remaining = max(default_render_secs - (
-                        now - s.batch_render_start_time
-                        if s.batch_render_start_time > 0 else 0.0), 0.0)
+                        now - _bt("render_start_time")
+                        if _bt("render_start_time") > 0 else 0.0), 0.0)
             else:
                 render_remaining = max(default_render_secs - (
-                    now - s.batch_render_start_time
-                    if s.batch_render_start_time > 0 else 0.0), 0.0)
+                    now - _bt("render_start_time")
+                    if _bt("render_start_time") > 0 else 0.0), 0.0)
 
             # Still: done once stage_completed >= 4; countdown if started; else default
             if stage_completed >= 4:
                 still_remaining = 0.0
                 # Estimation log: still and job complete (once each).
-                if not _estim["still_done_logged"] and s.batch_still_start_time > 0:
+                if not _estim["still_done_logged"] and _bt("still_start_time") > 0:
                     _estim["still_done_logged"] = True
-                    _still_actual = round(now - s.batch_still_start_time, 1)
+                    _still_actual = round(now - _bt("still_start_time"), 1)
                     _estim_log({
                         "event":       "still_actual",
                         "job":         _estim["job_name"],
@@ -2565,7 +2597,7 @@ def _poll_batch_progress_impl():
                     })
                 if not _estim["job_done_logged"]:
                     _estim["job_done_logged"] = True
-                    _job_elapsed = round(now - s.batch_job_start_time, 1) if s.batch_job_start_time > 0 else 0.0
+                    _job_elapsed = round(now - _bt("job_start_time"), 1) if _bt("job_start_time") > 0 else 0.0
                     _estim_log({
                         "event":         "job_complete",
                         "job":           _estim["job_name"],
@@ -2578,9 +2610,9 @@ def _poll_batch_progress_impl():
                         "render_actual": round(s.batch_render_secs_actual, 1)
                                          if s.batch_render_secs_actual >= 0 else None,
                     })
-            elif s.batch_still_start_time > 0:
+            elif _bt("still_start_time") > 0:
                 still_remaining = max(
-                    _STILL_SECS_DEFAULT - (now - s.batch_still_start_time), 0.0)
+                    _STILL_SECS_DEFAULT - (now - _bt("still_start_time")), 0.0)
             else:
                 still_remaining = _STILL_SECS_DEFAULT
 
@@ -2591,7 +2623,7 @@ def _poll_batch_progress_impl():
                     f"[SmokeSimLab] WARNING: negative job_remaining={job_remaining:.1f}  "
                     f"setup={setup_remaining:.1f}  bake={bake_remaining:.1f}  "
                     f"render={render_remaining:.1f}  still={still_remaining:.1f}  "
-                    f"bake_start={s.batch_bake_start_time:.0f}  frames_baked={frames_baked}  "
+                    f"bake_start={_bt("bake_start_time"):.0f}  frames_baked={frames_baked}  "
                     f"frame_end={frame_end}  resolution={s.batch_resolution}",
                     file=sys.stderr,
                 )
@@ -2736,19 +2768,19 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         s.batch_subtask_factor = 0.0
         s.batch_job_text       = ""
         s.batch_job_factor     = 0.0
-        s.batch_start_time     = time.time()
+        _bt_set("start_time", time.time())
         s.batch_time_remaining = "Estimating..."
         s.batch_job_log_key       = ""
-        s.batch_job_start_time    = 0.0
+        _bt_set("job_start_time", 0.0)
         s.batch_frame_end         = 0
         s.batch_jobs_elapsed      = 0.0
         s.batch_resolution        = 0
         s.batch_render_width      = 0
         s.batch_render_height     = 0
         s.batch_render_mode       = "CYCLES"
-        s.batch_bake_start_time   = 0.0
-        s.batch_render_start_time = 0.0
-        s.batch_still_start_time  = 0.0
+        _bt_set("bake_start_time", 0.0)
+        _bt_set("render_start_time", 0.0)
+        _bt_set("still_start_time", 0.0)
         s.batch_bake_secs_actual  = -1.0
         s.batch_render_secs_actual = -1.0
         s.batch_bake_frame_baseline   = -1
@@ -2924,19 +2956,19 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
         s.batch_subtask_factor = 0.0
         s.batch_job_text       = ""
         s.batch_job_factor     = 0.0
-        s.batch_start_time     = time.time()
+        _bt_set("start_time", time.time())
         s.batch_time_remaining = "Estimating..."
         s.batch_job_log_key       = ""
-        s.batch_job_start_time    = 0.0
+        _bt_set("job_start_time", 0.0)
         s.batch_frame_end         = 0
         s.batch_jobs_elapsed      = 0.0
         s.batch_resolution        = 0
         s.batch_render_width      = 0
         s.batch_render_height     = 0
         s.batch_render_mode       = "CYCLES"
-        s.batch_bake_start_time   = 0.0
-        s.batch_render_start_time = 0.0
-        s.batch_still_start_time  = 0.0
+        _bt_set("bake_start_time", 0.0)
+        _bt_set("render_start_time", 0.0)
+        _bt_set("still_start_time", 0.0)
         s.batch_bake_secs_actual  = -1.0
         s.batch_render_secs_actual = -1.0
         s.batch_bake_frame_baseline   = -1
@@ -3173,19 +3205,19 @@ class SMOKE_OT_remove_all_jobs(bpy.types.Operator):
         s.batch_subtask_factor   = 0.0
         s.batch_job_text         = ""
         s.batch_job_factor       = 0.0
-        s.batch_start_time       = 0.0
+        _bt_set("start_time", 0.0)
         s.batch_time_remaining   = ""
         s.batch_job_log_key      = ""
-        s.batch_job_start_time   = 0.0
+        _bt_set("job_start_time", 0.0)
         s.batch_frame_end        = 0
         s.batch_jobs_elapsed     = 0.0
         s.batch_resolution       = 0
         s.batch_render_width     = 0
         s.batch_render_height    = 0
         s.batch_render_mode      = "CYCLES"
-        s.batch_bake_start_time   = 0.0
-        s.batch_render_start_time = 0.0
-        s.batch_still_start_time  = 0.0
+        _bt_set("bake_start_time", 0.0)
+        _bt_set("render_start_time", 0.0)
+        _bt_set("still_start_time", 0.0)
         s.batch_bake_secs_actual  = -1.0
         s.batch_render_secs_actual = -1.0
         s.batch_bake_frame_baseline   = -1
@@ -3731,19 +3763,19 @@ def _reset_on_load(dummy=None):
         s.batch_subtask_factor = 0.0
         s.batch_job_text       = ""
         s.batch_job_factor     = 0.0
-        s.batch_start_time     = 0.0
+        _bt_set("start_time", 0.0)
         s.batch_time_remaining = ""
         s.batch_job_log_key       = ""
-        s.batch_job_start_time    = 0.0
+        _bt_set("job_start_time", 0.0)
         s.batch_frame_end         = 0
         s.batch_jobs_elapsed      = 0.0
         s.batch_resolution        = 0
         s.batch_render_width      = 0
         s.batch_render_height     = 0
         s.batch_render_mode       = "CYCLES"
-        s.batch_bake_start_time   = 0.0
-        s.batch_render_start_time = 0.0
-        s.batch_still_start_time  = 0.0
+        _bt_set("bake_start_time", 0.0)
+        _bt_set("render_start_time", 0.0)
+        _bt_set("still_start_time", 0.0)
         s.batch_bake_secs_actual  = -1.0
         s.batch_render_secs_actual = -1.0
         s.batch_bake_frame_baseline   = -1
