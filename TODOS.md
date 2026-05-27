@@ -4,6 +4,34 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
+## TODO-25: Run Batch button should be disabled until there are jobs to run
+
+**Observed:** The "Run Batch" button is always enabled, even when no jobs have
+been exported yet.  Clicking it in that state launches `run_smoke_batch.bat`
+which doesn't exist (or runs an empty batch), producing a confusing error.
+
+**Desired behaviour:** Disable the Run Batch button when there are no jobs to
+run.  Enable it in either of these cases:
+1. The user clicks Export Batch (jobs are written to `<output_path>/jobs/`).
+2. The panel is first drawn and the output directory already contains exported
+   jobs from a previous session (`<output_path>/jobs/*.json` exists and
+   `run_smoke_batch.bat` is present).
+
+**Implementation hints:**
+- Add a `batch_ready` BoolProperty on `SmokeSettings` (or compute it on the fly
+  in `draw()` from `os.path.isfile(...)`).
+- In `SMOKE_OT_export_batch.execute`, set `batch_ready = True` after the batch
+  is written successfully.
+- In `_reset_on_load` (and after Remove All Jobs), set `batch_ready = False`.
+- In `SMOKE_PT_panel.draw`, gate the Run Batch button with `row.enabled = batch_ready`.
+- Consider also disabling the Monitor Existing Jobs button when no jobs folder
+  exists (separate but related condition).
+
+**Files:** `__init__.py` — `SmokeSettings`, `SMOKE_OT_export_batch`,
+`SMOKE_OT_remove_all_jobs`, `_reset_on_load`, `SMOKE_PT_panel.draw`.
+
+---
+
 ## TODO-22: Crash timing inconsistency — one crash stalled ~5 min, another moved immediately
 
 **Observed (v0.2.26 batch):** Two crashes in the same batch behaved differently.
