@@ -4,6 +4,52 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
+## TODO-27: Restore crash dumps (relax Job Object kill window)
+
+**Observed:** From 2026-05-15 onward, all crashes in `crash_log.txt` show
+`[no blender.crash.txt found in %TEMP%]` — only the dated header and the
+"no dump" line.  Crashes from 2026-05-07 through 2026-05-11 had full Blender
+crash dumps with Exception Records and stack traces.
+
+**Root cause (analyzed 2026-05-27):** Our launcher's Windows Job Object
+`JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` (added v0.2.6 for WerFault
+dialog suppression) terminates Blender before its SEH crash handler can
+write `blender.crash.txt` to `%TEMP%`.  We traded crash dialogs for crash
+diagnostics — a poor trade now that the dialog blocking problem has other
+mitigations and crash dumps are valuable for diagnosis.
+
+Until 2026-05-11, Blender's crash handler was still managing to write the
+dump in the brief window before Job Object kill.  Something changed
+mid-May (possibly a Blender update changing crash handler latency) that
+now reliably loses dumps.
+
+**Proposed fix:** Give Blender's crash handler a grace window after the
+unhandled exception before the Job Object kills the process.
+
+Approaches to consider:
+1. **Replace `DIE_ON_UNHANDLED_EXCEPTION` with a SetUnhandledExceptionFilter
+   approach** that writes a minidump first, then terminates.
+2. **Use `WerFault` registration cleanup** (Windows API
+   `WerReportSubmit` with no-UI flag) so dumps are written via WER but no
+   dialog appears.
+3. **Post-exit `%TEMP%\\blender.crash.txt` polling** with a longer window
+   (currently checked once; poll for ~30 s after Blender exit).
+4. **Capture stderr/stdout to a `.crash_stderr` file** so even without the
+   structured dump we have the last 100 lines of Python output.
+
+Option 3 is the least invasive and probably catches most dumps without
+re-introducing dialog blocking.
+
+**Files:** `scripts/SmokeSimLab/smoke_launcher.py` —
+`_create_crash_suppression_job`, `_save_crash_log`,
+post-exit polling section.
+
+**Related:** See project memory `project_crash_root_cause.md` — the actual
+crashes are in Blender 5.1.1's glTF/numpy import, not in our code; better
+dumps will confirm whether new crash signatures match the same root cause.
+
+---
+
 ## TODO-26: "Render Simulation Result" checkbox to skip rendering entirely
 
 **Goal:** Allow users to run a bake-only batch (no MP4 / PNG render) for cases
