@@ -4,7 +4,69 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
-## TODO-27: Restore crash dumps (relax Job Object kill window)
+## TODO-28: Append mode overwrites run_smoke_batch.bat instead of extending it
+
+**Observed (2026-05-27 ClaudeTest run):** User exported job_0000 (250 frames),
+clicked Run Batch, then while it was running appended job_0001 (500 frames)
+and job_0002 (200 frames).  Only job_0000 actually ran (the .bat that was
+loaded by cmd.exe when Run Batch was clicked contained only job_0000).
+Job_0001 and job_0002 were created in jobs/ but their entries were never
+in any .bat file that was executed.
+
+**Root cause:** `export_batch()` in `__init__.py` (around line 914):
+```python
+bat_path = os.path.join(output_path, "run_smoke_batch.bat")
+with open(bat_path, "w") as fh:    # "w" = truncate
+    fh.write("\n".join(bat_lines))
+```
+On Append, `bat_lines` is built from only the NEW jobs (the loop at line 830
+iterates `jobs`, which is the new batch only).  The .bat is then OVERWRITTEN,
+dropping all previously-exported jobs.
+
+**Two related symptoms:**
+1. Each Append produces a .bat that contains only the most-recently-appended
+   jobs.  Running it skips all jobs from earlier Exports/Appends.
+2. The addon's job log (UI list) DOES contain all jobs because the seed loop
+   at line 821 only clears `job_log_items` in REPLACE mode.  So the UI shows
+   N jobs but only the last batch's worth ever run, leaving the rest as
+   `NOT_STARTED` (open circle) forever — and the auto-retry mechanism may
+   then misinterpret these never-started jobs as crashes and try to retry
+   them oddly (see ClaudeTest where job_0002 got auto-retried but job_0000
+   /0001 did not match expectations).
+
+**Proposed fix:**
+- In Append mode, before the new-jobs loop, iterate existing
+  `job_NNNN.json` files (indices `0..job_start_index-1`) and emit their
+  .bat entries first.  Read the `name` and `render_mode` from each JSON to
+  produce the correct launcher command.
+- Result: the new .bat runs all existing jobs (which will SKIP BAKE / SKIP
+  RENDER if their caches+renders are already complete) followed by the new
+  ones.
+
+**Additional safeguard (separate fix):** Disable Export Batch (both modes)
+and Append while a batch is running.  This prevents the racier scenario the
+user hit where Append happened after Run Batch was already executing — the
+running cmd.exe has already parsed the .bat into memory and won't see the
+update regardless of how it's written.
+
+**Files:** `scripts/SmokeSimLab/__init__.py` — `export_batch()` lines
+820–915; also UI guards in `SMOKE_PT_panel.draw`.
+
+---
+
+## TODO-27: Restore crash dumps (relax Job Object kill window) — **PARTIAL** (v0.2.33)
+
+**v0.2.33 fix:** Added `_CRASH_DUMP_GRACE_SECS = 15` to the launcher.
+`_save_crash_log` now waits up to 15 s for `blender.crash.txt` to appear
+in `%TEMP%` with `mtime >= launch_time` before deciding the dump is
+missing.  Stale dumps from previous crashes are filtered out by mtime.
+This gives Blender's SEH handler some grace to flush the dump even when
+the Job Object's `DIE_ON_UNHANDLED_EXCEPTION` fires.
+
+**Remaining work:** If 15 s isn't enough — i.e., the Job Object truly
+terminates Blender before the SEH handler runs at all — we'd need the
+deeper changes below (options 1/2 from the original proposal).  Re-evaluate
+after the next production batch shows whether dumps start landing again.
 
 **Observed:** From 2026-05-15 onward, all crashes in `crash_log.txt` show
 `[no blender.crash.txt found in %TEMP%]` — only the dated header and the

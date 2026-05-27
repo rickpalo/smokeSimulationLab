@@ -30,7 +30,7 @@ Behaviour
 No third-party dependencies — stdlib + tasklist.exe (built into Windows).
 """
 
-LAUNCHER_VERSION = "0.2.13"
+LAUNCHER_VERSION = "0.2.33"
 
 import atexit
 import ctypes
@@ -46,6 +46,7 @@ _STARTUP_TIMEOUT         = 120   # seconds to wait for the first log write befor
 _STALE_LOG_TIMEOUT       = 1800  # seconds of log inactivity (after first write) before killing
 _WALL_CLOCK_TIMEOUT      = 14400 # 4-hour absolute per-job ceiling regardless of log activity
 _POST_EXIT_WERFAULT_SECS = 30    # seconds to keep checking for WerFault after exit
+_CRASH_DUMP_GRACE_SECS   = 15    # seconds to wait for blender.crash.txt to appear after a crash
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +192,17 @@ def _write_crashed_marker(jobs_dir, job_stem):
         pass
 
 
-def _save_crash_log(jobs_dir, job_stem):
-    """Append blender.crash.txt to <output_path>/crash_log.txt with a dated header."""
+def _save_crash_log(jobs_dir, job_stem, launch_time=None):
+    """Append blender.crash.txt to <output_path>/crash_log.txt with a dated header.
+
+    Waits up to _CRASH_DUMP_GRACE_SECS for blender.crash.txt to either
+    (a) appear, or (b) be updated to mtime >= launch_time.  Blender's
+    SEH crash handler runs in parallel to our launcher and the file is
+    sometimes not yet flushed by the time we get here — especially when
+    the Job Object's DIE_ON_UNHANDLED_EXCEPTION fires.  An older
+    blender.crash.txt left over from a previous crash is treated as
+    "not present" so we don't accidentally save stale crash data.
+    """
     crash_src   = os.path.join(
         os.environ.get("TEMP", r"C:\Windows\Temp"), "blender.crash.txt"
     )
@@ -200,17 +210,46 @@ def _save_crash_log(jobs_dir, job_stem):
     dest        = os.path.join(output_path, "crash_log.txt")
     ts          = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    def _is_fresh_dump():
+        """Return True if blender.crash.txt exists and was written this run."""
+        if not os.path.exists(crash_src):
+            return False
+        if launch_time is None:
+            return True   # no comparison available — accept whatever is there
+        try:
+            return os.path.getmtime(crash_src) >= launch_time
+        except OSError:
+            return False
+
+    # Poll for the dump to appear / become fresh, up to the grace window.
+    if not _is_fresh_dump():
+        _deadline = time.time() + _CRASH_DUMP_GRACE_SECS
+        while time.time() < _deadline:
+            if _is_fresh_dump():
+                # One more short pause so any final write to the file flushes.
+                time.sleep(0.5)
+                break
+            time.sleep(0.5)
+
+    _waited = (time.time() - (launch_time or time.time()))
+    _dump_present = _is_fresh_dump()
+    if _dump_present:
+        print(f"[smoke_launcher] blender.crash.txt found in %TEMP% — capturing dump")
+    else:
+        print(f"[smoke_launcher] No blender.crash.txt after {_CRASH_DUMP_GRACE_SECS}s wait "
+              f"(SEH handler may have been pre-empted by Job Object termination)")
+
     try:
         with open(dest, "a", encoding="utf-8") as fh:
             fh.write(f"\n=== {ts}  {job_stem} ===\n")
-            if os.path.exists(crash_src):
+            if _dump_present:
                 try:
                     with open(crash_src, "r", encoding="utf-8", errors="replace") as cf:
                         fh.write(cf.read())
                 except OSError:
                     fh.write("[could not read blender.crash.txt]\n")
             else:
-                fh.write("[no blender.crash.txt found in %TEMP%]\n")
+                fh.write(f"[no blender.crash.txt found in %TEMP% after {_CRASH_DUMP_GRACE_SECS}s grace]\n")
         print(f"[smoke_launcher] Crash log appended → {dest}")
     except OSError as exc:
         print(f"[smoke_launcher] Warning: could not write crash log: {exc}")
@@ -342,7 +381,7 @@ def main():
                   f"threshold={_WALL_CLOCK_TIMEOUT}s")
             print(f"[smoke_launcher] Job {job_stem} exceeded "
                   f"{_WALL_CLOCK_TIMEOUT // 3600}h wall-clock limit — killing")
-            _save_crash_log(jobs_dir, job_stem)
+            _save_crash_log(jobs_dir, job_stem, _launch_time)
             _kill_pid(blender_pid, "Blender (wall-clock)")
             proc.wait()
             _write_crashed_marker(jobs_dir, job_stem)
@@ -362,7 +401,7 @@ def main():
                           f"threshold={_STARTUP_TIMEOUT}s")
                     print(f"[smoke_launcher] No log created in {int(_elapsed)}s "
                           f"— killing stuck job {job_stem}")
-                    _save_crash_log(jobs_dir, job_stem)
+                    _save_crash_log(jobs_dir, job_stem, _launch_time)
                     _kill_pid(blender_pid, "Blender (startup timeout)")
                     proc.wait()
                     _write_crashed_marker(jobs_dir, job_stem)
@@ -379,7 +418,7 @@ def main():
                               f"threshold={_STALE_LOG_TIMEOUT}s")
                         print(f"[smoke_launcher] No log activity for "
                               f"{int(idle_secs)}s — killing stuck job {job_stem}")
-                        _save_crash_log(jobs_dir, job_stem)
+                        _save_crash_log(jobs_dir, job_stem, _launch_time)
                         _kill_pid(blender_pid, "Blender (stale)")
                         proc.wait()
                         _write_crashed_marker(jobs_dir, job_stem)
@@ -389,7 +428,7 @@ def main():
         wer_pid = _find_werfault_for_pid(blender_pid)
         if wer_pid is not None:
             print(f"[smoke_launcher] WerFault PID {wer_pid} detected — killing")
-            _save_crash_log(jobs_dir, job_stem)
+            _save_crash_log(jobs_dir, job_stem, _launch_time)
             _kill_pid(wer_pid, "WerFault")
             _kill_pid(blender_pid, "Blender")
             proc.wait()
@@ -419,7 +458,7 @@ def main():
                 _kill_pid(wer_pid, "WerFault")
                 break
             time.sleep(1.0)
-        _save_crash_log(jobs_dir, job_stem)
+        _save_crash_log(jobs_dir, job_stem, _launch_time)
         _write_crashed_marker(jobs_dir, job_stem)
         _dlog(f"exit: CRASHED  exit_code={exit_code}")
         print(f"[smoke_launcher] Job {job_stem} CRASHED (exit {exit_code})")
@@ -443,7 +482,7 @@ def main():
                     _dlog(f"blender_stderr contains Python traceback for this job")
             except OSError:
                 pass
-        _save_crash_log(jobs_dir, job_stem)
+        _save_crash_log(jobs_dir, job_stem, _launch_time)
         _write_crashed_marker(jobs_dir, job_stem)
         _dlog(f"exit: CRASHED (exit_code=0)  reason={_crash_reason}")
         print(f"[smoke_launcher] Job {job_stem} CRASHED (exit 0 — {_crash_reason})")
