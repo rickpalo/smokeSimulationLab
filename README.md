@@ -27,6 +27,8 @@ SmokeSimLab automates the tedious process of testing many different smoke simula
 - **Use Existing Cache** — resume or skip bakes when a matching cache already exists
 - **Use Placeholders** — render with existing cache and insert placeholder images for uncached frames
 - **Auto Retry Failed** — automatically re-runs failed jobs once before marking them as failed
+- **Monitor Existing Jobs** — reconnect to an already-running batch after Blender is closed and reopened; rebuilds the job log and resumes progress monitoring without restarting the batch
+- **Console auto-close** — the batch console window closes automatically on completion; leave **Collect Debug Logs** checked to keep it open for inspection
 - **Reset To Defaults** — restore all settings and clear the job log with one click
 
 ---
@@ -84,8 +86,8 @@ Each job opens a fresh Blender instance, bakes the simulation, renders, and exit
         results.csv             ← all job parameters + bake times
     Cache/
         R64_V0.0_A1.0_.../      ← per-job simulation cache
-            Data/
-            Noise/              ← (if noise enabled)
+            data/
+            noise/              ← (if noise enabled)
 ```
 
 ---
@@ -194,7 +196,7 @@ The Cycles sample count defaults to 16. For faster playblasts at the cost of qua
 The domain is pointing at a job cache directory. Click **Free All** in Physics Properties → Fluid, then point the cache directory back to your working folder.
 
 **Job Log rows appear blank**
-This was a known issue (BUG-001) in Blender 5.x caused by unavailable `SEQUENCE_COLOR_XX` icons. Fixed in v0.2.19 with stable icon replacements and Unicode status prefixes. Re-install the addon if you are seeing blank rows.
+This was a known issue (BUG-001) in Blender 5.x. Addressed in v0.2.16 (uses Blender's `index` parameter instead of RNA reads) and v0.2.19 (replaced unavailable `SEQUENCE_COLOR_XX` icons with stable alternatives; added Unicode status prefixes). Re-install the addon if you are still seeing blank rows.
 
 ---
 

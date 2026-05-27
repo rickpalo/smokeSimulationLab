@@ -490,5 +490,101 @@ None — requires Blender runtime to test.
 
 ---
 
+## BUG-007: Identical Jobs Produced Duplicate Results (Overlapping Sweep Baselines)
+
+**Status:** `CONFIRMED FIXED` (v0.2.21)  
+**Files:** `__init__.py` — `export_batch`, job deduplication logic
+
+### Symptoms
+Sweep batches with overlapping parameter ranges produced duplicate job entries
+in results.csv — two rows with identical parameters where only one was expected.
+
+### Fix (v0.2.21)
+Deduplication pass in `export_batch` filters jobs whose parameter dict is a
+duplicate of an already-queued entry.  Confirmed fixed; no regression tests
+added (pure Python dict comparison, no Blender runtime needed).
+
+---
+
+## BUG-008: Negative Bake / Setup Times in Time Estimate
+
+**Status:** `CONFIRMED FIXED` (v0.2.22)  
+**Files:** `__init__.py` — time-estimate code in `_poll_batch_progress_impl`
+
+### Symptoms
+Time estimate showed negative values (e.g. "−2 min remaining") for bake or
+setup phases, particularly at the start of a job before enough elapsed time
+had accumulated.
+
+### Fix (v0.2.22)
+All elapsed-time and remaining-time values clamped to `max(..., 0)`.  Rate
+constants also recalibrated against production batch data to reduce early
+overestimates.
+
+---
+
+## BUG-009: Retry Progress Bar Showed Wrong Job's Frame Count
+
+**Status:** `CONFIRMED FIXED` (v0.2.26)  
+**Files:** `__init__.py` — `_find_running_log`
+
+### Symptoms
+During retry, progress bar read "Baking 0 of 331" — the frame count from a
+*previously crashed* job, not the retry job.  Bar never advanced from 0.
+
+### Investigation
+`_find_running_log` used a single alphabetical sort across all log files.
+`"job_0003_retry.log"` sorts before `"job_0010.log"` alphabetically, so
+the sequential-done check (`any(s > log_stem for s in done_stems)`) saw
+`job_0010.done` and skipped `job_0003_retry.log`, returning `job_0010.log`
+(the wrong crashed job) as the "running" log.
+
+### Fix (v0.2.26)
+Two-pass search: retry logs (ending `_retry.log`) are checked first against
+only retry done-stems (`_retry.done`); first-run logs are checked second and
+skip any with a matching `.crashed` file.  Retry logs always take priority
+over earlier completed/crashed first-run jobs.
+
+---
+
+## BUG-010: RESUME Bake Always Starts from Frame 1
+
+**Status:** `DEPLOYED / UNVERIFIED` (v0.2.30)  
+**Files:** `smoke_worker.py` — RESUME bake decision branch
+
+### Symptoms
+When retrying a job that crashed mid-bake (e.g. 395 of 500 frames done), the
+worker correctly identified the 395 existing frames and chose RESUME, but
+Mantaflow started baking from `fluid_data_0001.vdb` anyway — ignoring the
+395 existing files and re-baking all 500 frames from scratch.  The mtime-
+filtered progress bar (v0.2.29) then counted all frames as new, showing
+"Baking (500 of 500)" instead of "Baking (105 of 105)".
+
+### Investigation
+`d.cache_resumable = True` IS set correctly (no "property not found" warning
+in the logs).  The actual issue is that assigning `d.cache_directory =
+effective_cache_dir` resets Mantaflow's internal "last baked frame" counter
+(`cache_frame_pause_data`) to 0.  The presave merge restores VDB files to
+disk but Mantaflow's internal counter remains 0, so `bake_all()` starts from
+`scene.frame_start` (frame 1) even though 395 files are present.
+
+### Fix (v0.2.30)
+After the presave merge and before `bake_all()`, explicitly set:
+```python
+d.cache_frame_pause_data = max(baked_frames)   # e.g. 395
+d.cache_frame_pause_noise = max(baked_frames)  # silently ignored if no noise
+```
+This tells Mantaflow "frame 395 is the last completed frame" so it starts
+from frame 396.  A `view_layer.update()` + 2 s sleep after the assignment
+gives Mantaflow time to process the new counter before the bake begins.
+Worker log will show: `RESUME: cache_frame_pause_data → 395 (bake will start at frame 396)`.
+
+### Tests Added
+None — requires Blender runtime.  Manual verification: run a batch where a
+job crashes mid-bake, then retry, and confirm new VDB files start above the
+already-baked frame number.
+
+---
+
 *Document created 2026-05-11.  Append new attempts to existing issues rather than
 creating duplicate entries.*

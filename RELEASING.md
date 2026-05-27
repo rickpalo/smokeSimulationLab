@@ -113,3 +113,13 @@ git push origin :refs/tags/v0.2.21   # delete remote tag
 | 0.2.18  | BUG-004 presave/rename approach replacing path-equality check |
 | 0.2.19  | Stable icons (Blender 5.1.1); Unicode status prefix; stale-log detection; mtime-based render progress; Reset To Defaults operator |
 | 0.2.20  | Fix iterate_both AttributeError; extract _has_error; remove redundant imports; bl_options on value list operators; make_name + iterate_both regression tests |
+| 0.2.21  | BUG-007: dedupe identical jobs in overlapping sweep baselines |
+| 0.2.22  | BUG-008: fix negative bake/setup times; calibrate rate constants |
+| 0.2.23  | Filter low-res perf samples; Fix-2 cache-reuse diagnostics |
+| 0.2.24  | Fix Reset All crash; baseline-fallback improvement; UX polish |
+| 0.2.25  | Bake-time sidecar file so SKIP BAKE reports real bake time |
+| 0.2.26  | BUG-009: retry progress bar showed wrong job's frame count; Monitor Existing Jobs button; crash-timing TODO in launcher |
+| 0.2.27  | Auto-close batch console on completion; Collect Debug Logs checkbox now toggles pause |
+| 0.2.28  | Fix Monitor Existing Jobs time estimate; Utilities button reorder |
+| 0.2.29  | Mtime-filtered VDB counting so progress bar advances during full re-bake |
+| 0.2.30  | Fix RESUME re-baking from frame 1 by setting cache_frame_pause_data after presave merge |

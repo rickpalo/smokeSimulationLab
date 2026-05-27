@@ -4,6 +4,59 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
+## TODO-22: Crash timing inconsistency — one crash stalled ~5 min, another moved immediately
+
+**Observed (v0.2.26 batch):** Two crashes in the same batch behaved differently.
+The first crash stalled for roughly 5 minutes before the launcher moved on; the
+second crash was detected almost immediately.
+
+**Possible causes:**
+1. WerFault appeared for the first crash but `_find_werfault_for_pid` missed it
+   (process-tree mismatch or timing gap between exit and WerFault spawn), leaving
+   Blender's process lingering for several minutes before the stale-log watchdog
+   fired.
+2. Blender hung for several minutes before actually exiting with a non-zero code.
+
+**Proposed investigation:**
+- Log `proc.pid`, `exit_code`, and time-from-launch-to-exit for each job.
+- Check whether `_POST_EXIT_WERFAULT_SECS` (currently 30 s) should be extended,
+  or whether a shorter `_STALE_LOG_TIMEOUT` is needed for the hung-process case.
+
+**Files:** `smoke_launcher.py` — near WerFault post-exit poll.  TODO comment added in v0.2.26.
+
+---
+
+## TODO-23: Retry overall batch time estimate is unreliable
+
+**Observed:** When a retry batch starts, `batch_jobs_elapsed` resets to 0.  The
+per-job estimate (bake + render for the single retry job) is correct, but the
+overall estimate across all retry jobs uses stale or zeroed elapsed time.
+
+**Proposed fix:** Carry `batch_jobs_elapsed` across retry starts, or compute the
+overall estimate purely from the per-job ETA multiplied by remaining jobs.
+
+**Files:** `__init__.py` — `_poll_batch_progress_impl` overall-time-estimate section.
+
+---
+
+## TODO-24: Per-frame bake timing not collected
+
+**Observation:** `perf_log.json` stores total bake time + total frames but not
+per-frame timings.  Longer-running frames (high smoke density late in simulation)
+are not distinguishable from early frames.  A per-frame rate model could improve
+ETA accuracy for jobs with high frame counts.
+
+**Constraint:** `bpy.ops.fluid.bake_all()` is blocking — no way to hook per-frame
+completion without a `frame_change_post` handler or a monitor thread in the worker.
+
+**Proposed approach:** Register a `bpy.app.handlers.frame_change_post` handler
+before calling `bake_all()` that records a timestamp each time Mantaflow advances
+a frame; write the per-frame data to `perf_log.json` on completion.
+
+**Files:** `smoke_worker.py` — bake section; `perf_log.json` schema.
+
+---
+
 ## ~~TODO-20~~ (substantially addressed v0.2.12–v0.2.13): Crashes not being caught / logged
 
 **Observed (2026-05-11):** Blender crashes are still occurring during batch runs and
