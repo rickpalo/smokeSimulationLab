@@ -672,25 +672,18 @@ elif use_existing_cache and baked_frames:
         except OSError as _e:
             _log(f"[{name}] WARNING: Presave merge failed ({_e}) — "
                  f"bake will proceed; Mantaflow may re-bake all frames from scratch")
-    # Set cache_frame_pause_data so Mantaflow resumes from the last baked frame.
-    # Assigning d.cache_directory above resets this internal counter to 0; without
-    # restoring it, bake_all() starts from frame_start even when VDB files for
-    # earlier frames are already present in the cache directory.
-    _resume_frame = max(baked_frames) if baked_frames else 0
-    try:
-        d.cache_frame_pause_data = _resume_frame
-        _log(f"[{name}] RESUME: cache_frame_pause_data → {_resume_frame} "
-             f"(bake will start at frame {_resume_frame + 1})")
-    except AttributeError:
-        _log(f"[{name}] WARNING: cache_frame_pause_data not found — "
-             f"Mantaflow may re-bake all {frame_end} frames from scratch")
-    try:
-        d.cache_frame_pause_noise = _resume_frame
-    except AttributeError:
-        pass
+    # cache_frame_pause_data is intentionally NOT set here.  Setting it to
+    # max(baked_frames) makes Mantaflow start at the right frame but also causes
+    # it to clear the cache directory before starting — deleting the merged
+    # presave files (1–395) so only the newly-baked tail (396–500) survives.
+    # The render phase then has no VDB data for frames 1–395.
+    # Leaving cache_frame_pause_data = 0 (default after d.cache_directory
+    # reassignment) means Mantaflow re-bakes from frame 1, overwrites the merged
+    # files in-place with new mtimes, and then adds the missing frames — all 500
+    # frames are present when the bake completes.  Slower but correct.
     bpy.context.view_layer.update()
     _time.sleep(2.0)
-    _log(f"[{name}] Baking...")
+    _log(f"[{name}] Baking (re-simulating from frame 1 to produce all frames)...")
     bake_start   = _time.time()
     _bake_result = bpy.ops.fluid.bake_all()
     bake_seconds = _time.time() - bake_start

@@ -123,3 +123,4 @@ git push origin :refs/tags/v0.2.21   # delete remote tag
 | 0.2.28  | Fix Monitor Existing Jobs time estimate; Utilities button reorder |
 | 0.2.29  | Mtime-filtered VDB counting so progress bar advances during full re-bake |
 | 0.2.30  | Fix RESUME re-baking from frame 1 by setting cache_frame_pause_data after presave merge |
+| 0.2.31  | Revert cache_frame_pause_data: setting it clears frames 1–395; re-bake from 1 is correct |

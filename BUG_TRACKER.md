@@ -549,7 +549,7 @@ over earlier completed/crashed first-run jobs.
 
 ## BUG-010: RESUME Bake Always Starts from Frame 1
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.30)  
+**Status:** `DEPLOYED / UNVERIFIED` (v0.2.31 — re-bake-from-1 accepted as correct)  
 **Files:** `smoke_worker.py` — RESUME bake decision branch
 
 ### Symptoms
@@ -561,28 +561,39 @@ filtered progress bar (v0.2.29) then counted all frames as new, showing
 "Baking (500 of 500)" instead of "Baking (105 of 105)".
 
 ### Investigation
-`d.cache_resumable = True` IS set correctly (no "property not found" warning
-in the logs).  The actual issue is that assigning `d.cache_directory =
-effective_cache_dir` resets Mantaflow's internal "last baked frame" counter
-(`cache_frame_pause_data`) to 0.  The presave merge restores VDB files to
-disk but Mantaflow's internal counter remains 0, so `bake_all()` starts from
-`scene.frame_start` (frame 1) even though 395 files are present.
 
-### Fix (v0.2.30)
-After the presave merge and before `bake_all()`, explicitly set:
-```python
-d.cache_frame_pause_data = max(baked_frames)   # e.g. 395
-d.cache_frame_pause_noise = max(baked_frames)  # silently ignored if no noise
-```
-This tells Mantaflow "frame 395 is the last completed frame" so it starts
-from frame 396.  A `view_layer.update()` + 2 s sleep after the assignment
-gives Mantaflow time to process the new counter before the bake begins.
-Worker log will show: `RESUME: cache_frame_pause_data → 395 (bake will start at frame 396)`.
+**Attempt 1 — cache_frame_pause_data (v0.2.30)**
+- *Hypothesis:* Assigning `d.cache_directory` resets Mantaflow's internal
+  "last baked frame" counter (`cache_frame_pause_data`) to 0.  Setting it to
+  `max(baked_frames)` before `bake_all()` should cause Mantaflow to start
+  from the next missing frame.
+- *Fix (v0.2.30):* Set `d.cache_frame_pause_data = max(baked_frames)` and
+  `d.cache_frame_pause_noise = max(baked_frames)` after the presave merge.
+- *Result:* **REGRESSED.** Mantaflow started baking from frame 396 (correct
+  start) BUT cleared the entire cache directory before beginning — deleting
+  the merged presave files (1–395).  Only frames 396–500 were present after
+  the bake.  The render phase had no VDB data for frames 1–395.  Confirmed
+  in production: "I looked in the cache directory. It had started at frame
+  396, but the 1-395 files were not there."
+
+**Attempt 2 — accept full re-bake, ensure all frames present (v0.2.31)**
+- *Root cause (revised):* `cache_frame_pause_data` controls the *start
+  frame* but Mantaflow also clears the cache directory before baking.  There
+  is no known Python API to make Mantaflow resume without clearing.
+- *Fix (v0.2.31):* Revert the `cache_frame_pause_data` change.  Leave the
+  counter at 0 (default after `d.cache_directory` reassignment).  Mantaflow
+  re-bakes from frame 1, overwrites the presave-merged files 1–395 in-place
+  (giving them new mtimes), then adds frames 396–500.  All 500 frames are
+  present when the bake finishes.  The mtime-filtered progress bar counts
+  freshly-written frames correctly and the auto-detect logic expands the
+  denominator to 500 when needed.
+- *Tradeoff:* RESUME re-bakes all 500 frames rather than only the 105 missing
+  ones.  The result is identical (deterministic simulation) but slower.
+- *Status:* **DEPLOYED / UNVERIFIED.**  Manual verification: confirm all 500
+  VDB files present after a RESUME bake completes.
 
 ### Tests Added
-None — requires Blender runtime.  Manual verification: run a batch where a
-job crashes mid-bake, then retry, and confirm new VDB files start above the
-already-baked frame number.
+None — requires Blender runtime.
 
 ---
 
