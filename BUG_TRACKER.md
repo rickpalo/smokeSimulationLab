@@ -584,13 +584,40 @@ filtered progress bar (v0.2.29) then counted all frames as new, showing
   counter at 0 (default after `d.cache_directory` reassignment).  Mantaflow
   re-bakes from frame 1, overwrites the presave-merged files 1–395 in-place
   (giving them new mtimes), then adds frames 396–500.  All 500 frames are
-  present when the bake finishes.  The mtime-filtered progress bar counts
-  freshly-written frames correctly and the auto-detect logic expands the
-  denominator to 500 when needed.
+  present when the bake finishes.
 - *Tradeoff:* RESUME re-bakes all 500 frames rather than only the 105 missing
-  ones.  The result is identical (deterministic simulation) but slower.
-- *Status:* **DEPLOYED / UNVERIFIED.**  Manual verification: confirm all 500
-  VDB files present after a RESUME bake completes.
+  ones — defeats the partial-cache optimization.
+
+**Attempt 3 — save and reload .blend to trigger UI-equivalent resume (v0.2.32)**
+- *Hypothesis:* In the Blender UI, clicking "Resume Bake" on a .blend opened
+  with existing cache files works correctly — Mantaflow scans the cache dir
+  during init, detects the existing frames, and continues from the next
+  missing frame.  Scripted bake doesn't get this behavior because
+  `d.cache_directory` is assigned *during* the script run, which clears
+  Mantaflow's internal tracking.  Saving the .blend AFTER the presave merge
+  (files in place) and reloading it should put Mantaflow in the same state
+  as the UI workflow — files on disk, fresh init, ready to resume.
+- *Fix (v0.2.32):* After the presave merge in the RESUME branch:
+  1. `bpy.ops.wm.save_as_mainfile(filepath=_resume_blend_path, copy=True)`
+  2. `bpy.ops.wm.open_mainfile(filepath=_resume_blend_path)`
+  3. Re-establish `obj` and `d` references (Python locals survive reload;
+     bpy data references do not).
+  4. Log diagnostics: pre-save file count, post-reload file count,
+     `d.cache_directory`, `d.cache_resumable`, `d.cache_frame_pause_data`.
+  5. Call `bake_all()` and log post-bake file count + bake time.
+  6. Delete the temp `.blend`.
+- *Failure mode handling:* If save/reload throws, fall back to the v0.2.31
+  re-bake-from-1 path (correct but slow).  If the bake doesn't finish, exit 1.
+- *Verification metrics to watch in the worker log:*
+  - `post-reload: d.cache_frame_pause_data` — if non-zero, Mantaflow detected
+    the existing frames.
+  - `post-bake: cache dir has N data files` vs expected 500 — confirms no
+    cache wipe occurred.
+  - `Bake complete in Ns` — if << full bake time, only missing frames were
+    baked (success).  If ≈ full bake time, Mantaflow re-baked everything
+    (still correct via overwrite, but the reload optimization didn't help).
+- *Status:* **DEPLOYED / UNVERIFIED.**  First production run is also the
+  diagnostic — log output reveals which path Mantaflow took.
 
 ### Tests Added
 None — requires Blender runtime.

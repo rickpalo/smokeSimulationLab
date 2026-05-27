@@ -672,21 +672,89 @@ elif use_existing_cache and baked_frames:
         except OSError as _e:
             _log(f"[{name}] WARNING: Presave merge failed ({_e}) — "
                  f"bake will proceed; Mantaflow may re-bake all frames from scratch")
-    # cache_frame_pause_data is intentionally NOT set here.  Setting it to
-    # max(baked_frames) makes Mantaflow start at the right frame but also causes
-    # it to clear the cache directory before starting — deleting the merged
-    # presave files (1–395) so only the newly-baked tail (396–500) survives.
-    # The render phase then has no VDB data for frames 1–395.
-    # Leaving cache_frame_pause_data = 0 (default after d.cache_directory
-    # reassignment) means Mantaflow re-bakes from frame 1, overwrites the merged
-    # files in-place with new mtimes, and then adds the missing frames — all 500
-    # frames are present when the bake completes.  Slower but correct.
+    # Save and reload the .blend so Mantaflow detects the merged cache files
+    # during init — same path the UI takes when a user opens a .blend with
+    # existing cache and clicks "Resume Bake".  In scripted mode, assigning
+    # d.cache_directory resets Mantaflow's internal cache tracking, and
+    # setting cache_frame_pause_data causes Mantaflow to clear the cache
+    # before baking (deleting frames 1-N).  A save+reload cycle is the only
+    # known way to make Mantaflow re-scan the cache directory and respect
+    # the existing baked frames.  Diagnostic logging is verbose so the first
+    # run reveals whether auto-resume actually triggered.
     bpy.context.view_layer.update()
     _time.sleep(2.0)
-    _log(f"[{name}] Baking (re-simulating from frame 1 to produce all frames)...")
+
+    _resume_blend_path = os.path.join(output_path, "jobs", f"{name}_resume.blend")
+    _log(f"[{name}] RESUME: saving temporary .blend to trigger Mantaflow rescan on reload")
+    _log(f"[{name}]   Path: {_resume_blend_path}")
+    _pre_save_files = _count_data_files(effective_cache_dir)
+    _log(f"[{name}] RESUME pre-save: cache dir has {_pre_save_files} data files")
+
+    _reload_succeeded = False
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=_resume_blend_path, copy=True)
+        _log(f"[{name}] RESUME: temp .blend saved")
+        bpy.ops.wm.open_mainfile(filepath=_resume_blend_path)
+        _log(f"[{name}] RESUME: temp .blend reloaded")
+        _reload_succeeded = True
+    except Exception as _e:
+        _log(f"[{name}] WARNING: save/reload failed ({_e}) — proceeding without reload")
+
+    if _reload_succeeded:
+        # All previous bpy references are stale after open_mainfile.
+        obj = bpy.data.objects.get(domain_name)
+        if not obj:
+            _log(f"[{name}] ERROR: domain object '{domain_name}' not found after reload")
+            sys.exit(1)
+        d = next(
+            (m.domain_settings for m in obj.modifiers
+             if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'),
+            None,
+        )
+        if not d:
+            _log(f"[{name}] ERROR: fluid domain modifier not found after reload")
+            sys.exit(1)
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+
+        # Diagnostic: confirm the cache files survived the reload AND Mantaflow
+        # noticed them.  If cache_frame_pause_data is non-zero after reload,
+        # Mantaflow detected the existing frames and will resume from there.
+        _post_files = _count_data_files(effective_cache_dir)
+        _log(f"[{name}] RESUME post-reload: cache dir has {_post_files} data files")
+        _log(f"[{name}] RESUME post-reload: d.cache_directory = {d.cache_directory!r}")
+        try:
+            _log(f"[{name}] RESUME post-reload: d.cache_resumable = {d.cache_resumable}")
+        except AttributeError:
+            pass
+        try:
+            _log(f"[{name}] RESUME post-reload: d.cache_frame_pause_data = {d.cache_frame_pause_data}")
+        except AttributeError:
+            pass
+
+        bpy.context.view_layer.update()
+        _time.sleep(2.0)
+
+    _log(f"[{name}] Baking...")
     bake_start   = _time.time()
     _bake_result = bpy.ops.fluid.bake_all()
     bake_seconds = _time.time() - bake_start
+
+    # Diagnostic: how many files in cache now?  If far fewer than expected,
+    # Mantaflow cleared the merged frames (the v0.2.30 failure mode).
+    _bake_files = _count_data_files(effective_cache_dir)
+    _expected_total = frame_end - frame_start + 1
+    _log(f"[{name}] RESUME post-bake: cache dir has {_bake_files} data files "
+         f"(expected {_expected_total})")
+
+    # Clean up temp .blend
+    if os.path.isfile(_resume_blend_path):
+        try:
+            os.remove(_resume_blend_path)
+            _log(f"[{name}] RESUME: removed temp .blend")
+        except OSError as _e:
+            _log(f"[{name}] WARNING: could not remove temp .blend ({_e})")
+
     if 'FINISHED' not in _bake_result:
         _log(f"[{name}] ERROR: Bake did not finish normally (result: {_bake_result})")
         sys.exit(1)
