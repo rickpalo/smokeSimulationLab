@@ -549,9 +549,9 @@ over earlier completed/crashed first-run jobs.
 
 ## BUG-010: RESUME Bake Always Starts from Frame 1
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.3.1 — save/reload removed after it hung a
-res-512 bake; back to v0.2.31 re-bake-from-1, which is correct if slow)  
-**Files:** `smoke_worker.py` — RESUME bake decision branch
+**Status:** `DEPLOYED / UNVERIFIED` (v0.5.0 — cache_type='MODULAR' + bake_data()
+gives true in-process partial resume; replaces all prior attempts)  
+**Files:** `smoke_worker.py` — parameter-application block + RESUME/FULL bake branches
 
 ### Symptoms
 When retrying a job that crashed mid-bake (e.g. 395 of 500 frames done), the
@@ -650,10 +650,70 @@ filtered progress bar (v0.2.29) then counted all frames as new, showing
   in `--background` mode, where `open_mainfile`+`bake_all` are synchronous and
   Mantaflow's native cache rescan (the UI "Resume Bake" path) should work.
 
+**Attempt 5 — cache_type='MODULAR' + bake_data() (v0.5.0) ✓ ROOT CAUSE FOUND**
+- *Investigation method:* Five probe scripts in `scripts/experiments/` run
+  Blender headless with `--factory-startup` to isolate the resume mechanism
+  from addon code.  Probes v3 → v7 progressively eliminated wrong hypotheses
+  and converged on the true cause.
+- *Root cause:* The worker (and all prior probes) used
+  `bpy.ops.fluid.bake_all()` under the .blend's default `cache_type='ALL'`.
+  Under `cache_type='ALL'`, `bake_all()` ignores existing on-disk cache when
+  invoked from scripted Python and re-bakes from frame 1.  Mantaflow's UI
+  "Resume Bake" button calls a different path that includes a cache rescan.
+- *Discovery path (probes):*
+  - **Probe v3:** save+reload with `cache_frame_pause_data` written to the
+    .blend → REBAKED-FROM-1.  Finding: `cache_frame_pause_data` does NOT
+    persist through `save_as_mainfile`; loads as 0 in a fresh process.
+  - **Probe v5:** switched to `cache_type='MODULAR'` + `bake_data()` with
+    `cache_frame_start = last_preserved` → wrote 101 frames (boundary +
+    100 new) but pruned frames 1..99 from disk.  *Mantaflow honored
+    `cache_frame_start` as the new cache lower bound and deleted outside it.*
+    The user spotted this from the cache directory contents — the verdict's
+    "WIPED" was actually a successful partial resume with wrong range setup.
+  - **Probe v6:** same-process MODULAR + `bake_data()` with
+    `cache_frame_start = 1` unchanged → **VERDICT RESUMED**.  99 frames
+    preserved (mtimes untouched), frame 100 rewritten as boundary, 100
+    new frames in 5.5 s.  Mtime gap of 3.2 s at frame 100 — exactly the
+    ResumtTest2 UI Resume pattern.  No save, no reload, no `open_mainfile`.
+  - **Probe v7:** v6 plus `use_noise=True` + `bake_noise()` → both layers
+    resumed identically (99/1/0 in both data/ and noise/).
+- *Fix (v0.5.0):*
+  - **Parameter block** (`smoke_worker.py`): force `d.cache_type = 'MODULAR'`
+    (wrapped in try/except) right after `cache_data_format`/`cache_noise_format`.
+  - **RESUME branch:** call `bpy.ops.fluid.bake_data()` instead of
+    `bake_all()`; if `use_noise`, also call `bpy.ops.fluid.bake_noise()`.
+    The presave/merge dance is retained (still needed for BUG-004
+    protection against `cache_directory` reassignment wipe), but the v0.3.1
+    commentary about Mantaflow always re-baking from frame 1 is gone — under
+    MODULAR that's no longer true.
+  - **FULL branch:** same operator swap for consistency.  Every cache the
+    worker writes is now MODULAR so the next run's RESUME path can resume it.
+    Both ALL and MODULAR are resumable on-disk formats (REPLAY is not), so
+    pre-v0.5.0 caches baked under ALL remain readable.
+  - No save/reload, no `open_mainfile`, no `cache_frame_pause_data`
+    manipulation — purely a `cache_type` + operator-name swap.
+- *Why the prior attempts failed:* Attempts 1–4 all used `cache_type='ALL'`
+  + `bake_all()`.  In that combination Mantaflow has no resume path
+  reachable from scripted Python.  Attempt 3 came closest (UI-Resume
+  reproduction via save+reload), but it still fell back to `bake_all()`
+  which doesn't engage on-disk scan logic the way `bake_data()` does.
+- *Status:* **DEPLOYED / UNVERIFIED.** Needs one production-scale RESUME
+  test (interrupt a res-512 job, resume) to mark as `CONFIRMED FIXED`.
+  Probe v6/v7 verified the mechanism at res 16; the only risk in scaling
+  up is bake time hiding the boundary-frame rewrite signature.
+
 ### Tests Added
-`tests/test_run_batch_gating.py::TestWorkerResumeNoReload` — asserts the worker
-RESUME path no longer calls `open_mainfile` / `save_as_mainfile` (regression
-guard for the hang).
+- `tests/test_run_batch_gating.py::TestWorkerResumeNoReload` — asserts the
+  worker RESUME path no longer calls `open_mainfile` / `save_as_mainfile`
+  (regression guard for the v0.3.0 hang).
+- `tests/test_modular_resume.py` (v0.5.0, 8 tests) — asserts:
+  - `d.cache_type = 'MODULAR'` is set in a try/except block
+  - `bpy.ops.fluid.bake_all(` no longer appears in non-comment code
+  - `bpy.ops.fluid.bake_data()` is called in both RESUME and FULL branches
+  - `bpy.ops.fluid.bake_noise()` is called in both branches, conditionally
+    guarded by `p["use_noise"]`
+  - Each operator call has a `'FINISHED'` check + `sys.exit(1)` on failure
+  - `WORKER_VERSION` is ≥ `0.5.0`
 
 ---
 

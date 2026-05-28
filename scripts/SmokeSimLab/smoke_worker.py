@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.4.8"
+WORKER_VERSION = "0.5.0"
 
 import bpy
 import sys
@@ -473,6 +473,21 @@ try:
 except TypeError:
     d.openvdb_cache_compress_type = 'ZIP'
 
+# v0.5.0 BUG-010 fix: force cache_type = 'MODULAR' so RESUME actually resumes.
+# Probe v6/v7 (scripts/experiments/bg_resume_probe_v6.py + v7.py) proved that
+# with cache_type='MODULAR' + bake_data() (+ bake_noise() if use_noise),
+# Mantaflow's on-disk cache scan detects existing frames at bake time, loads
+# state from the boundary frame, and continues forward — no save/reload dance,
+# no presave/merge required.  ALL and MODULAR are both resumable on-disk
+# formats (only REPLAY isn't), so this is safe to apply even to caches
+# originally baked under cache_type='ALL'.
+try:
+    d.cache_type = 'MODULAR'
+    _log(f"[{name}] cache_type set to MODULAR (resume-friendly)")
+except (TypeError, ValueError) as _e:
+    _log(f"[{name}] WARNING: could not set cache_type=MODULAR ({_e}) — "
+         f"resume may fall back to re-bake-from-frame-1")
+
 bpy.context.view_layer.objects.active = obj
 obj.select_set(True)
 
@@ -764,36 +779,39 @@ elif use_existing_cache and baked_frames:
         except OSError as _e:
             _log(f"[{name}] WARNING: Presave merge failed ({_e}) — "
                  f"bake will proceed; Mantaflow may re-bake all frames from scratch")
-    # Re-bake in place — do NOT save/reload the .blend.  In scripted mode
-    # Mantaflow re-bakes from frame 1 regardless (assigning d.cache_directory
-    # resets its internal frame tracking and there is no API to resume mid-range
-    # without clearing).  It overwrites the merged presave files in place, so all
-    # frames end present and correct — just slower than a true partial resume.
-    #
-    # v0.3.1: the v0.2.32 save+reload-to-resume trick was removed.  An
-    # open_mainfile() mid-script leaves bpy.ops.fluid.bake_all() unable to run in
-    # windowed (EEVEE) mode — Blender goes idle and the worker hangs forever on
-    # the bake call (observed on a res-512 job: ~0% CPU, UI showing no bake, no
-    # cache writes for 30+ min).  The reload never achieved a true resume anyway
-    # (cache_frame_pause_data was 0 afterward), so it was pure downside.
+    # v0.5.0 BUG-010 fix: with cache_type='MODULAR' set in the param block,
+    # bake_data() (+ bake_noise() if use_noise) honors the on-disk cache —
+    # Mantaflow scans the cache directory, finds frames 1..N already there,
+    # loads state from the boundary frame, and continues from N+1.  Frames
+    # 1..N-1 keep their original mtimes; frame N is rewritten (boundary).
+    # No save/reload needed (v0.2.32's hang on EEVEE windowed mode is gone).
+    # Probe v6/v7 in scripts/experiments/ proves both layers resume cleanly.
     bpy.context.view_layer.update()
     _time.sleep(2.0)
 
-    _log(f"[{name}] Baking...")
-    bake_start   = _time.time()
-    _bake_result = bpy.ops.fluid.bake_all()
+    _log(f"[{name}] Baking (MODULAR resume — bake_data"
+         f"{' + bake_noise' if p['use_noise'] else ''})...")
+    bake_start = _time.time()
+    _bake_result = bpy.ops.fluid.bake_data()
+    if 'FINISHED' not in _bake_result:
+        _log(f"[{name}] ERROR: bake_data() did not finish normally "
+             f"(result: {_bake_result})")
+        sys.exit(1)
+    if p["use_noise"]:
+        _noise_result = bpy.ops.fluid.bake_noise()
+        if 'FINISHED' not in _noise_result:
+            _log(f"[{name}] ERROR: bake_noise() did not finish normally "
+                 f"(result: {_noise_result})")
+            sys.exit(1)
     bake_seconds = _time.time() - bake_start
 
-    # Diagnostic: how many files in cache now?  If far fewer than expected,
-    # Mantaflow cleared the merged frames (the v0.2.30 failure mode).
+    # Diagnostic: how many files in cache now?  Should be the full requested
+    # range; if far fewer, MODULAR's scan didn't pick up the presave merge.
     _bake_files = _count_data_files(effective_cache_dir)
     _expected_total = frame_end - frame_start + 1
     _log(f"[{name}] RESUME post-bake: cache dir has {_bake_files} data files "
          f"(expected {_expected_total})")
 
-    if 'FINISHED' not in _bake_result:
-        _log(f"[{name}] ERROR: Bake did not finish normally (result: {_bake_result})")
-        sys.exit(1)
     _log(f"[{name}] Bake complete in {bake_seconds:.0f}s.")
     _time.sleep(2.0)
 
@@ -812,13 +830,25 @@ else:
     _log(f"[{name}] Freeing previous cache and baking from scratch...")
     bpy.ops.fluid.free_all()
     _time.sleep(2.0)
-    _log(f"[{name}] Baking...")
-    bake_start   = _time.time()
-    _bake_result = bpy.ops.fluid.bake_all()
-    bake_seconds = _time.time() - bake_start
+    # v0.5.0: bake_data() (+ bake_noise() if use_noise) under cache_type='MODULAR'.
+    # Consistency with the RESUME branch — every cache we write must be MODULAR
+    # so the next run's RESUME path can scan + resume it.  ALL/MODULAR are
+    # both resumable on-disk formats; MODULAR is what the addon writes from now on.
+    _log(f"[{name}] Baking (MODULAR full — bake_data"
+         f"{' + bake_noise' if p['use_noise'] else ''})...")
+    bake_start = _time.time()
+    _bake_result = bpy.ops.fluid.bake_data()
     if 'FINISHED' not in _bake_result:
-        _log(f"[{name}] ERROR: Bake did not finish normally (result: {_bake_result})")
+        _log(f"[{name}] ERROR: bake_data() did not finish normally "
+             f"(result: {_bake_result})")
         sys.exit(1)
+    if p["use_noise"]:
+        _noise_result = bpy.ops.fluid.bake_noise()
+        if 'FINISHED' not in _noise_result:
+            _log(f"[{name}] ERROR: bake_noise() did not finish normally "
+                 f"(result: {_noise_result})")
+            sys.exit(1)
+    bake_seconds = _time.time() - bake_start
     _log(f"[{name}] Bake complete in {bake_seconds:.0f}s.")
     _time.sleep(2.0)
 

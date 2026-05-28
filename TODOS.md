@@ -4,41 +4,60 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
-## TODO-35: Evaluate background save-`.blend` + open resume approach — **OPEN**
+## TODO-36: Monitor Existing Jobs — progress count wildly off mid-bake — **OPEN**
 
-**Filed 2026-05-28.** User proposal:
-1. Save the existing cache files in a tmp directory.
-2. Change `d.cache_directory` in the .blend to point at that tmp directory.
-3. Save as a tmp `.blend`.
-4. Open the tmp `.blend` (fresh Blender) and resume baking.
+**Filed 2026-05-28.** User switched the output folder back to AutoTest and
+clicked **Monitor Existing Jobs** mid-bake.  Sub-task bar 1 displayed
+`Baking 5 of 197` while the cache directory was actively writing
+`frame_0471` (of 500).  Numbers:
 
-**Have we tried this exact sequence? NO — close but no.** What's been done:
+- `5` ≈ "frames baked since Monitor was clicked".
+- `197` ≈ `500 - 303` (frames still-to-bake at the moment Monitor started).
+- Actual frame being written: 471 → 168 frames baked since Monitor start — but
+  the bar froze at 5.
 
-| Attempt | Reload? | cache_directory at LOAD time | Outcome |
-|---|---|---|---|
-| **v0.2.32 BUG-010 attempt 3** | Yes, windowed | populated dir (files merged back) | **Hung** — windowed `open_mainfile` + `bake_all` deadlock (no event-loop pump). Removed in v0.3.1. Never confirmed whether resume would have worked. |
-| **bg_resume_probe.py (v0.3.0)** | **No** — same-process bake | populated dir (files merged back after assign) | **REBAKED-FROM-1** — Mantaflow doesn't detect files added AFTER `cache_directory` assignment. The `init` scan ran on the empty dir at assign-time. |
-| **Your proposal** | **Yes, in background** (bake phase is `--background`) | populated dir (files moved there BEFORE the .blend was saved) | **Untested.** At LOAD time, Mantaflow's init scan runs on the already-populated dir → should detect the existing baked frames and set its internal "last baked frame" → real resume. |
+**Likely cause:** the bake-bar's baseline was captured correctly at
+Monitor-click, but the per-poll re-count of VDB files isn't updating during
+this scenario (or the `start_time` mtime filter from BUG-003 is dropping
+recent frames).  The poll's `_count_vdb_frames` may be reading a cached or
+stale view.  Inspect `_poll_batch_progress_impl`'s bake-bar section and the
+Monitor-Existing-Jobs initial state seeding.
 
-**Why it might actually work where the others didn't:**
-- `--background` doesn't have the windowed event-loop deadlock that killed v0.2.32.
-- The probe's failure was order-of-operations (assign-then-add-files); your
-  proposal flips it (add-files-then-save-then-load) so Mantaflow's init scan
-  sees the files at the right moment.
-- The bake phase is already `--background` (v0.3.5 launcher decision), so this
-  fits the existing two-pass architecture naturally.
+**Files:** `__init__.py` — `_count_vdb_frames`, the bake-bar progress section
+in `_poll_batch_progress_impl`, `SMOKE_OT_monitor_existing_jobs.execute`.
 
-**Recommended next step:** write a focused `bg_resume_probe_v2.py` that does
-**exactly** the user's 4 steps and reports via mtime whether prior frames were
-preserved.  If it succeeds, the worker's RESUME branch can adopt this approach
-and BUG-010 (re-bake from frame 1 on resume) finally gets a real fix.
+---
 
-**Files (if it works):** new helper in `smoke_worker.py` RESUME branch;
-re-establish `obj`/`d` after `open_mainfile`; clean up the tmp `.blend`.
+## TODO-35: Evaluate background save-`.blend` + open resume approach — **DONE** (v0.5.0)
 
-**Risk:** moderate.  open_mainfile mid-script changes the live bpy state — same
-class of issue as the v0.2.32 hang, but in `--background` the failure mode
-should be a clean error rather than a deadlock.
+**Filed + Resolved 2026-05-28.**  Investigation by five probe scripts
+(`scripts/experiments/bg_resume_probe_v[2-7].py`) ruled out the save+reload
+approach and discovered the real fix: **cache_type='MODULAR' + bake_data()**.
+
+**Probe trail (kept for reference — all in `scripts/experiments/`):**
+- **v2:** user's original save+reload+move-back proposal → REBAKED-FROM-1.
+- **v3:** added `cache_frame_pause_data` write to the saved .blend →
+  REBAKED-FROM-1.  Finding: that property does NOT persist through
+  `save_as_mainfile` (loads as 0 in fresh process).
+- **v5:** switched to `cache_type='MODULAR'` + `bake_data()` with
+  `cache_frame_start = last_preserved` → bake succeeded but pruned frames
+  1..99 (Mantaflow honored the new lower bound as a cache range).
+- **v6 (KEY):** same-process MODULAR + `bake_data()` with
+  `cache_frame_start = 1` unchanged → **VERDICT RESUMED.** 99 frames
+  preserved (mtime untouched), boundary frame 100 rewritten once,
+  100 new frames baked in 5.5 s.  No save/reload required.
+- **v7:** v6 + `use_noise=True` + `bake_noise()` → both layers resume
+  identically.
+
+**Resolution (v0.5.0):** Worker switched to `bake_data()` (+ `bake_noise()`
+if `use_noise`) under `cache_type='MODULAR'` in BOTH the RESUME and FULL
+bake branches.  See BUG-010 Attempt 5 in `BUG_TRACKER.md` for full details.
+
+**Unlocks:**
+- TODO-31 (RESUME progress bar) — previously blocked by no real resume; now
+  the bar can show "Baking (already_baked+1) of total" because we know the
+  baseline is preserved.
+- A backlog of bake-and-restart workflows that were too slow to attempt.
 
 ---
 
