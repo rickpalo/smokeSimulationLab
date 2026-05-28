@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 4, 0),
+    "version":     (0, 4, 1),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -3030,17 +3030,14 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         "Progress is tracked in the panel below."
     )
 
-    def invoke(self, context, event):
-        if bpy.data.is_dirty:
-            return context.window_manager.invoke_props_dialog(self, width=380)
-        return self.execute(context)
-
-    def draw(self, context):
-        col = self.layout.column(align=True)
-        col.label(text="The .blend file has unsaved changes.", icon='ERROR')
-        col.label(text="It is recommended to save before running batch.")
-        col.separator()
-        col.label(text="Click OK to run anyway, or Cancel to save first.")
+    # No invoke/draw — Run Batch goes straight to execute.  Removed in v0.4.1
+    # because Export Batch flips bpy.data.is_dirty (it writes to job_log_items
+    # and the batch_* properties), so the "save before running" dialog fired on
+    # essentially every Run Batch immediately after Export — the warning was
+    # noise far more often than it was useful.  Trade-off: a user who edited
+    # the scene (camera, emitter density, etc.) since the last save will see
+    # the batch run against the LAST SAVED state of the .blend; that's the
+    # expected scripted-batch behaviour anyway (jobs reference the path on disk).
 
     def execute(self, context):
         s           = context.scene.smoke_settings
