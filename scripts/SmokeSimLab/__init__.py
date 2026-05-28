@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 4, 2),
+    "version":     (0, 4, 3),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -2012,18 +2012,36 @@ def _find_running_log(jobs_dir):
             return None
         return log_file, log_stem, tail
 
+    # Sort candidate logs by MOST RECENT mtime first so the actively-written
+    # log wins.  Single-pass: same result as reversed-alphabetical (later jobs
+    # have higher numbers AND later mtimes).  Two-pass: critical — after the
+    # bake pass touches every job's <stem>.log, reversed-alphabetical wrongly
+    # picked the highest-numbered log even while the render pass was working
+    # on an earlier one (observed v0.4.2 EEVEE test: Job 1 rendering frame 6,
+    # poll reported Job 2 as active and parsed Job 2's stale "Verifying cache"
+    # line into the subtask text).
+    def _log_sort_key(f):
+        # Most recent mtime first; ties broken by higher filename (matches the
+        # old reversed-alphabetical fallback in the rare tied-mtime case).
+        try:
+            mt = os.path.getmtime(os.path.join(jobs_dir, f))
+        except OSError:
+            mt = 0.0
+        return (mt, f)
+
     # Pass 1: retry logs — sequential check uses only retry done-stems so a
     # completed job_NNNN.done doesn't skip an active job_MMMM_retry.log.
-    retry_logs = sorted(f for f in all_files if f.endswith("_retry.log"))
-    if retry_logs:
-        for log_file in reversed(retry_logs):
-            result = _read_candidate(log_file, retry_done_stems)
-            if result:
-                return result
+    retry_logs = [f for f in all_files if f.endswith("_retry.log")]
+    retry_logs.sort(key=_log_sort_key, reverse=True)
+    for log_file in retry_logs:
+        result = _read_candidate(log_file, retry_done_stems)
+        if result:
+            return result
 
     # Pass 2: first-run logs — skip any log whose stem has a .crashed marker.
-    first_logs = sorted(f for f in all_files if f.endswith(".log") and "_retry" not in f)
-    for log_file in reversed(first_logs):
+    first_logs = [f for f in all_files if f.endswith(".log") and "_retry" not in f]
+    first_logs.sort(key=_log_sort_key, reverse=True)
+    for log_file in first_logs:
         result = _read_candidate(log_file, done_stems, crashed_done=True)
         if result:
             return result
