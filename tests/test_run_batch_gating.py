@@ -125,3 +125,29 @@ class TestWorkerResumeNoReload:
 
     def test_no_save_as_mainfile_call(self):
         assert "bpy.ops.wm.save_as_mainfile" not in self._worker_src()
+
+
+class TestWorkerPhaseSplit:
+    """Increment 1 of the two-phase pipeline: worker honours --phase {bake,render,
+    both}, defaulting to 'both' (= original single-pass behavior). Worker can't be
+    imported; assert the gating exists in source."""
+    def _src(self):
+        path = os.path.join(os.path.dirname(__file__), "..",
+                            "scripts", "SmokeSimLab", "smoke_worker.py")
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_parses_phase_with_both_default(self):
+        src = self._src()
+        assert 'phase = "both"' in src
+        assert 'do_bake   = phase in ("bake", "both")' in src
+        assert 'do_render = phase in ("render", "both")' in src
+
+    def test_render_phase_forces_skip_bake(self):
+        # SKIP decision must also fire when do_bake is False (render phase).
+        assert "if (use_existing_cache and bake_complete) or not do_bake:" in self._src()
+
+    def test_bake_phase_exits_before_render(self):
+        src = self._src()
+        assert "if not do_render:" in src
+        assert "phase=bake complete — skipping render and CSV." in src

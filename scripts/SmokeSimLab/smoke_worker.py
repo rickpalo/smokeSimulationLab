@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.3.2"
+WORKER_VERSION = "0.3.4"
 
 import bpy
 import sys
@@ -272,6 +272,22 @@ except (ValueError, IndexError):
     _log("ERROR: expected path to job JSON after --")
     sys.exit(1)
 
+# Optional --phase {bake,render,both} for the two-phase pipeline.  Accepts
+# "--phase bake" or "--phase=bake" among the args after the job JSON.  Default
+# "both" = bake + render in one process (the original single-pass behavior).
+phase = "both"
+_phase_args = argv[sep + 2:]
+for _i, _tok in enumerate(_phase_args):
+    if _tok.startswith("--phase="):
+        phase = _tok.split("=", 1)[1]
+    elif _tok == "--phase" and _i + 1 < len(_phase_args):
+        phase = _phase_args[_i + 1]
+phase = phase.strip().lower()
+if phase not in ("bake", "render", "both"):
+    phase = "both"
+do_bake   = phase in ("bake", "both")
+do_render = phase in ("render", "both")
+
 with open(job_path) as fh:
     cfg = json.load(fh)
 
@@ -327,6 +343,7 @@ os.makedirs(cache_dir,  exist_ok=True)
 
 _log(f"[{name}] Job started.")
 _log(f"[{name}] Blender {bpy.app.version_string}  |  SmokeSimLab worker {WORKER_VERSION} (addon {addon_version})")
+_log(f"[{name}] Phase: {phase}  (bake={do_bake}, render={do_render})")
 _dlog(f"cfg: {cfg}")
 _log(f"[{name}] Cache dir: {cache_dir}")
 _log(f"[{name}] Render dir: {render_dir}")
@@ -626,9 +643,12 @@ rebaked_frames = set()
 
 _bake_decision = None   # set to "SKIP" / "RESUME" / "FULL" by the branch that fires
 
-if use_existing_cache and bake_complete:
+if (use_existing_cache and bake_complete) or not do_bake:
     _bake_decision = "SKIP"
-    _log(f"[{name}]   Decision : SKIP BAKE — all {frame_end - frame_start + 1} frames confirmed")
+    if not do_bake:
+        _log(f"[{name}]   Decision : SKIP BAKE — render phase (bake ran in phase 1)")
+    else:
+        _log(f"[{name}]   Decision : SKIP BAKE — all {frame_end - frame_start + 1} frames confirmed")
     if _presave_active:
         # Restore the presaved cache so the render engine can read the VDB files.
         # The render engine reads VDB files directly; Mantaflow's internal state
@@ -785,6 +805,24 @@ else:
 
 update_text_objects(text_map, p, bake_seconds=display_bake_seconds)
 _log(f"[{name}] Text objects updated (post-bake).")
+
+# ---------------------------------------------------------------------------
+# Two-phase pipeline: in the bake-only phase, stop here.  Render + CSV happen in
+# the separate render-phase process (Increment 3 wires the two passes; until then
+# export passes no --phase, so phase=="both" and this is skipped).
+# ---------------------------------------------------------------------------
+if not do_render:
+    _log(f"[{name}] phase=bake complete — skipping render and CSV.")
+    _close_log()
+    _bake_jobs_dir = os.path.dirname(job_path)
+    _bake_job_stem = os.path.splitext(os.path.basename(job_path))[0]
+    try:
+        with open(os.path.join(_bake_jobs_dir, _bake_job_stem + ".worker_done"), "w") as _wdf:
+            _wdf.write(datetime.datetime.now().isoformat() + "\n")
+    except OSError:
+        pass
+    bpy.ops.wm.quit_blender()
+    sys.exit(0)
 
 # ---------------------------------------------------------------------------
 # Scene setup — used by both render passes
