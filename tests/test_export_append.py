@@ -173,3 +173,92 @@ class TestJobBatBlock:
         assert any('echo error exit' in ln and "job_0002.done" in ln for ln in block)
         # success branch writes a plain done sentinel
         assert any(ln.strip().startswith("echo done R128") for ln in block)
+
+    def test_label_drives_header_and_counter(self):
+        # Bake-phase blocks: header "Bake i/N", counter BAKE_ERRORS.
+        bk = _job_bat_block(1, 3, "R64", '"x"',
+                            r"C:\out\jobs\job_0000.bake.done", label="Bake")
+        assert bk[0] == "echo === Bake 1/3: R64 ==="
+        assert any("set /a BAKE_ERRORS+=1" in ln for ln in bk)
+        assert any("job_0000.bake.done" in ln for ln in bk)
+        # Render-phase blocks: counter RENDER_ERRORS.
+        rd = _job_bat_block(2, 3, "R64", '"x"',
+                            r"C:\out\jobs\job_0001.render.done", label="Render")
+        assert any("set /a RENDER_ERRORS+=1" in ln for ln in rd)
+
+
+class TestJobRunCmdPhase:
+    """Phase param drives the launcher --phase arg + EEVEE windowed decision."""
+    def test_both_phase_omits_argument(self):
+        # Default phase preserves the original single-pass invocation.
+        cmd = _job_run_cmd("py.exe", "L.py", "W.py", "b.exe", "f.blend",
+                           "j.json", "EEVEE", launcher_exists=True)
+        assert "--phase" not in cmd
+
+    def test_bake_phase_appends_arg_via_launcher(self):
+        cmd = _job_run_cmd("py.exe", "L.py", "W.py", "b.exe", "f.blend",
+                           "j.json", "EEVEE", launcher_exists=True, phase="bake")
+        assert cmd.endswith(" --phase bake")
+
+    def test_bake_phase_forces_background_in_fallback(self):
+        # No launcher + EEVEE + bake phase: must NOT use --window-geometry.
+        cmd = _job_run_cmd("py.exe", "L.py", "W.py", "b.exe", "f.blend",
+                           "j.json", "EEVEE", launcher_exists=False, phase="bake")
+        assert "--window-geometry" not in cmd
+        assert "--background" in cmd
+        assert " --phase bake" in cmd
+
+    def test_render_phase_keeps_window_for_eevee_fallback(self):
+        cmd = _job_run_cmd("py.exe", "L.py", "W.py", "b.exe", "f.blend",
+                           "j.json", "EEVEE", launcher_exists=False, phase="render")
+        assert "--window-geometry" in cmd
+        assert " --phase render" in cmd
+
+
+class TestJobBatBlockAlias:
+    """alias_done_path is the two-pass pipeline's mechanism for letting the
+    legacy `<stem>.done` poll/summary code see a job as complete after the
+    FINAL pass (render, or bake in bake-only mode)."""
+    def test_alias_omitted_by_default(self):
+        block = _job_bat_block(1, 1, "n", '"c"', r"a.bake.done", label="Bake")
+        assert not any("a.bake.done" not in ln and ".done" in ln for ln in block
+                       if ln.strip().startswith(("echo error", "echo done")))
+
+    def test_alias_writes_both_paths_in_both_branches(self):
+        block = _job_bat_block(1, 1, "R64", '"c"', r"jobs/job_0000.render.done",
+                               label="Render", alias_done_path=r"jobs/job_0000.done")
+        err_lines = [ln for ln in block if "echo error exit" in ln]
+        ok_lines  = [ln for ln in block if "echo done" in ln and "WARNING" not in ln]
+        assert len(err_lines) == 2  # one phased, one alias
+        assert len(ok_lines)  == 2
+        assert any("job_0000.render.done" in ln for ln in err_lines)
+        assert any("job_0000.done" in ln and ".render.done" not in ln for ln in err_lines)
+        assert any("job_0000.render.done" in ln for ln in ok_lines)
+        assert any("job_0000.done" in ln and ".render.done" not in ln for ln in ok_lines)
+
+
+class TestPhasedSentinelRegexes:
+    """The unphased sentinel matchers must EXCLUDE the per-phase variants so the
+    poll/summary don't over-count completed jobs in the two-pass pipeline."""
+    def test_unphased_done_matches(self):
+        from SmokeSimLab import _DONE_RE, _RETRY_DONE_RE, _CRASHED_RE
+        assert _DONE_RE.match("job_0000.done")
+        assert _RETRY_DONE_RE.match("job_0007_retry.done")
+        assert _CRASHED_RE.match("job_0003.crashed")
+
+    def test_phased_done_does_NOT_match_unphased(self):
+        from SmokeSimLab import _DONE_RE, _RETRY_DONE_RE, _CRASHED_RE
+        for f in ("job_0000.bake.done", "job_0000.render.done"):
+            assert not _DONE_RE.match(f), f"{f} must not match _DONE_RE"
+            assert not _RETRY_DONE_RE.match(f), f"{f} must not match _RETRY_DONE_RE"
+        for f in ("job_0000.bake.crashed", "job_0000.render.crashed"):
+            assert not _CRASHED_RE.match(f), f"{f} must not match _CRASHED_RE"
+
+    def test_phased_done_matchers(self):
+        from SmokeSimLab import _BAKE_DONE_RE, _RENDER_DONE_RE
+        assert _BAKE_DONE_RE.match("job_0000.bake.done")
+        assert _RENDER_DONE_RE.match("job_0042.render.done")
+        # And don't cross-match
+        assert not _BAKE_DONE_RE.match("job_0000.render.done")
+        assert not _RENDER_DONE_RE.match("job_0000.bake.done")
+        assert not _BAKE_DONE_RE.match("job_0000.done")

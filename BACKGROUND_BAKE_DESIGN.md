@@ -20,11 +20,18 @@ BUG-010 and memory `background-bake-plan`).
 - **Increment 2 — launcher `--phase`** — **DONE v0.3.5.** Forces `--background`
   for the bake phase; passes `--phase` through; windowed only for EEVEE render.
   Dormant.
-- **Increment 3 — export_batch two-pass .bat (FLIPS the flow)** — **NEXT, risky.**
-  Design below. Most of the addon's "one process per job does everything"
-  assumptions live here (`_find_running_log`, progress bars,
-  `_compute_batch_summary`, poll timer) — do it deliberately, not rushed.
-- **Increment 4 — UI/progress polish**: two-phase progress + Job Log phase dot.
+- **Increment 3 — export_batch two-pass .bat (FLIPS the flow)** — **DONE v0.4.0.**
+  Built in six sub-increments (3a helpers, 3b two-pass `.bat`, 3c worker
+  append-mode log + phased worker_done, 3d launcher phased crashed,
+  3e/3f addon regex matchers + phased-aware progress bar). The simplification
+  that minimized addon rework: the `.bat` writes **per-phase** sentinels for
+  diagnostics PLUS **unphased aliases** (`<stem>.done` after the final pass,
+  `<stem>.crashed` whenever any phase crashes) so the existing poll/summary
+  consumers work without change beyond exact-match regexes that exclude the
+  phased variants. 267 tests pass.
+- **Increment 4 — UI/progress polish**: Job Log per-phase status (BAKING /
+  BAKED / RENDERING) and a phase dot per row; phase-aware time estimates.
+  Still TODO.
 
 ## Increment 3 design (proposed — review before building)
 - **.bat layout:** one sequential file, reordered into two passes —

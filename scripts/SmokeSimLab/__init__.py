@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 3, 5),
+    "version":     (0, 4, 0),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -72,8 +72,8 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.3.4"
-_EXPECTED_LAUNCHER_VERSION = "0.3.5"
+_EXPECTED_WORKER_VERSION   = "0.4.0"
+_EXPECTED_LAUNCHER_VERSION = "0.4.0"
 
 
 def _read_helper_version(path: str, var_name: str) -> str:
@@ -683,6 +683,22 @@ def _blend_domain_resolution(domain_obj):
     return 0
 
 
+# Sentinel filename matchers used by the poll + summary code.  Defined as exact
+# regexes (NOT endswith) so the two-pass pipeline's per-phase sentinels —
+# job_NNNN.bake.done / .render.done / .bake.crashed / .render.crashed — are NOT
+# counted as job completions or crashes (they're diagnostic-only; the .bat /
+# launcher also write the unphased aliases below so the existing poll/summary
+# logic keeps working unchanged).
+_DONE_RE         = re.compile(r"^job_\d{4}\.done$")
+_RETRY_DONE_RE   = re.compile(r"^job_\d{4}_retry\.done$")
+_CRASHED_RE      = re.compile(r"^job_\d{4}\.crashed$")
+# Phased completion markers — counted only by the overall-progress display so
+# the bar advances during the bake pass (before any unphased <stem>.done is
+# written).  Final job-complete trigger still uses _DONE_RE / _RETRY_DONE_RE.
+_BAKE_DONE_RE    = re.compile(r"^job_\d{4}\.bake\.done$")
+_RENDER_DONE_RE  = re.compile(r"^job_\d{4}\.render\.done$")
+
+
 def _find_next_job_index(jobs_dir):
     """Return the next available job index given a jobs directory.
 
@@ -734,48 +750,82 @@ def _existing_jobs_for_bat(jobs_dir, job_start_index):
 
 
 def _job_run_cmd(python_exe, dest_launcher, dest_worker, blender_exe,
-                 blend_file, job_path, render_mode, launcher_exists):
+                 blend_file, job_path, render_mode, launcher_exists,
+                 phase="both"):
     """Return the command line that runs a single job inside run_smoke_batch.bat.
 
     Prefers smoke_launcher.py (crash detection + logging); falls back to calling
     Blender directly when the launcher was not exported.  The launcher reads all
     job details from job_path, so the same command form works for both newly
     exported and previously exported (re-listed) jobs.
+
+    The `phase` arg drives the two-phase pipeline: ``"bake"`` forces background
+    even for EEVEE jobs (baking is engine-independent), ``"render"`` keeps the
+    visible window for EEVEE, and ``"both"`` (the default) preserves the
+    original single-pass invocation with no ``--phase`` argument.
     """
+    _phase_suffix = "" if phase == "both" else f' --phase {phase}'
     if launcher_exists:
-        return f'"{python_exe}" "{dest_launcher}" "{blender_exe}" "{job_path}"'
-    if render_mode == "EEVEE":
+        return f'"{python_exe}" "{dest_launcher}" "{blender_exe}" "{job_path}"{_phase_suffix}'
+    # Fallback (no launcher) — mirror the launcher's mode decision.
+    _windowed = (render_mode == "EEVEE" and phase != "bake")
+    if _windowed:
         return (
             f'"{blender_exe}" "{blend_file}" '
             f'--window-geometry 0 0 100 100 --factory-startup '
-            f'--python "{dest_worker}" -- "{job_path}"'
+            f'--python "{dest_worker}" -- "{job_path}"{_phase_suffix}'
         )
     return (
         f'"{blender_exe}" "{blend_file}" '
         f'--background --factory-startup '
-        f'--python "{dest_worker}" -- "{job_path}" 2>nul'
+        f'--python "{dest_worker}" -- "{job_path}"{_phase_suffix} 2>nul'
     )
 
 
-def _job_bat_block(job_num, total_jobs, name, run_cmd, done_path):
+def _job_bat_block(job_num, total_jobs, name, run_cmd, done_path,
+                   label="Job", alias_done_path=None):
     """Return the run_smoke_batch.bat lines for a single job.
 
     job_num is 1-based (what the echo shows the user).  The block runs the job,
-    then writes a .done sentinel recording success or the error exit code so the
-    addon's poll timer can mark the row COMPLETE / FAILED.
+    then writes a .done sentinel (`done_path`) recording success or the error
+    exit code so the addon's poll timer can mark the row COMPLETE / FAILED.
+
+    `label` is the echo header word (e.g. "Job", "Bake", "Render") — defaults to
+    "Job" so single-pass callers keep their existing output.  ERRORS counter
+    name is derived from the label so bake-pass and render-pass failures are
+    reported separately in the batch console summary.
+
+    `alias_done_path`, when given, receives a duplicate of the same sentinel
+    line.  Used by the two-pass pipeline to also write the legacy unphased
+    `<stem>.done` after the FINAL pass (render — or bake in bake-only mode), so
+    existing addon code that scans for `*.done` keeps working unchanged.
     """
-    return [
-        f"echo === Job {job_num}/{total_jobs}: {name} ===",
+    _counter = "ERRORS" if label == "Job" else f"{label.upper()}_ERRORS"
+    _err_line = f'    echo error exit !ERRORLEVEL! {name} %DATE% %TIME%>"{done_path}"'
+    _ok_line  = f'    echo done {name} %DATE% %TIME%>"{done_path}"'
+    block = [
+        f"echo === {label} {job_num}/{total_jobs}: {name} ===",
         run_cmd,
         "if errorlevel 1 (",
-        "    echo   WARNING: job exited with error",
-        "    set /a ERRORS+=1",
-        f'    echo error exit !ERRORLEVEL! {name} %DATE% %TIME%>"{done_path}"',
+        f"    echo   WARNING: {label.lower()} exited with error",
+        f"    set /a {_counter}+=1",
+        _err_line,
+    ]
+    if alias_done_path:
+        block.append(
+            f'    echo error exit !ERRORLEVEL! {name} %DATE% %TIME%>"{alias_done_path}"'
+        )
+    block += [
         ") else (",
-        f'    echo done {name} %DATE% %TIME%>"{done_path}"',
+        _ok_line,
+    ]
+    if alias_done_path:
+        block.append(f'    echo done {name} %DATE% %TIME%>"{alias_done_path}"')
+    block += [
         ")",
         "echo.",
     ]
+    return block
 
 
 def _batch_ready(output_path):
@@ -912,6 +962,9 @@ def export_batch(context):
         if is_append else
         f"SmokeSimLab batch - {len(jobs)} job(s)"
     )
+    # Two-phase pipeline: bake all jobs (headless), then render (per-engine mode).
+    # In bake-only mode (render_simulation_result=False) the render pass is omitted.
+    _bake_only = not s.render_simulation_result
     bat_lines = [
         "@echo off",
         # Switch to the bat file's own directory so cmd always has a valid cwd,
@@ -920,9 +973,11 @@ def export_batch(context):
         "setlocal enabledelayedexpansion",
         f"echo {_bat_header}",
         "echo.",
-        "set ERRORS=0",
-        "",
+        "set BAKE_ERRORS=0",
     ]
+    if not _bake_only:
+        bat_lines.append("set RENDER_ERRORS=0")
+    bat_lines.append("")
 
     _dbg = s.collect_debug_log
     _dedup_note = f"  (deduplicated {_dup_count} identical job(s))" if _dup_count else ""
@@ -946,26 +1001,13 @@ def export_batch(context):
         _log_row.status     = 'NOT_STARTED'
         _job_log_rows.append((i + 1, make_name(p)))
 
-    # ── Re-list previously exported jobs (APPEND mode, TODO-28) ──────────────
-    # The .bat is rewritten in "w" mode below; without re-listing the earlier
-    # jobs here they would be dropped from the launcher and Run Batch would skip
-    # them.  Re-listed jobs are cheap on a second run (SKIP BAKE / placeholders).
-    if is_append:
-        for _idx, _name, _rmode in _existing_jobs_for_bat(jobs_dir, job_start_index):
-            _jp = os.path.join(jobs_dir, f"job_{_idx:04d}.json")
-            _dp = os.path.join(jobs_dir, f"job_{_idx:04d}.done")
-            _cmd = _job_run_cmd(python_exe, dest_launcher, dest_worker,
-                                blender_exe, blend_file, _jp, _rmode,
-                                _launcher_exists)
-            bat_lines += _job_bat_block(_idx + 1, total_jobs, _name, _cmd, _dp)
-
-    # ── Write one JSON + one .bat entry per job ──────────────────────────────
+    # ── Write one JSON per new job (the two-pass .bat is emitted after the
+    #    full job set is known so existing append-mode jobs can be folded in) ──
     for i_offset, p in enumerate(jobs):
         i         = job_start_index + i_offset
         name      = make_name(p)
         job_path  = os.path.join(jobs_dir, f"job_{i:04d}.json")
-        log_path  = os.path.join(jobs_dir, f"job_{i:04d}.log")
-        done_path = os.path.join(jobs_dir, f"job_{i:04d}.done")
+        log_path  = os.path.join(jobs_dir, f"job_{i:04d}.log")  # unified across phases
 
         job_data = {
             "params":         p,
@@ -1004,18 +1046,50 @@ def export_batch(context):
             json.dump(job_data, fh, indent=2)
         _debug_log(_dbg, output_path, "addon", f"job {i} ({i_offset+1}/{len(jobs)}): {name}  params={p}")
 
-        # smoke_launcher.py wraps Blender, detects crash dialogs (WerFault),
-        # saves crash logs, and exits non-zero so the batch marks the job failed.
-        # Falls back to calling Blender directly if the launcher was not exported.
-        run_cmd = _job_run_cmd(python_exe, dest_launcher, dest_worker,
-                               blender_exe, blend_file, job_path,
-                               s.render_mode, _launcher_exists)
-        bat_lines += _job_bat_block(i + 1, total_jobs, name, run_cmd, done_path)
+    # ── Two-pass .bat: BAKE pass then RENDER pass ────────────────────────────
+    # Existing append-mode jobs are folded in first so a re-run sees the full
+    # batch in order.  Each pass uses phased sentinels (<stem>.bake.done /
+    # <stem>.render.done) so the two launcher calls per job don't clobber
+    # each other.  In bake-only mode the render pass is omitted entirely.
+    _all_jobs = []   # (idx, name, render_mode) for every job in this batch
+    if is_append:
+        _all_jobs.extend(_existing_jobs_for_bat(jobs_dir, job_start_index))
+    for i_offset, p in enumerate(jobs):
+        _all_jobs.append((job_start_index + i_offset, make_name(p), s.render_mode))
+
+    def _emit_pass(label, phase, suffix, is_final):
+        lines = [
+            "echo ================================",
+            f"echo {label.upper()} PASS ({total_jobs} job(s))",
+            "echo ================================",
+            "echo.",
+        ]
+        for _i, _n, _rm in _all_jobs:
+            _jp = os.path.join(jobs_dir, f"job_{_i:04d}.json")
+            _dp = os.path.join(jobs_dir, f"job_{_i:04d}.{suffix}.done")
+            # Final pass also writes the legacy unphased <stem>.done alias so
+            # the addon's existing poll/summary (which scans for *.done) marks
+            # the job complete without phase-aware changes.
+            _alias = os.path.join(jobs_dir, f"job_{_i:04d}.done") if is_final else None
+            _cmd = _job_run_cmd(python_exe, dest_launcher, dest_worker,
+                                blender_exe, blend_file, _jp, _rm,
+                                _launcher_exists, phase=phase)
+            lines += _job_bat_block(_i + 1, total_jobs, _n, _cmd, _dp,
+                                    label=label, alias_done_path=_alias)
+        return lines
+
+    # In bake-only mode the bake pass IS the final pass.
+    bat_lines += _emit_pass("Bake", "bake", "bake", is_final=_bake_only)
+    if not _bake_only:
+        bat_lines += _emit_pass("Render", "render", "render", is_final=True)
 
     # ── Write .bat footer ────────────────────────────────────────────────────
+    _summary = "Bake errors: %BAKE_ERRORS%"
+    if not _bake_only:
+        _summary += "  Render errors: %RENDER_ERRORS%"
     bat_lines += [
         "echo ================================",
-        "echo Batch complete.  Errors: %ERRORS%",
+        f"echo Batch complete.  {_summary}",
         f'echo Results: {os.path.join(output_path, "Renders", "results.csv")}',
         "echo ================================",
     ]
@@ -1914,8 +1988,11 @@ def _find_running_log(jobs_dir):
     except OSError:
         return None
 
-    done_stems       = {f[:-5]  for f in all_files if f.endswith(".done")}
-    retry_done_stems = {f[:-11] for f in all_files if f.endswith("_retry.done")}
+    # _DONE_RE / _RETRY_DONE_RE match only the unphased completion sentinels
+    # (the per-phase .bake.done / .render.done would over-fill these sets and
+    # break the alphabetical sequential-skip check).
+    done_stems       = {f[:-5]  for f in all_files if _DONE_RE.match(f)}
+    retry_done_stems = {f[:-11] for f in all_files if _RETRY_DONE_RE.match(f)}
 
     def _read_candidate(log_file, seq_stems, *, crashed_done=False):
         log_stem = log_file[:-4]
@@ -2157,10 +2234,13 @@ def _compute_batch_summary(jobs_dir, elapsed_secs):
         all_files = os.listdir(jobs_dir)
     except OSError:
         all_files = []
-    first_dones   = [f for f in all_files if f.endswith(".done")    and "_retry" not in f]
-    retry_dones   = [f for f in all_files if f.endswith("_retry.done")]
-    # Base stems that have a .crashed marker (first-run only; retries don't go through launcher)
-    crashed_bases = {f[:-8] for f in all_files if f.endswith(".crashed") and "_retry" not in f}
+    # Use exact regex matchers so the per-phase .bake.done / .render.done /
+    # .bake.crashed / .render.crashed diagnostic files (also present in two-pass
+    # mode) are NOT counted — only the unphased aliases that the .bat / launcher
+    # write are treated as authoritative completion / crash markers.
+    first_dones   = [f for f in all_files if _DONE_RE.match(f)]
+    retry_dones   = [f for f in all_files if _RETRY_DONE_RE.match(f)]
+    crashed_bases = {f[:-8] for f in all_files if _CRASHED_RE.match(f)}
 
     first_failed_stems = {f[:-5] for f in first_dones if _has_error(jobs_dir, f)}
     # Stems that eventually succeeded via retry
@@ -2359,7 +2439,12 @@ def _poll_batch_progress_impl():
             s.batch_progress = ""
             return None
 
-        done_files = [f for f in os.listdir(jobs_dir) if f.endswith(".done")]
+        # Count only the unphased completion markers (the .bat writes
+        # <stem>.done after the FINAL pass — render, or bake in bake-only mode).
+        # Phased .bake.done / .render.done are diagnostic only and must NOT be
+        # counted here or the poll would over-report completion.
+        done_files = [f for f in os.listdir(jobs_dir)
+                      if _DONE_RE.match(f) or _RETRY_DONE_RE.match(f)]
         done  = len(done_files)
         total = s.batch_total
 
@@ -2448,8 +2533,23 @@ def _poll_batch_progress_impl():
                 bpy.app.timers.register(_setup_results_deferred, first_interval=0.5)
             return None
 
-        s.batch_overall_factor = done / total
-        s.batch_progress       = f"{done} of {total} job(s) complete"
+        # Two-phase aware overall progress: count per-phase .bake.done /
+        # .render.done so the bar advances during the bake pass (before any
+        # unphased <stem>.done — written only after the FINAL pass — appears).
+        # Bake-only mode (no render pass in this batch) collapses to N phases.
+        _all_files     = os.listdir(jobs_dir)
+        _bake_done_n   = sum(1 for _f in _all_files if _BAKE_DONE_RE.match(_f))
+        _render_done_n = sum(1 for _f in _all_files if _RENDER_DONE_RE.match(_f))
+        _bake_only     = not s.render_simulation_result
+        if _bake_only:
+            s.batch_overall_factor = _bake_done_n / total if total else 0.0
+            s.batch_progress       = f"Bake {_bake_done_n}/{total}  ({done}/{total} done)"
+        else:
+            s.batch_overall_factor = (_bake_done_n + _render_done_n) / (2 * total) if total else 0.0
+            s.batch_progress       = (
+                f"Bake {_bake_done_n}/{total}  Render {_render_done_n}/{total}  "
+                f"({done}/{total} done)"
+            )
 
         running = _find_running_log(jobs_dir)
         if running:
@@ -2985,7 +3085,14 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         # Remove old log/done/sentinel files so the counter starts from zero.
         if os.path.isdir(jobs_dir):
             for f in os.listdir(jobs_dir):
-                if f.endswith(".log") or f.endswith(".done") or f.endswith(".worker_done"):
+                # Clear logs and ALL sentinel variants (legacy unphased + the
+                # two-pass phased forms: .bake.done / .render.done /
+                # .bake.worker_done / .render.worker_done / .bake.crashed /
+                # .render.crashed). The phased names all end with the same
+                # ".done"/".worker_done"/".crashed" suffixes, so the existing
+                # endswith() checks cover them — we just add .crashed.
+                if (f.endswith(".log") or f.endswith(".done")
+                        or f.endswith(".worker_done") or f.endswith(".crashed")):
                     try:
                         os.remove(os.path.join(jobs_dir, f))
                     except OSError:
@@ -3082,7 +3189,9 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
         failed = []
         seen_base_stems = set()
         for f in sorted(os.listdir(jobs_dir)):
-            if not f.endswith(".done"):
+            # Only the unphased completion markers count as job results — the
+            # phased .bake.done / .render.done are diagnostic.
+            if not (_DONE_RE.match(f) or _RETRY_DONE_RE.match(f)):
                 continue
             try:
                 with open(os.path.join(jobs_dir, f)) as fh:
@@ -3186,7 +3295,8 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
         # "All N complete" message while the retry jobs are running.
         total_jobs = len([f for f in os.listdir(jobs_dir)
                           if f.endswith(".json") and "_retry" not in f])
-        done_now   = len([f for f in os.listdir(jobs_dir) if f.endswith(".done")])
+        done_now   = len([f for f in os.listdir(jobs_dir)
+                          if _DONE_RE.match(f) or _RETRY_DONE_RE.match(f)])
 
         global _last_auto_index
         s.batch_summary_line1 = s.batch_summary_line2 = ""
@@ -3538,7 +3648,8 @@ class SMOKE_OT_monitor_existing_jobs(bpy.types.Operator):
         _last_auto_index      = 0
 
         all_files = set(os.listdir(jobs_dir))
-        done_now  = len([f for f in all_files if f.endswith(".done")])
+        done_now  = len([f for f in all_files
+                         if _DONE_RE.match(f) or _RETRY_DONE_RE.match(f)])
         total     = len(job_entries)
 
         s.batch_summary_line1 = s.batch_summary_line2 = ""

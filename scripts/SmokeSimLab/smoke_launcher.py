@@ -30,7 +30,7 @@ Behaviour
 No third-party dependencies — stdlib + tasklist.exe (built into Windows).
 """
 
-LAUNCHER_VERSION = "0.3.5"
+LAUNCHER_VERSION = "0.4.0"
 
 import atexit
 import ctypes
@@ -186,13 +186,26 @@ def _kill_pid(pid, label):
         print(f"[smoke_launcher] Warning: could not kill {label} PID {pid}: {exc}")
 
 
-def _write_crashed_marker(jobs_dir, job_stem):
-    marker = os.path.join(jobs_dir, job_stem + ".crashed")
-    try:
-        with open(marker, "w") as mf:
-            mf.write(f"crashed {datetime.datetime.now().isoformat()}\n")
-    except OSError:
-        pass
+def _write_crashed_marker(jobs_dir, job_stem, phase="both"):
+    """Write a `.crashed` timestamp marker for a failed launcher run.
+
+    In two-pass mode (phase != "both") this writes BOTH `<stem>.<phase>.crashed`
+    (for per-phase diagnostics) AND the unphased `<stem>.crashed` (alias) so
+    legacy poll/summary code that scans for `*.crashed` continues to flag the
+    job as crashed without phase-aware changes.  Single-pass keeps the bare
+    name as before.
+    """
+    _ts   = datetime.datetime.now().isoformat()
+    _body = f"crashed {_ts}\n"
+    _names = [job_stem + ".crashed"]
+    if phase != "both":
+        _names.append(job_stem + f".{phase}.crashed")
+    for _n in _names:
+        try:
+            with open(os.path.join(jobs_dir, _n), "w") as mf:
+                mf.write(_body)
+        except OSError:
+            pass
 
 
 def _blender_version(blender_exe):
@@ -436,7 +449,7 @@ def main():
             _save_crash_log(jobs_dir, job_stem, _launch_time, blender_exe)
             _kill_pid(blender_pid, "Blender (wall-clock)")
             proc.wait()
-            _write_crashed_marker(jobs_dir, job_stem)
+            _write_crashed_marker(jobs_dir, job_stem, phase)
             sys.exit(1)
 
         # ── Stale-log watchdog ───────────────────────────────────────────────
@@ -456,7 +469,7 @@ def main():
                     _save_crash_log(jobs_dir, job_stem, _launch_time, blender_exe)
                     _kill_pid(blender_pid, "Blender (startup timeout)")
                     proc.wait()
-                    _write_crashed_marker(jobs_dir, job_stem)
+                    _write_crashed_marker(jobs_dir, job_stem, phase)
                     sys.exit(1)
             else:
                 # Log exists — track inactivity.
@@ -473,7 +486,7 @@ def main():
                         _save_crash_log(jobs_dir, job_stem, _launch_time, blender_exe)
                         _kill_pid(blender_pid, "Blender (stale)")
                         proc.wait()
-                        _write_crashed_marker(jobs_dir, job_stem)
+                        _write_crashed_marker(jobs_dir, job_stem, phase)
                         sys.exit(1)
 
         # ── Belt-and-suspenders WerFault check ──────────────────────────────
@@ -484,7 +497,7 @@ def main():
             _kill_pid(wer_pid, "WerFault")
             _kill_pid(blender_pid, "Blender")
             proc.wait()
-            _write_crashed_marker(jobs_dir, job_stem)
+            _write_crashed_marker(jobs_dir, job_stem, phase)
             print(f"[smoke_launcher] Job {job_stem} CRASHED")
             sys.exit(1)
 
@@ -522,7 +535,7 @@ def main():
             time.sleep(1.0)
         _werfault_poll_secs = time.time() - _wer_poll_start
         _save_crash_log(jobs_dir, job_stem, _launch_time, blender_exe)
-        _write_crashed_marker(jobs_dir, job_stem)
+        _write_crashed_marker(jobs_dir, job_stem, phase)
         _dlog(f"exit: CRASHED  exit_code={exit_code}  "
               f"time_to_exit={_time_to_exit:.1f}s  "
               f"werfault_poll_secs={_werfault_poll_secs:.1f}s")
@@ -534,7 +547,10 @@ def main():
     # A missing sentinel means the worker never reached the end of its script —
     # the job is a silent failure (Python exception swallowed by Blender, or a
     # crash that somehow produced exit code 0).
-    worker_done = os.path.join(jobs_dir, job_stem + ".worker_done")
+    # Phased sentinel in the two-pass pipeline so the bake-phase worker_done
+    # isn't checked when we're actually in the render phase (and vice versa).
+    _wd_suffix = "" if phase == "both" else f".{phase}"
+    worker_done = os.path.join(jobs_dir, job_stem + _wd_suffix + ".worker_done")
     if not os.path.exists(worker_done):
         # Check stderr for a Python traceback to give a more informative reason.
         _crash_reason = "worker_done sentinel missing"
@@ -549,7 +565,7 @@ def main():
             except OSError:
                 pass
         _save_crash_log(jobs_dir, job_stem, _launch_time, blender_exe)
-        _write_crashed_marker(jobs_dir, job_stem)
+        _write_crashed_marker(jobs_dir, job_stem, phase)
         _dlog(f"exit: CRASHED (exit_code=0)  reason={_crash_reason}")
         print(f"[smoke_launcher] Job {job_stem} CRASHED (exit 0 — {_crash_reason})")
         sys.exit(1)

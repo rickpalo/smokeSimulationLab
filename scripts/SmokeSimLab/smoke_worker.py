@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.3.4"
+WORKER_VERSION = "0.4.0"
 
 import bpy
 import sys
@@ -293,7 +293,10 @@ with open(job_path) as fh:
 
 _log_path = cfg.get("log_path")
 if _log_path:
-    _log_file = open(_log_path, "w", buffering=1)
+    # Append mode so the bake-phase + render-phase processes share one log per
+    # job in the two-pass pipeline (run_batch clears old .log files at run-start,
+    # so the file is empty when bake phase opens it).
+    _log_file = open(_log_path, "a", buffering=1)
 
 p           = cfg["params"]
 name        = cfg["name"]
@@ -814,10 +817,13 @@ _log(f"[{name}] Text objects updated (post-bake).")
 if not do_render:
     _log(f"[{name}] phase=bake complete — skipping render and CSV.")
     _close_log()
-    _bake_jobs_dir = os.path.dirname(job_path)
-    _bake_job_stem = os.path.splitext(os.path.basename(job_path))[0]
+    _bake_jobs_dir  = os.path.dirname(job_path)
+    _bake_job_stem  = os.path.splitext(os.path.basename(job_path))[0]
+    # Phased worker_done so the bake-phase sentinel doesn't collide with the
+    # render-phase one (the launcher reads <stem>.<phase>.worker_done).
+    _bake_sentinel  = _bake_job_stem + ".bake.worker_done"
     try:
-        with open(os.path.join(_bake_jobs_dir, _bake_job_stem + ".worker_done"), "w") as _wdf:
+        with open(os.path.join(_bake_jobs_dir, _bake_sentinel), "w") as _wdf:
             _wdf.write(datetime.datetime.now().isoformat() + "\n")
     except OSError:
         pass
@@ -1040,8 +1046,12 @@ _close_log()
 # The launcher treats a missing sentinel as a crash even when Blender exits 0.
 _jobs_dir  = os.path.dirname(job_path)
 _job_stem  = os.path.splitext(os.path.basename(job_path))[0]
+# Phased sentinel name so the bake-phase and render-phase processes don't clobber
+# each other's worker_done.  Single-pass ("both") keeps the original bare name
+# so legacy launchers / poll code that pre-date the two-pass pipeline still see it.
+_phase_suffix = "" if phase == "both" else f".{phase}"
 try:
-    with open(os.path.join(_jobs_dir, _job_stem + ".worker_done"), "w") as _wdf:
+    with open(os.path.join(_jobs_dir, _job_stem + _phase_suffix + ".worker_done"), "w") as _wdf:
         _wdf.write(datetime.datetime.now().isoformat() + "\n")
 except OSError:
     pass
