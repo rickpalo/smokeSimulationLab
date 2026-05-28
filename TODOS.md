@@ -4,6 +4,44 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
+## TODO-32: Final still re-renders frame_end with identical settings — just copy it
+
+**Filed 2026-05-28.** The worker renders the PNG sequence (`frame_0001 …
+frame_<frame_end>.png` into `Renders/<name>_frames/`), then renders the LAST
+frame AGAIN as the standalone `Renders/<name>.png` (used by Setup Results
+Viewer).  Both renders use the same `render_mode` + `render_samples` + scene
+state, so they produce a pixel-identical image — the second render is purely
+file-placement.  Saves ~5 s/job at EEVEE 1440×1080; more at higher res / Cycles.
+
+**Proposed fix:** in the "Final still" block of `smoke_worker.py`, replace the
+second `bpy.ops.render.render(write_still=True)` with
+`shutil.copy2(<frames_dir>/frame_<frame_end>.png, <name>.png)`.
+
+**Edge cases to handle:**
+- **Missing source frame** — if `<frames_dir>/frame_<frame_end>.png` doesn't
+  exist (animation render was skipped because all frames already existed but
+  somehow `<name>.png` doesn't, or `frame_<frame_end>.png` was placeholder-
+  skipped without being baked), fall back to the existing render-still path.
+- **Placeholder/rebake mismatch** — if `use_placeholders` skipped re-rendering
+  `frame_<frame_end>.png` but the bake actually recomputed that frame, the
+  copy would be stale.  Either re-render in that case, or invalidate the
+  placeholder for `frame_end` whenever `frame_end in rebaked_frames`.
+- **Bake-only mode** — already handled (final-still block runs only when
+  `render_simulation_result` is True).
+- **Perf accounting** — `render_seconds` currently includes the final-still
+  render time.  After the change, it would include only the animation render;
+  decide whether `render_secs_per_frame` should be unchanged (it's already
+  computed over `frames_actually_rendered`, which excludes the duplicate) or
+  whether to add a separate `still_seconds` field (probably skip — they were
+  always the same render).
+- **CSV column for the still** — currently none; no change needed.
+
+**Files:** `scripts/SmokeSimLab/smoke_worker.py` — "Final still — last frame
+only" block.  **Tests:** unit-test a small helper that picks copy-or-render
+based on source-frame existence + `rebaked_frames` membership.
+
+---
+
 ## TODO-31: RESUME progress bar should start at "(already-baked + 1) of total"
 
 **Filed 2026-05-27.** On a resume with e.g. 100/500 frames already baked, the
