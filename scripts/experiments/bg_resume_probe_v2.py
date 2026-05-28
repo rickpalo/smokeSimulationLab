@@ -1,4 +1,4 @@
-"""
+r"""
 bg_resume_probe_v2.py — test the "save tmp .blend with cache_directory pointing
 at a populated dir, then reload" resume approach (user's 4-step proposal, see
 TODO-35 in TODOS.md and BUG-010 in BUG_TRACKER.md).
