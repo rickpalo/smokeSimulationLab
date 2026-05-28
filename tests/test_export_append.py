@@ -168,11 +168,13 @@ class TestJobBatBlock:
                                r"C:\out\jobs\job_0002.done")
         assert block[0] == "echo === Job 3/10: R128 ==="
         assert block[1] == '"run" "cmd"'
-        # error branch increments ERRORS and writes an error .done sentinel
+        # Error branch increments ERRORS and seeds the sentinel line variable.
         assert any("set /a ERRORS+=1" in ln for ln in block)
-        assert any('echo error exit' in ln and "job_0002.done" in ln for ln in block)
-        # success branch writes a plain done sentinel
-        assert any(ln.strip().startswith("echo done R128") for ln in block)
+        assert any('_SSL_DONE_LINE=error exit' in ln for ln in block)
+        # Success branch seeds a "done" sentinel line.
+        assert any('_SSL_DONE_LINE=done R128' in ln for ln in block)
+        # File write happens OUTSIDE the if/else block, single redirect.
+        assert any(ln == 'echo !_SSL_DONE_LINE!>"C:\\out\\jobs\\job_0002.done"' for ln in block)
 
     def test_label_drives_header_and_counter(self):
         # Bake-phase blocks: header "Bake i/N", counter BAKE_ERRORS.
@@ -218,23 +220,34 @@ class TestJobRunCmdPhase:
 class TestJobBatBlockAlias:
     """alias_done_path is the two-pass pipeline's mechanism for letting the
     legacy `<stem>.done` poll/summary code see a job as complete after the
-    FINAL pass (render, or bake in bake-only mode)."""
+    FINAL pass (render, or bake in bake-only mode).  The block uses a single
+    redirect per file at the top scope (outside the if/else) so two adjacent
+    redirects nested in a parenthesised block can't drop one — a failure mode
+    observed in v0.4.0Test where the alias was silently missing."""
+
     def test_alias_omitted_by_default(self):
         block = _job_bat_block(1, 1, "n", '"c"', r"a.bake.done", label="Bake")
-        assert not any("a.bake.done" not in ln and ".done" in ln for ln in block
-                       if ln.strip().startswith(("echo error", "echo done")))
+        # Only one file write (the phased path); no alias line.
+        writes = [ln for ln in block if ln.startswith("echo !_SSL_DONE_LINE!")]
+        assert len(writes) == 1
+        assert "a.bake.done" in writes[0]
 
-    def test_alias_writes_both_paths_in_both_branches(self):
+    def test_alias_writes_phased_and_alias_paths(self):
         block = _job_bat_block(1, 1, "R64", '"c"', r"jobs/job_0000.render.done",
                                label="Render", alias_done_path=r"jobs/job_0000.done")
-        err_lines = [ln for ln in block if "echo error exit" in ln]
-        ok_lines  = [ln for ln in block if "echo done" in ln and "WARNING" not in ln]
-        assert len(err_lines) == 2  # one phased, one alias
-        assert len(ok_lines)  == 2
-        assert any("job_0000.render.done" in ln for ln in err_lines)
-        assert any("job_0000.done" in ln and ".render.done" not in ln for ln in err_lines)
-        assert any("job_0000.render.done" in ln for ln in ok_lines)
-        assert any("job_0000.done" in ln and ".render.done" not in ln for ln in ok_lines)
+        writes = [ln for ln in block if ln.startswith("echo !_SSL_DONE_LINE!")]
+        assert len(writes) == 2
+        assert any("jobs/job_0000.render.done" in ln for ln in writes)
+        assert any("jobs/job_0000.done" in ln and ".render.done" not in ln for ln in writes)
+
+    def test_writes_are_outside_if_block(self):
+        # The echo+redirect lines must NOT be indented under the if/else block —
+        # that was the failure pattern (two redirects in a parenthesised block).
+        block = _job_bat_block(1, 1, "R64", '"c"', r"a.render.done",
+                               label="Render", alias_done_path=r"a.done")
+        for ln in block:
+            if ln.startswith("echo !_SSL_DONE_LINE!"):
+                assert not ln.startswith("    "), f"file-write must be top-level, got: {ln!r}"
 
 
 class TestPhasedSentinelRegexes:

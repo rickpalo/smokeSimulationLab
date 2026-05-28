@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 4, 1),
+    "version":     (0, 4, 2),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -72,7 +72,7 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.4.0"
+_EXPECTED_WORKER_VERSION   = "0.4.2"
 _EXPECTED_LAUNCHER_VERSION = "0.4.0"
 
 
@@ -801,30 +801,28 @@ def _job_bat_block(job_num, total_jobs, name, run_cmd, done_path,
     existing addon code that scans for `*.done` keeps working unchanged.
     """
     _counter = "ERRORS" if label == "Job" else f"{label.upper()}_ERRORS"
-    _err_line = f'    echo error exit !ERRORLEVEL! {name} %DATE% %TIME%>"{done_path}"'
-    _ok_line  = f'    echo done {name} %DATE% %TIME%>"{done_path}"'
+    # Compute the sentinel line INSIDE the if/else, then write the file(s)
+    # OUTSIDE the block with a single redirect each.  Multiple "echo … > path"
+    # redirects nested in a parenthesised `if/else` block have produced
+    # silently-missing files on at least one Windows configuration (v0.4.0Test
+    # 2026-05-28: the `.render.done` was written but the unphased alias `.done`
+    # was not).  This pattern uses one redirect per line at the top scope and
+    # has no double-redirect-in-block risk.
     block = [
         f"echo === {label} {job_num}/{total_jobs}: {name} ===",
         run_cmd,
         "if errorlevel 1 (",
         f"    echo   WARNING: {label.lower()} exited with error",
         f"    set /a {_counter}+=1",
-        _err_line,
-    ]
-    if alias_done_path:
-        block.append(
-            f'    echo error exit !ERRORLEVEL! {name} %DATE% %TIME%>"{alias_done_path}"'
-        )
-    block += [
+        f'    set "_SSL_DONE_LINE=error exit !ERRORLEVEL! {name} %DATE% %TIME%"',
         ") else (",
-        _ok_line,
+        f'    set "_SSL_DONE_LINE=done {name} %DATE% %TIME%"',
+        ")",
+        f'echo !_SSL_DONE_LINE!>"{done_path}"',
     ]
     if alias_done_path:
-        block.append(f'    echo done {name} %DATE% %TIME%>"{alias_done_path}"')
-    block += [
-        ")",
-        "echo.",
-    ]
+        block.append(f'echo !_SSL_DONE_LINE!>"{alias_done_path}"')
+    block.append("echo.")
     return block
 
 
@@ -1151,6 +1149,7 @@ class SmokeJobItem(bpy.types.PropertyGroup):
         items=[
             ('NOT_STARTED', "Not Started", ""),
             ('IN_PROGRESS', "In Progress",  ""),
+            ('BAKED',       "Baked (awaiting render)", ""),
             ('RETRYING',    "Retrying",     ""),
             ('COMPLETE',    "Complete",     ""),
             ('FAILED',      "Failed",       ""),
@@ -1169,6 +1168,7 @@ class SMOKE_UL_job_log(bpy.types.UIList):
     _STATUS_ICONS = {
         'NOT_STARTED': 'RADIOBUT_OFF',
         'IN_PROGRESS': 'PLAY',
+        'BAKED':       'CHECKBOX_HLT',   # bake done, render pending (two-phase)
         'RETRYING':    'FILE_REFRESH',
         'COMPLETE':    'CHECKMARK',
         'FAILED':      'CANCEL',
@@ -1180,6 +1180,7 @@ class SMOKE_UL_job_log(bpy.types.UIList):
     _STATUS_PREFIX = {
         'NOT_STARTED': '',
         'IN_PROGRESS': '▶ ',   # ▶
+        'BAKED':       '◐ ',   # ◐  bake done, awaiting render pass
         'RETRYING':    '↻ ',   # ↻
         'COMPLETE':    '✓ ',   # ✓
         'FAILED':      '✗ ',   # ✗
@@ -2181,19 +2182,35 @@ def _update_job_log_statuses(s, jobs_dir):
     except OSError:
         return
 
+    # Two-pass pipeline: only ONE job's log is being written at any moment (the
+    # .bat runs jobs sequentially within each pass).  Use _find_running_log to
+    # pinpoint THAT job so all other in-flight jobs can be marked BAKED rather
+    # than IN_PROGRESS (the v0.4.0Test bug was every job's <stem>.log existing
+    # during the bake pass, so all jobs read as IN_PROGRESS at once).
+    _running = _find_running_log(jobs_dir)
+    _active_n = None
+    if _running:
+        _m = re.match(r"^job_(\d{4})(?:_retry)?\.log$", _running[0])
+        if _m:
+            _active_n = _m.group(1)
+
     active_index = -1
     for idx in range(len(s.job_log_items)):
         if idx >= len(_job_log_rows):
             break
         # Read job_number from module-level state, not from RNA (item.job_number
         # can return 0 when Blender re-evaluates SmokeSettings mid-timer-write).
-        job_number    = _job_log_rows[idx][0]
-        n             = f"{job_number - 1:04d}"   # job_number is 1-based; filenames are 0-based
-        retry_done    = f"job_{n}_retry.done"
-        first_done    = f"job_{n}.done"
-        retry_log     = f"job_{n}_retry.log"
-        first_log     = f"job_{n}.log"
-        first_crashed = f"job_{n}.crashed"
+        job_number       = _job_log_rows[idx][0]
+        n                = f"{job_number - 1:04d}"   # job_number is 1-based; filenames are 0-based
+        retry_done       = f"job_{n}_retry.done"
+        first_done       = f"job_{n}.done"
+        retry_log        = f"job_{n}_retry.log"
+        first_log        = f"job_{n}.log"
+        first_crashed    = f"job_{n}.crashed"
+        bake_done_f      = f"job_{n}.bake.done"
+        render_done_f    = f"job_{n}.render.done"
+        bake_crashed_f   = f"job_{n}.bake.crashed"
+        render_crashed_f = f"job_{n}.render.crashed"
 
         if retry_done in all_files:
             # Retry completed — it supersedes any first-run crash.
@@ -2203,16 +2220,33 @@ def _update_job_log_statuses(s, jobs_dir):
             if active_index < 0:
                 active_index = idx
         elif first_done in all_files:
-            # First run finished. Distinguish crash (unexpected exit) from
-            # controlled failure (worker called sys.exit(1)).
+            # Final pass (render — or bake in bake-only mode) completed and wrote
+            # the unphased <stem>.done alias.
             if first_crashed in all_files and _has_error(jobs_dir, first_done):
                 _job_statuses[job_number] = 'CRASHED'
             else:
                 _job_statuses[job_number] = 'FAILED' if _has_error(jobs_dir, first_done) else 'COMPLETE'
-        elif first_crashed in all_files:
-            # Launcher wrote .crashed but batch never wrote .done (rare — launcher itself crashed).
+        elif render_done_f in all_files:
+            # Render-phase sentinel present but the unphased alias is missing
+            # (defensive — should be rare with the v0.4.1+ bat-block fix).
+            if render_crashed_f in all_files and _has_error(jobs_dir, render_done_f):
+                _job_statuses[job_number] = 'CRASHED'
+            else:
+                _job_statuses[job_number] = 'FAILED' if _has_error(jobs_dir, render_done_f) else 'COMPLETE'
+        elif first_crashed in all_files or render_crashed_f in all_files or bake_crashed_f in all_files:
+            # Any phase crashed (launcher wrote the .crashed marker).
             _job_statuses[job_number] = 'CRASHED'
+        elif n == _active_n:
+            # This is the one job whose log is being actively touched right now.
+            _job_statuses[job_number] = 'IN_PROGRESS'
+            if active_index < 0:
+                active_index = idx
+        elif bake_done_f in all_files:
+            # Bake done, render phase hasn't started for this job yet → waiting.
+            _job_statuses[job_number] = 'BAKED'
         elif first_log in all_files:
+            # Log file exists but this job isn't the running one and has no
+            # bake.done yet — fall back to IN_PROGRESS (queued / stale state).
             _job_statuses[job_number] = 'IN_PROGRESS'
             if active_index < 0:
                 active_index = idx

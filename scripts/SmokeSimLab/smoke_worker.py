@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.4.0"
+WORKER_VERSION = "0.4.2"
 
 import bpy
 import sys
@@ -544,7 +544,13 @@ _paths_differ = (_norm_cur != _norm_eff)
 _presave_dir    = effective_cache_dir + "_presave"
 _presave_active = False
 
-if _paths_differ and use_existing_cache:
+# Presave the existing cache when re-using it (use_existing_cache) OR when this
+# is the render phase of the two-pass pipeline (do_bake is False — the cache was
+# just baked in the bake-phase process and must NOT be wiped by Mantaflow's
+# reinitialisation on cache_directory reassignment).  Without the render-phase
+# guard, a use_existing_cache=False render-phase invocation wipes the bake-phase
+# cache and renders empty smoke (observed in v0.4.0Test 2026-05-28).
+if _paths_differ and (use_existing_cache or not do_bake):
     _existing_count = (
         _count_data_files(effective_cache_dir)
         if os.path.isdir(effective_cache_dir) else 0
