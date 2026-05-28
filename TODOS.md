@@ -4,7 +4,16 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
-## TODO-32: Final still re-renders frame_end with identical settings — just copy it
+## TODO-32: Final still re-renders frame_end with identical settings — just copy it — **DONE** (v0.4.4)
+
+**Resolution (v0.4.4):** worker's "Final still" block now `shutil.copy2`'s
+`<name>_frames/frame_<frame_end>.png` → `<name>.png` when `frame_end` was in
+`frames_to_render` this run AND the source file is present.  Falls back to the
+original render path on copy failure OR when the frame was placeholder-skipped
+(source file might be stale from a prior run with different settings).  Tests:
+`tests/test_run_batch_gating.py::TestWorkerFinalStillCopy`.
+
+
 
 **Filed 2026-05-28.** The worker renders the PNG sequence (`frame_0001 …
 frame_<frame_end>.png` into `Renders/<name>_frames/`), then renders the LAST

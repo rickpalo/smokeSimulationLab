@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.4.2"
+WORKER_VERSION = "0.4.4"
 
 import bpy
 import sys
@@ -936,26 +936,45 @@ else:
         _log(f"[{name}] FFmpeg not found on system PATH. PNG frames saved to {png_sequence_dir}")
 
     # ---- Final still — last frame only ----
-    png = os.path.join(render_dir, name + ".png")
+    # TODO-32 (v0.4.4): if the animation sequence already rendered frame_end
+    # THIS RUN with identical settings, copy it instead of re-rendering — the
+    # second render produced a pixel-identical image and wasted a full frame's
+    # time per job (~5 s at EEVEE 1440x1080).  Falls back to the original
+    # render path if the source frame is absent or stale (use_placeholders
+    # skipped frame_end and it wasn't rebaked, so the file on disk is from a
+    # prior run with potentially different settings).
+    png       = os.path.join(render_dir, name + ".png")
+    _src_png  = os.path.join(effective_frames_dir, f"frame_{frame_end:04d}.png")
+    _can_copy = (frame_end in frames_to_render) and os.path.isfile(_src_png)
 
-    if render_mode == "EEVEE":
-        # EEVEE — only works in windowed mode (no --background)
-        if not setup_eevee(scene):
+    if _can_copy:
+        try:
+            shutil.copy2(_src_png, png)
+            _log(f"[{name}] Final still: copied from frame_{frame_end:04d}.png "
+                 f"(skipped duplicate render).")
+        except OSError as _e:
+            _log(f"[{name}] WARNING: final-still copy failed ({_e}) — re-rendering")
+            _can_copy = False
+
+    if not _can_copy:
+        if render_mode == "EEVEE":
+            # EEVEE — only works in windowed mode (no --background)
+            if not setup_eevee(scene):
+                setup_cycles(scene, samples=render_samples)
+        else:
+            # Cycles GPU — default, works in background mode
             setup_cycles(scene, samples=render_samples)
-    else:
-        # Cycles GPU — default, works in background mode
-        setup_cycles(scene, samples=render_samples)
 
-    # Must reset to PNG after FFMPEG playblast
-    scene.render.image_settings.file_format = 'PNG'
+        # Must reset to PNG after FFMPEG playblast
+        scene.render.image_settings.file_format = 'PNG'
 
-    scene.frame_set(frame_end)
-    scene.render.filepath = png
-    _log(f"[{name}] Rendering final frame ({scene.render.engine}) -> {png}")
-    _render_result = bpy.ops.render.render(write_still=True)
-    if 'FINISHED' not in _render_result:
-        _log(f"[{name}] ERROR: Still render did not finish (result: {_render_result})")
-        sys.exit(1)
+        scene.frame_set(frame_end)
+        scene.render.filepath = png
+        _log(f"[{name}] Rendering final frame ({scene.render.engine}) -> {png}")
+        _render_result = bpy.ops.render.render(write_still=True)
+        if 'FINISHED' not in _render_result:
+            _log(f"[{name}] ERROR: Still render did not finish (result: {_render_result})")
+            sys.exit(1)
     _log(f"[{name}] PNG render complete. File exists: {os.path.exists(png)}")
 
 # ---------------------------------------------------------------------------

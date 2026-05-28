@@ -151,3 +151,31 @@ class TestWorkerPhaseSplit:
         src = self._src()
         assert "if not do_render:" in src
         assert "phase=bake complete — skipping render and CSV." in src
+
+
+class TestWorkerFinalStillCopy:
+    """TODO-32: when the animation sequence already rendered frame_end this run
+    with identical settings, the final still should be a shutil.copy2 from the
+    sequence rather than a duplicate render."""
+    def _src(self):
+        path = os.path.join(os.path.dirname(__file__), "..",
+                            "scripts", "SmokeSimLab", "smoke_worker.py")
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_copy_gated_on_frame_rendered_this_run_and_file_present(self):
+        # Only copy when frame_end was in this run's frames_to_render AND the
+        # source PNG exists — guards against placeholder-skipped stale frames.
+        src = self._src()
+        assert "_can_copy = (frame_end in frames_to_render) and os.path.isfile(_src_png)" in src
+
+    def test_copy_uses_shutil_copy2(self):
+        # copy2 preserves the mtime; preserves the "this is fresh" signal.
+        assert "shutil.copy2(_src_png, png)" in self._src()
+
+    def test_falls_back_to_render_on_copy_failure(self):
+        src = self._src()
+        # The fallback is the original render path, gated by `if not _can_copy:`.
+        assert "if not _can_copy:" in src
+        # And copy failures explicitly clear the flag so the render fires.
+        assert "_can_copy = False" in src
