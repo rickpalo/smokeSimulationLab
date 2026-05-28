@@ -14,23 +14,46 @@ BUG-010 and memory `background-bake-plan`).
   (v0.3.3 = last single-pass version) is the fallback if the new flow misbehaves.
 
 ## BUILD PLAN (incremental; each increment keeps the tree working)
-- **Increment 1 — worker `--phase {bake,render,both}`** (default `both` = exact
-  current behavior). Refactor: shared setup (domain, params, cache_frame range,
-  density, text, cache-search + presave/point) → bake (if phase in bake/both) →
-  render+csv (if phase in render/both) → perf (per phase) → sentinels. With
-  export still single-pass (no --phase passed), `both` runs identically to today.
-  SAFE: current flow untouched until increment 3.
-- **Increment 2 — launcher `--phase`**: pass `--phase` through to the worker;
-  force `--background` for the bake phase regardless of render_mode; keep
-  windowed-for-EEVEE only for the render phase. Not called by export yet → SAFE.
-- **Increment 3 — export_batch two-pass .bat** (FLIPS the flow): emit a BAKE
-  pass (all jobs, `--phase=bake`, background) then a RENDER pass (all jobs,
-  `--phase=render`, per-engine mode). Rework `.done`/`.worker_done`/`.crashed`
-  sentinels to be per-phase, and the addon poll/progress/summary to understand
-  two phases. RISKY increment — most of the addon's per-job-does-everything
-  assumptions live here (`_find_running_log`, progress bars, `_compute_batch_summary`).
-- **Increment 4 — UI/progress polish**: two-phase progress ("Baking job X/N",
-  then "Rendering job X/N"); Job Log phase indicator.
+- **Increment 1 — worker `--phase {bake,render,both}`** — **DONE v0.3.4.**
+  Default `both` = exact current behavior; render phase forces SKIP-bake; bake
+  phase exits before render. Dormant (export passes no `--phase`).
+- **Increment 2 — launcher `--phase`** — **DONE v0.3.5.** Forces `--background`
+  for the bake phase; passes `--phase` through; windowed only for EEVEE render.
+  Dormant.
+- **Increment 3 — export_batch two-pass .bat (FLIPS the flow)** — **NEXT, risky.**
+  Design below. Most of the addon's "one process per job does everything"
+  assumptions live here (`_find_running_log`, progress bars,
+  `_compute_batch_summary`, poll timer) — do it deliberately, not rushed.
+- **Increment 4 — UI/progress polish**: two-phase progress + Job Log phase dot.
+
+## Increment 3 design (proposed — review before building)
+- **.bat layout:** one sequential file, reordered into two passes —
+  `echo === BAKE PASS ===` then all jobs `--phase bake`, then
+  `echo === RENDER PASS ===` then all jobs `--phase render`. (2N launcher calls
+  for N jobs.) Reuse `_job_run_cmd`/`_job_bat_block` with a `phase` arg.
+- **Per-phase sentinels (avoid the two passes clobbering each other):**
+  `job_NNNN.bake.done` / `job_NNNN.render.done`; worker writes
+  `job_NNNN.bake.worker_done` / `.render.worker_done`; launcher writes
+  `job_NNNN.bake.crashed` / `.render.crashed`. Job is COMPLETE only after
+  `render.done` == success. (Today's single `.done`/`.worker_done` get a phase
+  segment; update every producer/consumer.)
+- **Per-phase logs:** `job_NNNN.bake.log` / `job_NNNN.render.log` (worker opens
+  log_path "w" — without per-phase names the render pass would overwrite the
+  bake log). `log_path` is set by export; make it phase-aware or have the worker
+  derive `<stem>.<phase>.log`.
+- **Poll / progress (the hard part):** the poll observes ALL bakes, then ALL
+  renders. Overall bar: "Baking job X/N" during pass 1, "Rendering job X/N"
+  during pass 2. Job Log row status gains phase: NOT_STARTED → BAKING → BAKED →
+  RENDERING → COMPLETE (or two booleans baked/rendered). `_find_running_log`
+  must pick the active phase's log; the bake/render frame-progress sub-bars key
+  off the right per-phase log.
+- **Crash + auto-retry:** crash detection is per phase; a bake crash skips/fails
+  that job's render; auto-retry (now 3 rounds) retries the failed phase.
+- **bake-only mode (render_simulation_result=False):** emit only the BAKE pass;
+  no render pass.
+- **Risk mitigation:** git v0.3.5 is the last single-pass build (the chosen
+  "replace" fallback). Land increment 3 behind a focused test of the .bat
+  generation + a real low-res 2-job batch run before trusting a 512 batch.
 
 ## Open implementation notes
 - Render phase must still point `d.cache_directory` at the job cache to load the
