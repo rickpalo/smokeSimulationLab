@@ -311,10 +311,11 @@ class TestRenderPhaseFastFail:
         assert "_r34_incomplete = (_r34_existing < _r34_expected)" in src
 
     def test_wipes_cache_to_force_full_rebake(self):
+        import re
         src = self._src()
         # shutil.rmtree on the cache dir forces auto-retry's FULL bake path
-        # (use_existing_cache + empty dir → FULL).
-        assert "shutil.rmtree(cache_dir)" in src
-        # Then exit with non-zero so the .bat / addon counts the job failed
-        # and auto-retry triggers.
-        assert "sys.exit(1)" in src.split("TODO-34")[1].split("---")[0]
+        # (use_existing_cache + empty dir → FULL).  Followed by sys.exit(1) so
+        # the .bat / addon count the job as failed and auto-retry triggers.
+        # DOTALL: rmtree and sys.exit are on separate lines.
+        assert re.search(r"shutil\.rmtree\(cache_dir\).*sys\.exit\(1\)",
+                         src, re.DOTALL)
