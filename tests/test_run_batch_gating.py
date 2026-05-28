@@ -207,3 +207,74 @@ class TestRenderAnimationGate:
         import SmokeSimLab as ssl
         src = inspect.getsource(ssl.export_batch)
         assert '"render_animation":         s.render_animation' in src
+
+
+# ── Increment 4: per-phase status (RENDERING vs IN_PROGRESS) ─────────────────
+
+class TestJobLogPhaseAwareStatus:
+    """Active job is BAKING (IN_PROGRESS) before .bake.done exists, and
+    RENDERING after it does — so the user sees the phase the job is in."""
+
+    def _setup(self, tmp_path, files_by_job):
+        """Build a jobs dir, populate _job_log_rows for N jobs, return a stub
+        SmokeSettings that _update_job_log_statuses will accept."""
+        import time as _t
+        import types as _types
+        import SmokeSimLab as ssl
+
+        jobs = tmp_path / "jobs"
+        jobs.mkdir()
+        # Write each requested file with a controllable mtime so the
+        # most-recently-touched .log can drive the active-job selection.
+        now = _t.time()
+        for delta, (filename, body) in files_by_job:
+            p = jobs / filename
+            p.write_text(body)
+            mt = now + delta
+            import os as _os
+            _os.utime(p, (mt, mt))
+
+        # Reset module-level state then seed for as many jobs as we mention.
+        ssl._job_log_rows.clear()
+        n_jobs = max(int(f.split("_")[1][:4]) for _, (f, _b) in files_by_job) + 1
+        for i in range(n_jobs):
+            ssl._job_log_rows.append((i + 1, f"job_{i:04d}"))
+        ssl._job_statuses.clear()
+
+        s = _types.SimpleNamespace(
+            job_log_items=[None] * n_jobs,
+            job_log_auto_scroll=False,
+            job_log_index=0,
+        )
+        return ssl, s, jobs
+
+    def test_active_with_bake_done_is_RENDERING(self, tmp_path):
+        # Job 0 actively rendering (newest .log mtime, bake.done present).
+        # Job 1 baked but render hasn't reached it yet.
+        ssl, s, jobs = self._setup(tmp_path, [
+            ( 0, ("job_0000.log",       "Rendering animation (20 frames)\n")),
+            (-1, ("job_0000.bake.done", "done")),
+            (-30, ("job_0001.log",      "phase=bake complete\n")),
+            (-31, ("job_0001.bake.done","done")),
+        ])
+        ssl._update_job_log_statuses(s, str(jobs))
+        assert ssl._job_statuses[1] == 'RENDERING'
+        assert ssl._job_statuses[2] == 'BAKED'
+
+    def test_active_without_bake_done_is_IN_PROGRESS(self, tmp_path):
+        # Bake phase: active job has NO bake.done yet → baking → IN_PROGRESS.
+        ssl, s, jobs = self._setup(tmp_path, [
+            ( 0, ("job_0000.log", "Baking...\n")),
+        ])
+        ssl._update_job_log_statuses(s, str(jobs))
+        assert ssl._job_statuses[1] == 'IN_PROGRESS'
+
+    def test_status_icons_include_rendering(self):
+        import SmokeSimLab as ssl
+        icons = ssl.SMOKE_UL_job_log._STATUS_ICONS
+        prefix = ssl.SMOKE_UL_job_log._STATUS_PREFIX
+        assert 'RENDERING' in icons
+        assert 'RENDERING' in prefix
+        # Distinct icon from IN_PROGRESS so the user sees the phase change.
+        assert icons['RENDERING'] != icons['IN_PROGRESS']
+        assert prefix['RENDERING'] != prefix['IN_PROGRESS']

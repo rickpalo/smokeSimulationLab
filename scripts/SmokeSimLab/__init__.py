@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 4, 6),
+    "version":     (0, 4, 7),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -1162,8 +1162,9 @@ class SmokeJobItem(bpy.types.PropertyGroup):
         name="Status",
         items=[
             ('NOT_STARTED', "Not Started", ""),
-            ('IN_PROGRESS', "In Progress",  ""),
+            ('IN_PROGRESS', "Baking",      ""),  # active during the bake phase
             ('BAKED',       "Baked (awaiting render)", ""),
+            ('RENDERING',   "Rendering",   ""),  # active during the render phase
             ('RETRYING',    "Retrying",     ""),
             ('COMPLETE',    "Complete",     ""),
             ('FAILED',      "Failed",       ""),
@@ -1181,8 +1182,9 @@ class SMOKE_UL_job_log(bpy.types.UIList):
     # silent row blanking, so they have been replaced with stable alternatives.
     _STATUS_ICONS = {
         'NOT_STARTED': 'RADIOBUT_OFF',
-        'IN_PROGRESS': 'PLAY',
+        'IN_PROGRESS': 'PLAY',           # active during bake phase
         'BAKED':       'CHECKBOX_HLT',   # bake done, render pending (two-phase)
+        'RENDERING':   'RENDER_ANIMATION',  # active during render phase
         'RETRYING':    'FILE_REFRESH',
         'COMPLETE':    'CHECKMARK',
         'FAILED':      'CANCEL',
@@ -1193,8 +1195,9 @@ class SMOKE_UL_job_log(bpy.types.UIList):
     # indicator that is visible even when icons fail to render.
     _STATUS_PREFIX = {
         'NOT_STARTED': '',
-        'IN_PROGRESS': '▶ ',   # ▶
+        'IN_PROGRESS': '▶ ',   # ▶  active in bake phase
         'BAKED':       '◐ ',   # ◐  bake done, awaiting render pass
+        'RENDERING':   '◉ ',   # ◉  active in render phase
         'RETRYING':    '↻ ',   # ↻
         'COMPLETE':    '✓ ',   # ✓
         'FAILED':      '✗ ',   # ✗
@@ -2295,7 +2298,12 @@ def _update_job_log_statuses(s, jobs_dir):
             _job_statuses[job_number] = 'CRASHED'
         elif n == _active_n:
             # This is the one job whose log is being actively touched right now.
-            _job_statuses[job_number] = 'IN_PROGRESS'
+            # Distinguish bake-phase from render-phase activity by .bake.done:
+            # if it exists, the bake completed and this job's render is running.
+            if bake_done_f in all_files:
+                _job_statuses[job_number] = 'RENDERING'
+            else:
+                _job_statuses[job_number] = 'IN_PROGRESS'
             if active_index < 0:
                 active_index = idx
         elif bake_done_f in all_files:
