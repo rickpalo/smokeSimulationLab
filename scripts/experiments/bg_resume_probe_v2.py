@@ -1,48 +1,47 @@
 r"""
 bg_resume_probe_v2.py — test the "save tmp .blend with cache_directory pointing
-at a populated dir, then reload" resume approach (user's 4-step proposal, see
-TODO-35 in TODOS.md and BUG-010 in BUG_TRACKER.md).
+at a populated dir, then reload" resume approach (TODO-35; BUG-010).
 
-WHAT THIS IS — the first probe (bg_resume_probe.py) tested in-process
-presave/merge/bake: REBAKED-FROM-1.  This probe tests the variant we've never
-actually run end-to-end:
-  1. Move existing cache files to a tmp directory.
-  2. Assign d.cache_directory = tmp_dir (CRITICAL: this is where BUG-004's
-     wipe-on-assignment may strike; the probe records file counts before and
-     after the assign so we can SEE if it happened).
-  3. Save the .blend as a tmp .blend.
+REFINED 5-STEP FLOW (per user's "we need step 3.5"):
+  1. Move existing cache files to a separate PRESERVE dir (out of harm's way).
+  2. Assign d.cache_directory = target_dir (target_dir is empty at this point,
+     so BUG-004's wipe-on-assignment has nothing to destroy).
+  3. Save the .blend as a tmp .blend (captures cache_directory = target_dir).
+  3.5. **Move the preserved files INTO target_dir.**  After the save, before
+     the reload — so the .blend's recorded cache_directory will point at a
+     populated dir when the next Blender opens it.
   4. Open the tmp .blend in a fresh --background Blender and bake_all() to a
      higher frame_end.  Mantaflow's init scan at LOAD time *should* detect the
      existing frames (this is how the UI "Resume Bake" works).
 
+The first probe (bg_resume_probe.py) tested in-process presave/merge/bake
+without a reload: REBAKED-FROM-1.  This probe is the untested variant.
+
 HOW TO RUN — via the companion wrapper:
     scripts\experiments\run_bg_probe_v2.bat
 
-The wrapper runs THREE Blender invocations sequentially (each with
---factory-startup so the user's addons don't load and flood logs):
+Three Blender invocations sequentially (--background --factory-startup):
 
-    PHASE          BLEND opened           WHAT IT DOES
-    setup          <original .blend>      Bakes 100 fresh frames into <cache>
-    prepare        <original .blend>      Moves files → tmp; assigns
-                                          cache_directory = tmp; saves
-                                          <tmp.blend>
-    test           <tmp.blend>            Bakes to 200; reports per-frame mtime
-                                          preservation; prints final VERDICT.
+    PHASE      BLEND opened           WHAT IT DOES
+    setup      <original .blend>      Bakes 100 fresh frames into <cache_dir>.
+    prepare    <original .blend>      Steps 1-3.5: stash files in PRESERVE,
+                                       assign cache_directory = target_dir
+                                       (empty), save tmp.blend, then move
+                                       PRESERVE → target_dir (step 3.5).
+    test       <tmp.blend>            Bakes to 200; reports per-frame mtime
+                                       preservation; prints final VERDICT.
 
-Verdict (from STEP C output):
-  RESUMED         — frames 1-100 retained their mtimes; only 101-200 baked.
-                    Mantaflow's load-time init scan DID detect the existing
-                    cache.  This is the answer we want; closes BUG-010.
-  REBAKED-FROM-1  — frames 1-100 rewritten (new mtimes).  open_mainfile didn't
-                    trigger Mantaflow's "detect existing frames" logic.
-  WIPED-ON-ASSIGN — prepare phase reported the files vanishing after the
-                    cache_directory assign (BUG-004 wipes the new dir too).
-                    The "user 4-step" approach as written can't work; a refined
-                    variant (assign on empty dir first, save, THEN move files
-                    in, THEN reload) would need to be tried.
-  NO PRIOR FRAMES — test phase loaded a tmp .blend whose cache_directory points
-                    at an empty dir — usually means a problem in the prepare
-                    phase (check its output).
+Verdicts (from STEP C output):
+  RESUMED         — frames 1-100 kept their mtimes; only 101-200 baked.
+                    Mantaflow's load-time scan DID detect the existing cache.
+                    Closes BUG-010 — worker RESUME branch can adopt this dance.
+  REBAKED-FROM-1  — frames 1-100 rewritten.  Even with the populated target_dir
+                    at load time, Mantaflow's init didn't pick up the cache.
+  WIPED           — target_dir empty by test time.  Check STEP B output: did
+                    the assign wipe the files we'd just placed?  (Unlikely
+                    given the 3.5 step puts them in AFTER save, but possible.)
+  NO PRIOR FRAMES — target_dir empty by test time, prepare reported nothing
+                    moved.  Check STEP B output.
 """
 import os
 import re
@@ -143,15 +142,17 @@ if phase == "setup":
         _say(f"WARNING: expected {frame_end} frames, got {len(files)}")
 
 
-# ── Phase: PREPARE — user's 4 steps (move, assign, save tmp.blend) ───────────
+# ── Phase: PREPARE — 5 steps (1, 2, 3, 3.5; user's refined proposal) ────────
 elif phase == "prepare":
-    if len(argv) < 4:
-        _say("usage: -- prepare <orig_cache_dir> <tmp_cache_dir> <tmp_blend> [domain_name]")
+    if len(argv) < 5:
+        _say("usage: -- prepare <orig_cache_dir> <preserve_dir> <target_cache_dir> "
+             "<tmp_blend> [domain_name]")
         sys.exit(2)
-    orig_cache_dir = os.path.abspath(argv[1])
-    tmp_cache_dir  = os.path.abspath(argv[2])
-    tmp_blend      = os.path.abspath(argv[3])
-    domain_name    = argv[4] if len(argv) > 4 else ""
+    orig_cache_dir   = os.path.abspath(argv[1])
+    preserve_dir     = os.path.abspath(argv[2])
+    target_cache_dir = os.path.abspath(argv[3])
+    tmp_blend        = os.path.abspath(argv[4])
+    domain_name      = argv[5] if len(argv) > 5 else ""
 
     obj, d = _find_domain(domain_name)
     if d is None:
@@ -160,35 +161,67 @@ elif phase == "prepare":
 
     _say(f"d.cache_directory at script start (from .blend): {d.cache_directory!r}")
 
-    # STEP 1: Move existing cache files to tmp_cache_dir.
-    if os.path.isdir(tmp_cache_dir):
-        _say(f"cleaning stale {tmp_cache_dir!r}")
-        shutil.rmtree(tmp_cache_dir, ignore_errors=True)
+    # STEP 1: Move existing cache files OUT of the way into PRESERVE dir.
+    if os.path.isdir(preserve_dir):
+        _say(f"cleaning stale preserve {preserve_dir!r}")
+        shutil.rmtree(preserve_dir, ignore_errors=True)
     if not os.path.isdir(orig_cache_dir):
-        _say(f"ERROR: orig cache dir doesn't exist: {orig_cache_dir}")
+        _say(f"ERROR: orig cache dir doesn't exist: {orig_cache_dir!r}")
         sys.exit(1)
-    _say(f"STEP 1: rename {orig_cache_dir} → {tmp_cache_dir}")
-    os.rename(orig_cache_dir, tmp_cache_dir)
-    files_in_tmp = _frame_mtimes(os.path.join(tmp_cache_dir, "data"))
-    _say(f"STEP 1 done: {len(files_in_tmp)} frames now in tmp dir")
+    _say(f"STEP 1: rename {orig_cache_dir} → {preserve_dir}")
+    os.rename(orig_cache_dir, preserve_dir)
+    preserved = _frame_mtimes(os.path.join(preserve_dir, "data"))
+    _say(f"STEP 1 done: {len(preserved)} frames stashed in preserve_dir")
 
-    # STEP 2: Change the bake directory.  CRITICAL — BUG-004 watch point.
-    _say(f"STEP 2: assigning d.cache_directory = {tmp_cache_dir!r}")
-    files_before_assign = _frame_mtimes(os.path.join(tmp_cache_dir, "data"))
-    d.cache_directory = tmp_cache_dir
-    files_after_assign = _frame_mtimes(os.path.join(tmp_cache_dir, "data"))
-    _say(f"STEP 2 done: {len(files_before_assign)} → {len(files_after_assign)} frames "
-         f"({'WIPED!' if len(files_after_assign) < len(files_before_assign) else 'survived'})")
+    # STEP 2: Assign d.cache_directory = target_cache_dir.  Target is EMPTY
+    # (or non-existent) so BUG-004's wipe-on-assign has nothing to destroy.
+    if os.path.isdir(target_cache_dir):
+        _say(f"cleaning stale target {target_cache_dir!r}")
+        shutil.rmtree(target_cache_dir, ignore_errors=True)
+    os.makedirs(target_cache_dir, exist_ok=True)
+    _say(f"STEP 2: assigning d.cache_directory = {target_cache_dir!r} (empty)")
+    files_before_assign = _frame_mtimes(os.path.join(target_cache_dir, "data"))
+    d.cache_directory = target_cache_dir
+    files_after_assign = _frame_mtimes(os.path.join(target_cache_dir, "data"))
+    _say(f"STEP 2 done: target {len(files_before_assign)} → {len(files_after_assign)} "
+         f"(wipe was harmless on empty dir)")
 
     # STEP 3: save as tmp .blend (copy=True keeps current session on the original).
     _say(f"STEP 3: save .blend as {tmp_blend!r}")
     bpy.ops.wm.save_as_mainfile(filepath=tmp_blend, copy=True)
-    files_after_save = _frame_mtimes(os.path.join(tmp_cache_dir, "data"))
-    _say(f"STEP 3 done: tmp.blend present={os.path.isfile(tmp_blend)}; "
-         f"cache now has {len(files_after_save)} frames")
+    _say(f"STEP 3 done: tmp.blend present={os.path.isfile(tmp_blend)}")
 
-    if len(files_after_save) == 0:
-        _say("VERDICT (early): WIPED-ON-ASSIGN — files lost before reload.")
+    # STEP 3.5: Move preserved files INTO target_cache_dir.  After the .blend
+    # save, before any reload — so the .blend's recorded cache_directory will
+    # point at a populated dir when the next Blender opens it.
+    _say(f"STEP 3.5: move preserve → target ({preserve_dir} → {target_cache_dir})")
+    _moved = 0
+    if os.path.isdir(preserve_dir):
+        for _item in os.listdir(preserve_dir):
+            _src = os.path.join(preserve_dir, _item)
+            _dst = os.path.join(target_cache_dir, _item)
+            # os.replace handles file-or-dir overwrite atomically per item;
+            # for subdirs (data/, config/, …) use shutil.move which copies
+            # contents into existing dst if present.
+            if os.path.isdir(_src):
+                # data/ likely already exists (Mantaflow may have created it
+                # on assign); merge contents.
+                os.makedirs(_dst, exist_ok=True)
+                for _f in os.listdir(_src):
+                    os.replace(os.path.join(_src, _f), os.path.join(_dst, _f))
+                    _moved += 1
+                shutil.rmtree(_src, ignore_errors=True)
+            else:
+                os.replace(_src, _dst)
+                _moved += 1
+        shutil.rmtree(preserve_dir, ignore_errors=True)
+    files_after_move = _frame_mtimes(os.path.join(target_cache_dir, "data"))
+    _say(f"STEP 3.5 done: moved {_moved} file(s); target now has "
+         f"{len(files_after_move)} frame(s)")
+
+    if len(files_after_move) == 0:
+        _say("VERDICT (early): NO PRIOR FRAMES — target empty after move-back; "
+             "check the preserve→target step.")
 
 
 # ── Phase: TEST — opens tmp.blend; bake_all to a higher frame_end ────────────
