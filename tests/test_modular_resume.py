@@ -181,6 +181,91 @@ class TestPresaveRenameRetry:
         )
 
 
+class TestCountDataFilesFastScan:
+    """v0.5.3: _count_data_files must use os.scandir on data/+noise/ only,
+    NOT os.walk on the full tree.  v0.5.2Test render-phase hung indefinitely
+    on os.walk because Windows file-system filter chain (Norton + Synology
+    mount + Windows Search) serialised kernel calls while the cache dir's
+    catalog was updating after the bake-phase rename → restore."""
+
+    def test_uses_scandir_not_walk(self):
+        src = _worker_src()
+        # Find the function body and check it uses os.scandir, not os.walk.
+        m = re.search(
+            r"def _count_data_files\(directory\):[\s\S]+?return count",
+            src,
+        )
+        assert m, "_count_data_files function not found"
+        body = m.group(0)
+        # Strip the docstring so historical mentions of os.walk in the
+        # explanation don't trip the assertion.
+        code = re.sub(r'"""[\s\S]*?"""', "", body)
+        assert "os.scandir(" in code, (
+            "v0.5.3 fix requires os.scandir (faster on Windows + fewer kernel "
+            "calls through the file-system filter chain)"
+        )
+        assert "os.walk(" not in code, (
+            "os.walk was the v0.5.2 hang cause — must not appear as a call"
+        )
+
+    def test_only_scans_data_and_noise_subdirs(self):
+        """The function must explicitly target data/ and noise/, skipping
+        the liquid-only mesh/, particles/, guiding/ and the already-excluded
+        config/ — that's how we avoid the slow paths."""
+        src = _worker_src()
+        m = re.search(
+            r"def _count_data_files\(directory\):[\s\S]+?return count",
+            src,
+        )
+        assert m
+        body = m.group(0)
+        # The subdir tuple should mention both data and noise
+        assert re.search(r'"data"\s*,\s*"noise"|"noise"\s*,\s*"data"', body) or \
+               ("'data'" in body and "'noise'" in body), (
+            "function should iterate exactly the (data, noise) subdirs — see "
+            "v0.5.3 docstring for the rationale"
+        )
+        # And NOT mention the slow liquid-only ones
+        for slow_subdir in ("mesh", "particles", "guiding"):
+            # quoted as literal subdir name
+            for quote in ('"', "'"):
+                assert f"{quote}{slow_subdir}{quote}" not in body, (
+                    f"function should not scan {slow_subdir}/ — slow and "
+                    f"smoke-only addon doesn't write there"
+                )
+
+    def test_still_uses_vdb_uni_regex(self):
+        """Preserves prior count semantics — only frame-numbered files count."""
+        src = _worker_src()
+        m = re.search(
+            r"def _count_data_files\(directory\):[\s\S]+?return count",
+            src,
+        )
+        assert m
+        body = m.group(0)
+        assert r"_\d+\.(vdb|uni)" in body or r'_\\d+\\.(vdb|uni)' in body, (
+            "must still filter by the _NNNN.vdb / _NNNN.uni pattern"
+        )
+
+    def test_handles_missing_subdirs_gracefully(self):
+        """Empty cache dir (e.g. fresh after wipe) must not raise — the
+        function returns 0 if data/ and noise/ don't exist."""
+        src = _worker_src()
+        m = re.search(
+            r"def _count_data_files\(directory\):[\s\S]+?return count",
+            src,
+        )
+        assert m
+        body = m.group(0)
+        assert "os.path.isdir" in body, (
+            "must guard each subdir with os.path.isdir to avoid raising "
+            "when the cache dir is fresh/empty"
+        )
+        assert "except OSError" in body or "try:" in body, (
+            "should catch OSError around scandir for transient I/O errors"
+        )
+
+
 class TestPostAssignmentRewalk:
     """v0.5.1: when presave didn't happen and we counted existing frames,
     re-walk the cache after Mantaflow's cache_directory assignment.  If the

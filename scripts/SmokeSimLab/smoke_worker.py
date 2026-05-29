@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.5.2"
+WORKER_VERSION = "0.5.3"
 
 import bpy
 import sys
@@ -559,14 +559,31 @@ if _prev_stored_bake is not None:
 effective_cache_dir = cache_dir
 
 def _count_data_files(directory):
-    """Return the number of frame-numbered VDB/UNI data files in *directory*,
-    excluding Mantaflow's config/ subdirectory (which holds per-frame checkpoint
-    .uni files that look like data but contain no simulation output)."""
+    """Return the number of frame-numbered VDB data files in *directory*'s
+    data/ and noise/ subdirs.
+
+    v0.5.3: was os.walk(directory) which traversed config/, guiding/, mesh/,
+    particles/ as well — slow on Synology Drive immediately after a rename
+    (the file-system filter chain — Norton + Synology mount + Windows
+    Search — serialises kernel calls during catalog updates).  Observed in
+    v0.5.2Test (2026-05-29): the render-phase TODO-34 walk hung indefinitely
+    at this call while the same walk in the bake phase ran in milliseconds.
+    For a smoke (GAS) domain, .vdb data files live ONLY in data/ and noise/;
+    config/ is excluded by the original loop and the other three subdirs are
+    liquid-only.  Direct os.scandir on the two real subdirs avoids the slow
+    paths entirely and is also faster on a healthy filesystem."""
     count = 0
-    for _root, _dirs, _fnames in os.walk(directory):
-        if os.path.basename(_root) == 'config':
+    for subdir in ("data", "noise"):
+        path = os.path.join(directory, subdir)
+        if not os.path.isdir(path):
             continue
-        count += sum(1 for f in _fnames if re.search(r'_\d+\.(vdb|uni)$', f))
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.is_file() and re.search(r'_\d+\.(vdb|uni)$', entry.name):
+                        count += 1
+        except OSError:
+            pass
     return count
 
 if use_existing_cache:
