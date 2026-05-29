@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 5, 1),
+    "version":     (0, 5, 2),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -72,8 +72,8 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.5.1"
-_EXPECTED_LAUNCHER_VERSION = "0.4.0"
+_EXPECTED_WORKER_VERSION   = "0.5.2"
+_EXPECTED_LAUNCHER_VERSION = "0.5.2"
 
 
 def _read_helper_version(path: str, var_name: str) -> str:
@@ -381,14 +381,27 @@ def expand_param(s, name):
     if getattr(s, name + "_use_range"):
         end   = getattr(s, name + "_end")
         step  = getattr(s, name + "_step")
-        if step == 0:
+        if step == 0 or end == begin:
             return [begin]
+        # v0.5.2: derive step sign from begin/end so a descending sweep
+        # (begin > end) works without requiring the user to type a negative
+        # step.  Previously the while-loop's `v <= end + epsilon` condition
+        # was immediately false for descending ranges, returning [] and
+        # crashing _default_job's `[0]` index — which silently aborted the
+        # rest of the panel's draw callback.
+        step_abs = abs(step)
+        if end >= begin:
+            stepped, cmp = step_abs, lambda v: v <= end + step_abs * 1e-6
+        else:
+            stepped, cmp = -step_abs, lambda v: v >= end - step_abs * 1e-6
         vals, v = [], begin
-        epsilon = step * 1e-6   # tiny tolerance for float boundary
-        while v <= end + epsilon:
+        while cmp(v):
             vals.append(round(v, 6))  # round to avoid 0.200000000001 in names
-            v += step
-        return vals
+            v += stepped
+        # Defensive: even after the direction fix, an exotic input (e.g.
+        # NaN end) could yield an empty list.  Always return at least
+        # [begin] so callers' `[0]` indexing never crashes the UI.
+        return vals if vals else [begin]
 
     # Mode 3: single value — Begin field doubles as the fixed value
     return [begin]

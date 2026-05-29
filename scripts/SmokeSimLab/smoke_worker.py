@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.5.1"
+WORKER_VERSION = "0.5.2"
 
 import bpy
 import sys
@@ -33,11 +33,20 @@ sys.stdout.reconfigure(line_buffering=True)
 _log_file = None
 
 def _log(msg):
-    """Write msg to stdout (batch window) and the per-job log file."""
-    print(msg)
+    """Write msg to the per-job log file FIRST, then stdout (batch window).
+    v0.5.2: file-write before print() so a stdout block (e.g. Blender's main
+    thread paused during EEVEE shader compile in windowed render-phase) can't
+    swallow log lines — the file is the authoritative diagnostic record."""
     if _log_file is not None:
-        _log_file.write(msg + "\n")
-        _log_file.flush()
+        try:
+            _log_file.write(msg + "\n")
+            _log_file.flush()
+        except OSError:
+            pass
+    try:
+        print(msg)
+    except OSError:
+        pass  # stdout may be closed or blocked; the file already has it
 
 
 
@@ -364,10 +373,16 @@ _log(f"[{name}] Render mode: {render_mode}")
 # wasting time on a RESUME-from-1 of broken data.
 # ---------------------------------------------------------------------------
 if not do_bake:
+    # v0.5.2: trace each step of TODO-34 because a Synology Drive / GPU init
+    # interaction was observed to hang the render phase silently at this point
+    # (cmd window stops, per-job log stops at "Render mode: EEVEE", Blender
+    # process at 0% CPU).  These _log lines let us see exactly where it locks.
+    _log(f"[{name}] TODO-34 fast-fail check: starting")
     _r34_jobs_dir  = os.path.dirname(job_path)
     _r34_stem      = os.path.splitext(os.path.basename(job_path))[0]
     _r34_bake_done = os.path.join(_r34_jobs_dir, _r34_stem + ".bake.done")
 
+    _log(f"[{name}] TODO-34: reading {_r34_bake_done}")
     _r34_bake_failed = True   # treat "no bake.done" as failure
     if os.path.isfile(_r34_bake_done):
         try:
@@ -375,10 +390,15 @@ if not do_bake:
                 _r34_bake_failed = "error" in fh.read().lower()
         except OSError:
             pass
+    _log(f"[{name}] TODO-34: bake_done exists={os.path.isfile(_r34_bake_done)}, "
+         f"bake_failed={_r34_bake_failed}")
 
+    _log(f"[{name}] TODO-34: counting data files in {cache_dir}")
     _r34_existing = _count_data_files(cache_dir) if os.path.isdir(cache_dir) else 0
     _r34_expected = frame_end - frame_start + 1
     _r34_incomplete = (_r34_existing < _r34_expected)
+    _log(f"[{name}] TODO-34: existing={_r34_existing} expected={_r34_expected} "
+         f"incomplete={_r34_incomplete}")
 
     if _r34_bake_failed or _r34_incomplete:
         _reasons = []

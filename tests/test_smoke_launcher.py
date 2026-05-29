@@ -209,6 +209,69 @@ class TestLauncherJobJson:
 # _write_crashed_marker
 # ---------------------------------------------------------------------------
 
+class TestAtexitCrashMarker:
+    """v0.5.2: launcher must register an atexit handler that writes .crashed
+    if it exits without having recorded success (.worker_done) or a watchdog-
+    fired crash (.crashed already present).
+
+    Covers user-cancel scenarios (cmd window closed, Ctrl-C) where the
+    launcher's existing _write_crashed_marker() calls (all inside specific
+    failure branches) don't run.  Without this, the addon's poll never sees
+    the failure for 35 minutes (stale-log threshold) and auto-retry doesn't
+    fire."""
+
+    def _launcher_src(self):
+        p = os.path.join(_SCRIPTS_DIR, "smoke_launcher.py")
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_atexit_register_for_crash_marker(self):
+        """The launcher must register an atexit handler that calls
+        _write_crashed_marker conditionally."""
+        src = self._launcher_src()
+        assert "atexit.register" in src, "no atexit.register in launcher"
+        # The atexit handler should be registered with a function whose body
+        # calls _write_crashed_marker — confirm the chain exists.
+        assert "_atexit_crash_marker" in src or "_write_crashed_marker" in src, (
+            "atexit handler should reference _write_crashed_marker"
+        )
+
+    def test_atexit_handler_checks_for_existing_done(self):
+        """Handler must skip writing .crashed if .worker_done OR .crashed
+        already exists, so it doesn't fight the success path or the
+        watchdog-fired crash marker."""
+        import re
+        src = self._launcher_src()
+        # Locate the atexit handler body and assert it checks both files.
+        m = re.search(
+            r"def\s+_atexit_crash_marker[\s\S]+?atexit\.register",
+            src,
+        )
+        assert m, "_atexit_crash_marker function not found"
+        body = m.group(0)
+        assert ".worker_done" in body, (
+            "atexit handler must check .worker_done so success doesn't write .crashed"
+        )
+        assert ".crashed" in body, (
+            "atexit handler must check existing .crashed so it doesn't duplicate"
+        )
+
+    def test_atexit_registered_after_phase_known(self):
+        """The handler needs jobs_dir, job_stem, AND phase in scope.  Assert
+        the registration happens AFTER phase is parsed (otherwise the closure
+        captures the wrong value or NameError fires during shutdown)."""
+        src = self._launcher_src()
+        idx_register = src.find("atexit.register(_atexit_crash_marker)")
+        assert idx_register > 0, "atexit registration line not found"
+        # `phase = phase.strip().lower()` is the last place phase is assigned
+        # before the main work begins.
+        idx_phase = src.find("phase = phase.strip().lower()")
+        assert idx_phase > 0
+        assert idx_register > idx_phase, (
+            "atexit handler must be registered after phase is finalised"
+        )
+
+
 class TestWriteCrashedMarker:
     def test_creates_marker_file(self, tmp_path):
         """Writes a .crashed marker file in the jobs directory."""

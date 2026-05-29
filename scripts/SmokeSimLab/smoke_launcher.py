@@ -30,7 +30,7 @@ Behaviour
 No third-party dependencies — stdlib + tasklist.exe (built into Windows).
 """
 
-LAUNCHER_VERSION = "0.4.0"
+LAUNCHER_VERSION = "0.5.2"
 
 import atexit
 import ctypes
@@ -352,6 +352,35 @@ def main():
                     fh.write(line + "\n")
             except OSError:
                 pass
+
+    # ── v0.5.2: atexit guard for user-cancel / abnormal launcher exits ──────
+    # If the launcher exits without having reached one of the success or
+    # documented-failure exit branches (e.g. user closes the cmd window, hits
+    # Ctrl-C, or the launcher itself throws an unhandled exception), no
+    # `.crashed` marker is written.  Without that marker the addon's poll
+    # never sees the failure: stale-log detection takes 35 min and only sets
+    # a text warning, not the CRASHED status that triggers auto-retry.
+    #
+    # The atexit handler checks for an already-written success or crash
+    # marker; only writes `.crashed` if neither exists, so it doesn't fight
+    # the watchdog branches that already wrote one.
+    #
+    # Coverage:
+    #   ✓ user closes cmd window (Windows CTRL_CLOSE_EVENT: ~5s atexit window)
+    #   ✓ Ctrl-C in the launcher process (KeyboardInterrupt → atexit)
+    #   ✓ unhandled Python exception in the launcher → atexit
+    #   ✗ Task Manager → End Process (TerminateProcess skips atexit)
+    def _atexit_crash_marker():
+        try:
+            _suffix       = "" if phase == "both" else f".{phase}"
+            _wd_path      = os.path.join(jobs_dir, job_stem + _suffix + ".worker_done")
+            _crashed_path = os.path.join(jobs_dir, job_stem + ".crashed")
+            if os.path.exists(_wd_path) or os.path.exists(_crashed_path):
+                return  # success already recorded, or watchdog already wrote .crashed
+            _write_crashed_marker(jobs_dir, job_stem, phase)
+        except (OSError, NameError):
+            pass  # best-effort during interpreter shutdown
+    atexit.register(_atexit_crash_marker)
 
     # smoke_worker.py is exported to output_path alongside run_smoke_batch.bat
     worker_py = os.path.join(output_path, "smoke_worker.py")

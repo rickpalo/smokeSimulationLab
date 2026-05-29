@@ -117,6 +117,75 @@ class TestExpandParam:
         )
         assert expand_param(s, "resolution") == [99.0]
 
+    # v0.5.2: descending range support — fixed UI-disappears bug when a user
+    # entered begin > end (the old ascending-only loop returned [] and
+    # _default_job's `[0]` raised IndexError, silently aborting the draw).
+    def test_range_descending_with_positive_step(self):
+        # User enters begin=512, end=32, step=2 — clearly wants a descending
+        # sweep but typed a positive step.  Auto-derive direction.
+        s = _make_settings(
+            resolution_use_range=True,
+            resolution_begin=512, resolution_end=32, resolution_step=2,
+        )
+        result = expand_param(s, "resolution")
+        assert result[0] == 512
+        assert result[-1] == 32
+        # Every value descending by 2
+        for i in range(1, len(result)):
+            assert result[i] == result[i - 1] - 2
+
+    def test_range_descending_with_negative_step(self):
+        s = _make_settings(
+            resolution_use_range=True,
+            resolution_begin=256, resolution_end=64, resolution_step=-64,
+        )
+        result = expand_param(s, "resolution")
+        assert result == [256, 192, 128, 64]
+
+    def test_range_ascending_with_negative_step(self):
+        # Symmetric: begin < end, negative step → auto-flip to positive.
+        s = _make_settings(
+            resolution_use_range=True,
+            resolution_begin=64, resolution_end=256, resolution_step=-64,
+        )
+        result = expand_param(s, "resolution")
+        assert result == [64, 128, 192, 256]
+
+    def test_range_equal_begin_end_returns_single(self):
+        s = _make_settings(
+            resolution_use_range=True,
+            resolution_begin=128, resolution_end=128, resolution_step=2,
+        )
+        assert expand_param(s, "resolution") == [128]
+
+    def test_descending_float_range(self):
+        s = _make_settings(
+            vorticity_use_range=True,
+            vorticity_begin=1.5, vorticity_end=0.5, vorticity_step=0.5,
+        )
+        result = expand_param(s, "vorticity")
+        assert result[0] == pytest.approx(1.5)
+        assert result[-1] == pytest.approx(0.5)
+        assert len(result) == 3
+
+    def test_returns_at_least_begin_never_empty(self):
+        """Defensive: even pathological inputs must not return [] —
+        _default_job indexes [0] and an IndexError silently aborts the UI."""
+        # Both directions, positive and negative steps — all must yield
+        # non-empty lists so the draw callback never crashes.
+        for begin, end, step in [(512, 32, 2), (512, 32, -2),
+                                  (32, 512, 2), (32, 512, -2),
+                                  (100, 100, 5)]:
+            s = _make_settings(
+                resolution_use_range=True,
+                resolution_begin=begin, resolution_end=end, resolution_step=step,
+            )
+            result = expand_param(s, "resolution")
+            assert len(result) >= 1, (
+                f"empty list for begin={begin}, end={end}, step={step} — "
+                f"will crash _default_job's [0] index"
+            )
+
 
 # ---------------------------------------------------------------------------
 # generate_jobs_limited
