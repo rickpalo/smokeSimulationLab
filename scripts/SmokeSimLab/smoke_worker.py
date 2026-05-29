@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.5.3"
+WORKER_VERSION = "0.5.4"
 
 import bpy
 import sys
@@ -373,10 +373,18 @@ _log(f"[{name}] Render mode: {render_mode}")
 # wasting time on a RESUME-from-1 of broken data.
 # ---------------------------------------------------------------------------
 if not do_bake:
-    # v0.5.2: trace each step of TODO-34 because a Synology Drive / GPU init
-    # interaction was observed to hang the render phase silently at this point
-    # (cmd window stops, per-job log stops at "Render mode: EEVEE", Blender
-    # process at 0% CPU).  These _log lines let us see exactly where it locks.
+    # v0.5.4: avoid os.walk / os.scandir on the cache directory.  v0.5.3
+    # replaced os.walk with os.scandir on data/+noise/ only, but even that
+    # hung at 0% CPU for 3+ min on Synology Drive immediately after the
+    # bake-phase's rename → restore cycle (v0.5.3Test, 2026-05-29).  The
+    # Windows file-system filter chain (Norton + Synology mount + Windows
+    # Search) locks the directory entry at the kernel level.
+    #
+    # Replace the directory-wide count with a single os.path.isfile on the
+    # FINAL frame's expected .vdb file.  If it exists, the bake reached
+    # frame_end → cache is complete (or at least usable).  A single file
+    # check is ~1000× fewer kernel calls than os.scandir on a populated
+    # directory and rarely hits the filter-chain lock.
     _log(f"[{name}] TODO-34 fast-fail check: starting")
     _r34_jobs_dir  = os.path.dirname(job_path)
     _r34_stem      = os.path.splitext(os.path.basename(job_path))[0]
@@ -393,12 +401,22 @@ if not do_bake:
     _log(f"[{name}] TODO-34: bake_done exists={os.path.isfile(_r34_bake_done)}, "
          f"bake_failed={_r34_bake_failed}")
 
-    _log(f"[{name}] TODO-34: counting data files in {cache_dir}")
-    _r34_existing = _count_data_files(cache_dir) if os.path.isdir(cache_dir) else 0
-    _r34_expected = frame_end - frame_start + 1
-    _r34_incomplete = (_r34_existing < _r34_expected)
-    _log(f"[{name}] TODO-34: existing={_r34_existing} expected={_r34_expected} "
+    # Single-file presence check on the final frame — fast and lock-tolerant.
+    _r34_final_frame = os.path.join(
+        cache_dir, "data", f"fluid_data_{frame_end:04d}.vdb"
+    )
+    _log(f"[{name}] TODO-34: checking final frame file: {_r34_final_frame}")
+    _r34_final_exists = os.path.isfile(_r34_final_frame)
+    _r34_incomplete   = not _r34_final_exists
+    _log(f"[{name}] TODO-34: final frame exists={_r34_final_exists}, "
          f"incomplete={_r34_incomplete}")
+    # Diagnostic-only count (intentionally absent — replaced by the cheap
+    # final-frame check above).  If we ever need the actual count for
+    # reporting, it can be deferred until AFTER the render phase confirms
+    # the cache is usable (so we don't pay the os.scandir cost during the
+    # critical startup path).
+    _r34_existing = -1   # sentinel meaning "not counted"
+    _r34_expected = frame_end - frame_start + 1
 
     if _r34_bake_failed or _r34_incomplete:
         _reasons = []

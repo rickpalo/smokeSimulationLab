@@ -305,10 +305,29 @@ class TestRenderPhaseFastFail:
         assert '"error" in fh.read().lower()' in src
 
     def test_checks_cache_frame_completeness(self):
+        """v0.5.4: replaced full-directory _count_data_files with a single
+        os.path.isfile on the final frame.  See worker docstring for the
+        Synology/Norton filter-chain rationale.  The functional check is
+        still 'does the cache reach frame_end' — just via one file instead
+        of a directory scan."""
         src = self._src()
-        assert "_count_data_files(cache_dir)" in src
-        assert "_r34_expected = frame_end - frame_start + 1" in src
-        assert "_r34_incomplete = (_r34_existing < _r34_expected)" in src
+        # Must check the FINAL frame's expected .vdb file exists.
+        assert 'fluid_data_{frame_end:04d}.vdb' in src or \
+               'fluid_data_{frame_end:04d}.vdb"' in src, (
+            "TODO-34 must check the final frame's .vdb file"
+        )
+        assert "_r34_final_exists = os.path.isfile(_r34_final_frame)" in src
+        assert "_r34_incomplete   = not _r34_final_exists" in src
+        # And the directory walk must NOT happen in the TODO-34 block —
+        # that was the v0.5.2/0.5.3 hang cause.
+        # Find the TODO-34 block and assert it doesn't contain the call.
+        import re
+        m = re.search(r"if not do_bake:[\s\S]+?sys\.exit\(1\)", src)
+        assert m, "TODO-34 block not found"
+        assert "_count_data_files(cache_dir)" not in m.group(0), (
+            "TODO-34 must not call _count_data_files — Synology+Norton+Search "
+            "filter chain blocks the directory scan at 0% CPU (v0.5.3Test)"
+        )
 
     def test_wipes_cache_to_force_full_rebake(self):
         import re
