@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.5.0"
+WORKER_VERSION = "0.5.1"
 
 import bpy
 import sys
@@ -623,12 +623,34 @@ if _paths_differ and (use_existing_cache or not do_bake):
         if os.path.isdir(_presave_dir):
             _log(f"[{name}]   NOTE: stale presave directory found — removing it first")
             shutil.rmtree(_presave_dir, ignore_errors=True)
-        try:
-            os.rename(effective_cache_dir, _presave_dir)
-            _presave_active = True
-            _log(f"[{name}] Cache presave: rename complete — existing data is safe")
-        except OSError as _e:
-            _log(f"[{name}] WARNING: Cache presave rename failed ({_e}) — "
+        # v0.5.1: retry with backoff to survive transient Windows file locks.
+        # The just-baked .vdb files may be held open briefly by:
+        #   - the freshly-killed previous Blender's lingering file handles
+        #   - SynologyDrive's sync agent watching/uploading the new files
+        #   - Windows antivirus mid-scan
+        # All three typically clear within a few seconds.  Without this retry,
+        # the rename fails, _presave_active stays False, the next assignment
+        # of d.cache_directory triggers Mantaflow's BUG-004 wipe, and the
+        # cache is destroyed — defeating MODULAR RESUME (v0.5.0Test, 2026-05-28).
+        _rename_err = None
+        for _attempt in range(5):
+            try:
+                os.rename(effective_cache_dir, _presave_dir)
+                _presave_active = True
+                if _attempt > 0:
+                    _log(f"[{name}] Cache presave: rename succeeded on attempt {_attempt + 1}")
+                else:
+                    _log(f"[{name}] Cache presave: rename complete — existing data is safe")
+                _rename_err = None
+                break
+            except OSError as _e:
+                _rename_err = _e
+                if _attempt < 4:
+                    _log(f"[{name}] Cache presave: rename attempt {_attempt + 1}/5 failed "
+                         f"({_e.__class__.__name__}) — retrying in 1s")
+                    _time.sleep(1.0)
+        if _rename_err is not None:
+            _log(f"[{name}] WARNING: Cache presave rename failed after 5 attempts ({_rename_err}) — "
                  f"Mantaflow may wipe existing cache on reassignment")
     else:
         _log(f"[{name}] Cache presave: no existing data files at target path — presave not needed")
@@ -668,8 +690,26 @@ if _paths_differ:
         _log(f"[{name}]   Presaved data was moved aside; Mantaflow initialised a fresh empty directory")
     else:
         _log(f"[{name}]   No presave active — Mantaflow reinitialised the domain at this path")
-else:
-    _log(f"[{name}] Domain cache_directory unchanged (paths equal) — skipping assignment to preserve VDB files")
+        # v0.5.1: when presave didn't happen (e.g. rename failed) and we
+        # earlier counted existing files, re-walk to detect Mantaflow's
+        # BUG-004 wipe.  If the count dropped, the RESUME decision below
+        # would lie about preserving frames — downgrade baked_frames to
+        # what's actually on disk so the decision reflects reality.
+        if baked_frames:
+            _post_assign = set()
+            for _root, _dirs, files in os.walk(effective_cache_dir):
+                if os.path.basename(_root) == 'config':
+                    continue
+                for f in files:
+                    m = re.search(r'_(\d+)\.(vdb|uni)$', f)
+                    if m:
+                        _post_assign.add(int(m.group(1)))
+            if len(_post_assign) < len(baked_frames):
+                _log(f"[{name}]   WARNING: cache_directory assignment dropped frame count "
+                     f"{len(baked_frames)} → {len(_post_assign)} (BUG-004 wipe).  "
+                     f"Downgrading baked_frames so the bake decision is honest.")
+                baked_frames = _post_assign
+
 
 # Enable resumable baking so a mid-bake crash can be continued on the next run.
 try:

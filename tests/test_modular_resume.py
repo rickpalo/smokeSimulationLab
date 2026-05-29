@@ -138,3 +138,76 @@ class TestWorkerVersion:
             f"WORKER_VERSION {major}.{minor}.{patch} < 0.5.0 — "
             f"MODULAR fix should bump to 0.5.0"
         )
+
+
+class TestPresaveRenameRetry:
+    """v0.5.1: presave rename must retry to survive Synology Drive / killed-
+    process file-handle locks.  v0.5.0Test (2026-05-28) failed because the
+    single rename hit Access Denied, _presave_active stayed False, the next
+    cache_directory assignment triggered BUG-004 wipe, and 34 baked frames
+    were destroyed."""
+
+    def test_rename_in_retry_loop(self):
+        src = _worker_src()
+        # Find the presave rename call and check the surrounding context for
+        # a retry loop (for-loop with range(N) where N >= 3).
+        idx = src.find("os.rename(effective_cache_dir, _presave_dir)")
+        assert idx > 0, "presave os.rename call missing"
+        # Within ~500 chars before, expect a `for _attempt in range(...)` loop.
+        ctx = src[max(0, idx - 500):idx]
+        assert re.search(r"for\s+\w+\s+in\s+range\((\d+)\)", ctx), (
+            f"presave rename should be inside a for-loop for retry; "
+            f"context: {ctx[-300:]!r}"
+        )
+        m = re.search(r"for\s+\w+\s+in\s+range\((\d+)\)", ctx)
+        attempts = int(m.group(1))
+        assert attempts >= 3, (
+            f"presave retry loop has only {attempts} attempts; "
+            f"need at least 3 to survive Windows file-lock transients"
+        )
+
+    def test_retry_sleeps_between_attempts(self):
+        """The retry loop must include a sleep — otherwise it spins faster than
+        the kernel releases handles and all attempts fail in milliseconds."""
+        src = _worker_src()
+        idx = src.find("os.rename(effective_cache_dir, _presave_dir)")
+        assert idx > 0
+        # Within ~700 chars after the rename call (covering the except + retry),
+        # we should see a _time.sleep call.
+        window = src[idx:idx + 1200]
+        assert re.search(r"_time\.sleep\(", window), (
+            f"presave retry loop missing sleep between attempts; "
+            f"context: {window!r}"
+        )
+
+
+class TestPostAssignmentRewalk:
+    """v0.5.1: when presave didn't happen and we counted existing frames,
+    re-walk the cache after Mantaflow's cache_directory assignment.  If the
+    count dropped (BUG-004 wipe), downgrade baked_frames so the RESUME
+    decision doesn't claim to preserve frames that no longer exist."""
+
+    def test_rewalk_after_assignment_when_no_presave(self):
+        src = _worker_src()
+        # Find the "No presave active" log line and verify there's a re-walk
+        # after it (using os.walk on effective_cache_dir).
+        idx = src.find("No presave active — Mantaflow reinitialised the domain")
+        assert idx > 0, "expected log line missing"
+        # Within ~1500 chars after, expect a re-walk and a baked_frames update.
+        window = src[idx:idx + 1500]
+        assert "os.walk(effective_cache_dir)" in window, (
+            "no re-walk after cache_directory assignment when presave inactive"
+        )
+        assert "baked_frames = " in window, (
+            "re-walk should reassign baked_frames so the bake decision is honest"
+        )
+
+    def test_rewalk_logs_downgrade(self):
+        """The re-walk must log when it detects a wipe so the user can correlate
+        with the 'rename failed' warning above it in the log."""
+        src = _worker_src()
+        # A wipe log should mention BUG-004 or "wipe" and the frame count diff.
+        assert re.search(r"BUG-004|cache_directory assignment dropped|wipe", src,
+                          re.IGNORECASE), (
+            "re-walk should log clearly when it detects a wipe"
+        )
