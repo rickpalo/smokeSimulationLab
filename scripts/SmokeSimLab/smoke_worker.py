@@ -14,7 +14,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.5.4"
+WORKER_VERSION = "0.6.0"
 
 import bpy
 import sys
@@ -160,11 +160,16 @@ def update_text_objects(text_map, params, bake_seconds=None):
     bake_seconds : elapsed bake time in seconds, or None (omits time update)
     """
     # Resolution + gas parameters
+    # v0.6.0 TODO-38: format with `:g` (after 3-decimal round to keep names
+    # stable) so values like 0.25 / 0.125 display fully instead of being
+    # truncated to 0.2 / 0.1 by the prior `round(x, 1)`.  Trailing zeros
+    # are trimmed (1.0 → "1", 0.50 → "0.5") so common round-number cases
+    # stay clean while finer-precision values are preserved when needed.
     _set_text(text_map.get("resolution", ""),
               f"Res: {int(params['resolution'])}\n"
-              f"Vort: {round(float(params['vorticity']), 1)}, "
-              f"Dens: {round(float(params['alpha']), 1)}, "
-              f"Heat: {round(float(params['beta']), 1)}")
+              f"Vort: {round(float(params['vorticity']), 3):g}, "
+              f"Dens: {round(float(params['alpha']), 3):g}, "
+              f"Heat: {round(float(params['beta']), 3):g}")
 
     # Noise — combined string or "Noise-None"
     if params["use_noise"]:

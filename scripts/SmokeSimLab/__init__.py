@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 5, 5),
+    "version":     (0, 6, 0),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -72,7 +72,7 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.5.4"
+_EXPECTED_WORKER_VERSION   = "0.6.0"
 _EXPECTED_LAUNCHER_VERSION = "0.5.2"
 
 
@@ -659,8 +659,15 @@ def make_name(p):
     -------
     str — filename stem without extension
     """
+    # v0.6.0 TODO-39: append "-Slow" when slow_dissolve is enabled, so two
+    # otherwise-identical jobs differing only in Slow vs Fast dissolve get
+    # distinct cache/render directories and filenames.  Backwards-compatible:
+    # slow=False jobs keep the original "D5" form (matches existing on-disk
+    # caches), only slow=True jobs get the new "-Slow" suffix.
     dissolve_part = (
-        f"D{int(p['dissolve_speed'])}" if p['use_dissolve'] else "D-OFF"
+        (f"D{int(p['dissolve_speed'])}-Slow" if p.get('slow_dissolve')
+         else f"D{int(p['dissolve_speed'])}")
+        if p['use_dissolve'] else "D-OFF"
     )
     noise_part = (
         f"N{int(p['noise_upres'])}_"
@@ -2572,6 +2579,28 @@ def _poll_batch_progress_impl():
         done  = len(done_files)
         total = s.batch_total
 
+        # v0.6.0 BUG-012: split done_files into successful vs failed so the
+        # "(N done)" display in batch_progress reflects only successful jobs.
+        # A .done file with "error" in its content is the .bat's record of a
+        # nonzero exit code from the launcher (worker crashed / failed setup
+        # / etc.).  These were previously lumped into the "done" count, so a
+        # 10/11 batch with 1 failure displayed "10/11 done" — misleading.
+        # Reading 10-30 small .done files on every 5s poll is negligible
+        # (~10 ms total).
+        done_success = 0
+        done_failed  = 0
+        for _df in done_files:
+            try:
+                with open(os.path.join(jobs_dir, _df), "r") as _fh:
+                    if "error" in _fh.read().lower():
+                        done_failed += 1
+                    else:
+                        done_success += 1
+            except OSError:
+                # File present but unreadable — count as done (avoid stalling
+                # the batch-complete trigger) but not as success or failure.
+                done_success += 0  # explicit no-op; bucket TBD if encountered
+
         _update_job_log_statuses(s, jobs_dir)
 
         # Estimation log: record batch start once per run.
@@ -2665,14 +2694,20 @@ def _poll_batch_progress_impl():
         _bake_done_n   = sum(1 for _f in _all_files if _BAKE_DONE_RE.match(_f))
         _render_done_n = sum(1 for _f in _all_files if _RENDER_DONE_RE.match(_f))
         _bake_only     = not s.render_simulation_result
+        # v0.6.0 BUG-012: show "(N done)" with successful count, and append
+        # ", F failed" only when failed > 0 (avoids visual noise on clean runs).
+        if done_failed > 0:
+            _done_str = f"({done_success}/{total} done, {done_failed} failed)"
+        else:
+            _done_str = f"({done_success}/{total} done)"
         if _bake_only:
             s.batch_overall_factor = _bake_done_n / total if total else 0.0
-            s.batch_progress       = f"Bake {_bake_done_n}/{total}  ({done}/{total} done)"
+            s.batch_progress       = f"Bake {_bake_done_n}/{total}  {_done_str}"
         else:
             s.batch_overall_factor = (_bake_done_n + _render_done_n) / (2 * total) if total else 0.0
             s.batch_progress       = (
                 f"Bake {_bake_done_n}/{total}  Render {_render_done_n}/{total}  "
-                f"({done}/{total} done)"
+                f"{_done_str}"
             )
 
         running = _find_running_log(jobs_dir)
@@ -3966,9 +4001,13 @@ def _gas_ui(layout, s):
     if not s.show_gas:
         return
 
-    _sub_param_ui(box, s, "vorticity", "Vorticity")
+    # v0.6.0 TODO-37: order matches Blender's native Fluid Domain panel
+    # (Buoyancy Density → Heat → Vorticity).  Underlying property names
+    # (vorticity / alpha / beta), job-dict serialisation order, CSV column
+    # order, and make_name() output are all unaffected — purely visual.
     _sub_param_ui(box, s, "alpha",     "Buoyancy Density")
     _sub_param_ui(box, s, "beta",      "Buoyancy Heat")
+    _sub_param_ui(box, s, "vorticity", "Vorticity")
 
 
 def _noise_ui(layout, s):

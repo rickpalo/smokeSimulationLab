@@ -764,5 +764,58 @@ equals the requested frame count, and the bake bar reads "N of 20".
 
 ---
 
+## BUG-012: Failed Jobs Counted as "Done" in Live Progress Display
+
+**Status:** `DEPLOYED / UNVERIFIED` (v0.6.0)
+**Files:** `__init__.py` — `_poll_batch_progress_impl` done-count block
+
+### Symptoms
+Live progress display read e.g. `Bake 11/11 Render 9/11 (9/11 done)` while
+1 of the 9 was actually FAILED (the launcher had exited non-zero, the `.bat`
+wrote `error exit N <stem>` content into `<stem>.done`, the addon's Job Log
+row showed the ⚠ icon, but the parenthetical "9/11 done" counted that
+failed job as completed).  User observation (2026-05-29 screenshot):
+"When a job fails, it should not be included in the completed jobs."
+
+### Root Cause
+`done_files = [f for f in os.listdir(jobs_dir) if _DONE_RE.match(f) or
+_RETRY_DONE_RE.match(f)]` matches every `.done` file regardless of content.
+The `.bat` writes `.done` files for BOTH success (`done <stem> <date>`)
+and failure (`error exit <code> <stem> <date>`) paths — both are "the
+launcher exited", but only one means the job actually succeeded.  The
+batch-completion summary code at the same location already discriminated
+by reading `.done` content for `"error"`; the live display just hadn't
+picked up that distinction.
+
+### Fix (v0.6.0)
+Split the done count in `_poll_batch_progress_impl` into two buckets:
+- `done_success` = `.done` files with no `"error"` in content
+- `done_failed`  = `.done` files containing `"error"`
+
+Display string becomes:
+- `(N done)` when `done_failed == 0` (clean run — no visual noise)
+- `(N done, F failed)` when `done_failed > 0`
+
+Both the bake-only branch and the two-pass branch use the same `_done_str`
+helper.  The batch-completion trigger (`if done >= total:`) still uses the
+total count so the batch-summary post-processing fires correctly when
+every job has reached a terminal state, regardless of success/failure.
+
+Reading 10–30 small `.done` files on every 5s poll is ~10ms — negligible.
+
+### Tests Added
+`tests/test_v060_fixes.TestBug012DoneCountExcludesFailed` — 4 tests:
+- `done_files` is split into both buckets
+- the split reads each file's content for `"error"`
+- the user-visible string references `_done_str` (not raw `len(done_files)`)
+- the `, 0 failed` suffix is never displayed (only shown when > 0)
+
+### Verification
+Run a batch with intentional failures (e.g. a job with a bogus emitter name)
+and confirm: while jobs are running the display reads `(N done, F failed)`
+with F = number of failed jobs; clean batches show only `(N done)`.
+
+---
+
 *Document created 2026-05-11.  Append new attempts to existing issues rather than
 creating duplicate entries.*

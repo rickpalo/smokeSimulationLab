@@ -4,13 +4,15 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
-## TODO-37: Reorder Gas Parameters to match Blender's tab order — **OPEN** (v0.6.0)
+## TODO-37: Reorder Gas Parameters to match Blender's tab order — **DONE** (v0.6.0)
 
-**Filed 2026-05-29.** Cosmetic UI fix.  The Gas Parameters section currently
-draws controls in the order **Vorticity → Buoyancy Density → Buoyancy Heat**,
-but Blender's native Fluid Domain panel shows them as **Buoyancy Density →
-Buoyancy Heat → Vorticity**.  Match the native order so the addon UI is
-visually consistent with the rest of Blender.
+**Filed + Resolved 2026-05-29.** Cosmetic UI fix.  The Gas Parameters section
+previously drew controls in the order **Vorticity → Buoyancy Density → Buoyancy
+Heat**, while Blender's native Fluid Domain panel shows **Buoyancy Density →
+Buoyancy Heat → Vorticity**.  Resolution (v0.6.0): swapped the three
+`_sub_param_ui()` calls in `_gas_ui()`; purely visual, property names
+(vorticity/alpha/beta), job-dict serialisation, CSV columns, and `make_name()`
+output all unchanged.  Test: `test_v060_fixes.TestTodo37GasParamsOrder`.
 
 **Files:** `__init__.py` — `_gas_ui()` at the three `_sub_param_ui()` calls
 (currently around lines 3969-3971).  Swap the call order:
