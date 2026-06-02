@@ -808,9 +808,10 @@ counter drops by 1 when the crash happens (instead of staying at 13/13).
 
 ## BUG-013: slow=False jobs inherit slow=True caches (v0.6.0 TODO-39 backwards-compat collision)
 
-**Status:** `OPEN` — scheduled for next patch (v0.6.1 or v0.7.0)
+**Status:** `DEPLOYED / UNVERIFIED` (v0.6.2 — make_name uses -Slow/-Fast explicitly)
 **Files:** `__init__.py` — `make_name()` (~line 660)
 **Filed:** 2026-06-01 from user observation in 13-job batch
+**Resolved:** 2026-06-02 — option (B) implemented per the recommended approach
 
 ### Symptoms
 User ran a job with addon setting `slow_dissolve` UNCHECKED.  Worker cfg

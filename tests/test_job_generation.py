@@ -592,15 +592,20 @@ class TestMakeName:
         return p
 
     def test_basic_format(self):
+        # v0.7.0 BUG-013: slow=False jobs now produce '-Fast' suffix
+        # (was bare 'D5' for backwards-compat in v0.6.0; that caused
+        # silent cache-reuse collisions with pre-v0.6.0 slow=True caches).
         p = self._base_params()
         name = make_name(p)
-        assert name == "R64_V0.0_A1.0_B1.0_D5_N2_NS2.0_SC2.0"
+        assert name == "R64_V0.0_A1.0_B1.0_D5-Fast_N2_NS2.0_SC2.0"
 
     def test_dissolve_off(self):
         p = self._base_params(use_dissolve=False)
         name = make_name(p)
         assert "D-OFF" in name
+        # When dissolve is off, no D<N> form (Fast or Slow) appears.
         assert "D5" not in name
+        assert "-Fast" not in name and "-Slow" not in name
 
     def test_noise_off(self):
         p = self._base_params(use_noise=False)

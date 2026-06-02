@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 6, 1),
+    "version":     (0, 6, 2),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -199,6 +199,7 @@ def _settings_dict(s):
         "use_dissolve":          s.use_dissolve,
         "slow_dissolve":         s.slow_dissolve,
         "iterate_dissolve_both": getattr(s, "iterate_dissolve_both", False),
+        "iterate_slow_dissolve": getattr(s, "iterate_slow_dissolve", False),
         "use_noise":             s.use_noise,
         "iterate_noise_both":    getattr(s, "iterate_noise_both", False),
         "params": {},
@@ -222,6 +223,8 @@ def _apply_settings_dict(s, data):
     s.slow_dissolve  = data.get("slow_dissolve",  False)
     if hasattr(s, "iterate_dissolve_both"):
         s.iterate_dissolve_both = data.get("iterate_dissolve_both", False)
+    if hasattr(s, "iterate_slow_dissolve"):
+        s.iterate_slow_dissolve = data.get("iterate_slow_dissolve", False)
     s.use_noise      = data.get("use_noise",       False)
     if hasattr(s, "iterate_noise_both"):
         s.iterate_noise_both = data.get("iterate_noise_both", False)
@@ -497,6 +500,16 @@ def generate_jobs_limited(s):
             job[param_name] = v
             yielded = True
             yield job
+            # v0.7.0 TODO-45: Iterate Slow Dissolve — for each sweep job
+            # that has use_dissolve on, also yield a companion with the
+            # opposite slow_dissolve.  Skip when use_dissolve is False on
+            # the job itself (e.g. an iterate_dissolve_both off-pass)
+            # because slow doesn't apply there.
+            if (s.use_dissolve and getattr(s, "iterate_slow_dissolve", False)
+                    and job.get("use_dissolve")):
+                flipped = dict(job)
+                flipped["slow_dissolve"] = not job["slow_dissolve"]
+                yield flipped
 
     # Iterate-both: append one comparison job with the feature toggled off.
     # Only fires when the feature is currently enabled (the checkbox is hidden
@@ -507,6 +520,8 @@ def generate_jobs_limited(s):
         job["use_dissolve"] = False
         yielded = True
         yield job
+        # NOTE: no slow-flip companion here — this job has
+        # use_dissolve=False so slow_dissolve doesn't apply.
 
     if s.use_noise and s.iterate_noise_both:
         base = _default_job(s)
@@ -514,6 +529,13 @@ def generate_jobs_limited(s):
         job["use_noise"] = False
         yielded = True
         yield job
+        # v0.7.0 TODO-45: this noise-off job retains current use_dissolve
+        # — if dissolve is on, also yield its slow-flipped companion.
+        if (s.use_dissolve and getattr(s, "iterate_slow_dissolve", False)
+                and job.get("use_dissolve")):
+            flipped = dict(job)
+            flipped["slow_dissolve"] = not job["slow_dissolve"]
+            yield flipped
 
     # Fallback: if no axis sweep produced jobs and no iterate-both pass was
     # configured, emit a single baseline job. Otherwise a user with only
@@ -521,7 +543,15 @@ def generate_jobs_limited(s):
     # which is surprising — testing one specific param combination is a valid
     # use case and should not require enabling All Combinations mode.
     if not yielded:
-        yield _default_job(s)
+        base = _default_job(s)
+        yield base
+        # v0.7.0 TODO-45: fallback baseline also gets a slow companion
+        # when iterate_slow_dissolve is on and use_dissolve is True.
+        if (s.use_dissolve and getattr(s, "iterate_slow_dissolve", False)
+                and base.get("use_dissolve")):
+            flipped = dict(base)
+            flipped["slow_dissolve"] = not base["slow_dissolve"]
+            yield flipped
 
 
 def generate_jobs_all(s):
@@ -554,9 +584,15 @@ def generate_jobs_all(s):
 
     # Build the set of (use_dissolve, slow_dissolve, dissolve_vals) states.
     # When iterate_dissolve_both is on, generate two passes: feature on then off.
+    # v0.7.0 TODO-45: when iterate_slow_dissolve is on AND use_dissolve is on,
+    # also generate a parallel state with the slow_dissolve flag flipped, so
+    # every dissolve-enabled combo gets baked both slow and fast.
     if s.use_dissolve:
         dissolve_states = [(True, s.slow_dissolve, param("dissolve_speed"))]
+        if getattr(s, "iterate_slow_dissolve", False):
+            dissolve_states.append((True, not s.slow_dissolve, param("dissolve_speed")))
         if s.iterate_dissolve_both:
+            # use_dissolve=False — slow doesn't apply, no slow-flip companion.
             dissolve_states.append((False, s.slow_dissolve, [expand_param(s, "dissolve_speed")[0]]))
     else:
         dissolve_states = [(False, s.slow_dissolve, [expand_param(s, "dissolve_speed")[0]])]
@@ -659,14 +695,16 @@ def make_name(p):
     -------
     str — filename stem without extension
     """
-    # v0.6.0 TODO-39: append "-Slow" when slow_dissolve is enabled, so two
-    # otherwise-identical jobs differing only in Slow vs Fast dissolve get
-    # distinct cache/render directories and filenames.  Backwards-compatible:
-    # slow=False jobs keep the original "D5" form (matches existing on-disk
-    # caches), only slow=True jobs get the new "-Slow" suffix.
+    # v0.7.0 BUG-013: always include an explicit slow/fast indicator so
+    # slow=False jobs can't inherit a pre-v0.6.0 slow=True cache (which
+    # was also named "D5" before the v0.6.0 TODO-39 backwards-compat
+    # change).  v0.6.0 slow=True caches (named "D5-Slow") survive the
+    # transition unchanged; pre-v0.6.0 caches with the bare "D5" name
+    # become orphaned and must be re-baked (acceptable price for
+    # correctness — see BUG_TRACKER.md BUG-013 for the full analysis).
     dissolve_part = (
         (f"D{int(p['dissolve_speed'])}-Slow" if p.get('slow_dissolve')
-         else f"D{int(p['dissolve_speed'])}")
+         else f"D{int(p['dissolve_speed'])}-Fast")
         if p['use_dissolve'] else "D-OFF"
     )
     noise_part = (
@@ -1424,6 +1462,22 @@ class SmokeSettings(bpy.types.PropertyGroup):
     slow_dissolve: bpy.props.BoolProperty(
         default=False,
         description="Use logarithmic (slow) dissolve instead of linear",
+    )
+    # v0.7.0 TODO-45: Iterate Slow Dissolve.  When checked, every job
+    # produced by the dissolve sweep also gets a companion job with the
+    # opposite slow_dissolve value (slow ↔ fast).  Mirrors the existing
+    # iterate_dissolve_both pattern but at one more level of nesting
+    # (the slow/fast axis within use_dissolve=True jobs).  Only
+    # meaningful when use_dissolve is True (greyed out otherwise).
+    iterate_slow_dissolve: bpy.props.BoolProperty(
+        name="Iterate Slow Dissolve",
+        description=(
+            "For each dissolve job, also generate a companion job with "
+            "the opposite Slow Dissolve setting (slow ↔ fast), so you can "
+            "compare both dissolve modes in the same batch.  Only "
+            "applies when Use Dissolve is enabled."
+        ),
+        default=False,
     )
     dissolve_speed_begin:     bpy.props.IntProperty(default=5)
     dissolve_speed_end:       bpy.props.IntProperty(default=5)
@@ -3987,7 +4041,11 @@ def _standalone_param_ui(layout, s, name, label,
     label       : str — section header label
     show_prop   : str — name of the BoolProperty controlling collapse
     enable_prop : str or None — if set, draws an enable checkbox in the header
-    extra_props : list of (prop_name, label) tuples drawn before the default value
+    extra_props : list of items drawn before the value controls.  Each item
+                  may be either:
+                    • a (prop_name, label) tuple → drawn on its own row, OR
+                    • a list of such tuples → drawn together on ONE row
+                                              (v0.7.0 TODO-45 pairing).
     """
     box = layout.box()
     row = box.row()
@@ -4004,8 +4062,15 @@ def _standalone_param_ui(layout, s, name, label,
         return box
 
     if extra_props:
-        for prop_name, prop_label in extra_props:
-            box.prop(s, prop_name, text=prop_label)
+        for item in extra_props:
+            if isinstance(item, list):
+                # Same-row pairing: draw all tuples in one row, equal-split.
+                shared = box.row(align=True)
+                for prop_name, prop_label in item:
+                    shared.prop(s, prop_name, text=prop_label)
+            else:
+                prop_name, prop_label = item
+                box.prop(s, prop_name, text=prop_label)
 
     row = box.row()
     row.prop(s, f"{name}_use_range", text="Range", toggle=True)
@@ -4178,12 +4243,17 @@ class SMOKE_PT_panel(bpy.types.Panel):
             _gas_ui(box_sim, s)
             box_sim.separator()
 
+            # v0.7.0 TODO-45: Iterate Slow Dissolve checkbox paired on the
+            # same row as the Slow Dissolve checkbox (nested list = one row).
             _standalone_param_ui(box_sim, s, "dissolve_speed", "Dissolve",
                                  show_prop="show_dissolve",
                                  enable_prop="use_dissolve",
                                  extra_props=[
                                      ("iterate_dissolve_both", "Iterate Both On and Off"),
-                                     ("slow_dissolve", "Slow Dissolve"),
+                                     [
+                                         ("slow_dissolve",         "Slow Dissolve"),
+                                         ("iterate_slow_dissolve", "Iterate Slow"),
+                                     ],
                                  ])
             box_sim.separator()
 
@@ -4463,6 +4533,7 @@ def _reset_on_load(dummy=None):
         s.use_dissolve          = False
         s.slow_dissolve         = False
         s.iterate_dissolve_both = False
+        s.iterate_slow_dissolve = False
         s.use_noise             = False
         s.iterate_noise_both    = False
 

@@ -40,7 +40,18 @@ doesn't block any workflow.  Bundle with the bake-bar refactor
 
 ---
 
-## TODO-45: Iterate Slow Dissolve checkbox + audit no-dissolve-jobs-when-off — **OPEN** (v0.7.0)
+## TODO-45: Iterate Slow Dissolve checkbox + audit no-dissolve-jobs-when-off — **DONE** (v0.6.2)
+
+**Filed + Resolved 2026-06-01 → 2026-06-02.**  New `iterate_slow_dissolve`
+BoolProperty + UI checkbox paired with Slow Dissolve on the same row in
+the Dissolve section.  When checked AND `use_dissolve=True`, every
+dissolve-using job in both LIMITED and ALL modes gets a companion with
+the opposite slow_dissolve value.  Combines cleanly with
+`iterate_dissolve_both`.  Part B audit confirmed (with regression test)
+that no dissolve sweep jobs are created when `use_dissolve` is off.
+Tests: 11 new in `test_todo45_iterate_slow.py`.  See RELEASING.md v0.6.2.
+
+**Original spec retained below for reference.**
 
 **Filed 2026-06-01.** Two related items:
 

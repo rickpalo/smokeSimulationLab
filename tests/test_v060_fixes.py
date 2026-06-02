@@ -161,19 +161,24 @@ class TestTodo39SlowFilenameIndicator:
         assert "D-OFF" in make_name(p)
         assert "Slow" not in make_name(p)
 
-    def test_slow_off_uses_original_form(self):
-        """Backwards-compat: slow=False jobs produce names matching the
-        pre-v0.6.0 form so existing on-disk caches still match."""
+    def test_slow_off_uses_fast_suffix(self):
+        """v0.7.0 BUG-013: slow=False jobs now produce explicit '-Fast'
+        suffix.  Previously (v0.6.0) they kept the original 'D5' form for
+        backwards-compat — but that caused pre-v0.6.0 slow=True caches
+        (also named 'D5') to be silently reused by v0.6.0 slow=False
+        jobs.  Explicit '-Fast' suffix eliminates the collision; pre-v0.6.0
+        caches become orphaned and must be re-baked (acceptable for
+        correctness)."""
         p = self._base_params()
         p["use_dissolve"]  = True
         p["dissolve_speed"] = 5
         p["slow_dissolve"]  = False
         name = make_name(p)
-        assert "_D5_" in name, (
-            f"slow=False must produce 'D5' (no suffix) for backwards-compat; "
+        assert "_D5-Fast_" in name, (
+            f"slow=False must produce 'D5-Fast' (v0.7.0 BUG-013 fix); "
             f"got: {name}"
         )
-        assert "Slow" not in name
+        assert "-Slow" not in name
 
     def test_slow_on_appends_slow_suffix(self):
         p = self._base_params()
