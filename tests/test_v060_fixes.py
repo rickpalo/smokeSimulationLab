@@ -203,18 +203,47 @@ class TestTodo39SlowFilenameIndicator:
 
 
 class TestV060VersionBumps:
-    def test_addon_at_0_6_0(self):
-        src = _addon_src()
-        m = re.search(r'"version":\s*\(0, 6, 0\)', src)
-        assert m, "addon bl_info version must be (0, 6, 0)"
+    """Version floor regression guards.  Updated in v0.6.1: assert
+    minimum version (>= 0.6.0) rather than exact pin, so future patch
+    bumps don't keep breaking these tests."""
 
-    def test_worker_at_0_6_0(self):
+    def test_addon_at_least_0_6_0(self):
+        src = _addon_src()
+        m = re.search(r'"version":\s*\((\d+),\s*(\d+),\s*(\d+)\)', src)
+        assert m, "addon bl_info version line not found"
+        major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        assert (major, minor, patch) >= (0, 6, 0), (
+            f"addon version {major}.{minor}.{patch} < 0.6.0 — "
+            f"v0.6.0 introduced the TODO-39 / BUG-012 fixes"
+        )
+
+    def test_worker_at_least_0_6_0(self):
         src = _worker_src()
-        m = re.search(r'^WORKER_VERSION = "0\.6\.0"', src, re.MULTILINE)
-        assert m, "WORKER_VERSION must be '0.6.0'"
+        m = re.search(r'^WORKER_VERSION = "(\d+)\.(\d+)\.(\d+)"', src, re.MULTILINE)
+        assert m, "WORKER_VERSION constant not found"
+        major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        assert (major, minor, patch) >= (0, 6, 0), (
+            f"WORKER_VERSION {major}.{minor}.{patch} < 0.6.0 — "
+            f"v0.6.0 introduced the text-precision fix"
+        )
 
     def test_addon_expects_matching_worker(self):
-        src = _addon_src()
-        assert '_EXPECTED_WORKER_VERSION   = "0.6.0"' in src, (
-            "addon's _EXPECTED_WORKER_VERSION must match worker 0.6.0"
+        """The addon's _EXPECTED_WORKER_VERSION should match what's
+        currently in smoke_worker.py — otherwise the addon would warn
+        users about a "wrong" worker version on every Run Batch."""
+        src_addon  = _addon_src()
+        src_worker = _worker_src()
+        m_expected = re.search(
+            r'_EXPECTED_WORKER_VERSION\s+= "(\d+\.\d+\.\d+)"',
+            src_addon,
+        )
+        m_actual   = re.search(
+            r'^WORKER_VERSION = "(\d+\.\d+\.\d+)"',
+            src_worker,
+            re.MULTILINE,
+        )
+        assert m_expected and m_actual
+        assert m_expected.group(1) == m_actual.group(1), (
+            f"addon expects worker {m_expected.group(1)!r} but worker "
+            f"reports {m_actual.group(1)!r} — bump one to match the other"
         )

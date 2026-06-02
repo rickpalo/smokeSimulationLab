@@ -43,7 +43,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "SmokeSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 6, 0),
+    "version":     (0, 6, 1),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > SmokeLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging",
@@ -1608,6 +1608,29 @@ class SmokeSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
+    # ── Output (collapsible: Iteration Mode + render settings + Run Batch) ────
+    # v0.7.0 TODO-44: groups Iteration Mode through Run Batch into a single
+    # collapsible section so the panel doesn't sprawl as v0.7.0 / v0.8.0
+    # add more rows.
+    show_output: bpy.props.BoolProperty(
+        name="Output",
+        default=True,
+        description="Expand or collapse the Output section "
+                    "(Iteration Mode, render settings, Export/Run Batch)",
+    )
+
+    # ── Progress (collapsible: progress bars + Job Log + summary) ─────────────
+    # v0.7.0 TODO-44: groups all in-flight / post-batch display into one
+    # collapsible.  Force-opens whenever a batch is running or a post-batch
+    # summary is visible — the draw code overrides the user's collapse state
+    # in those cases so they can't accidentally hide active progress.
+    show_progress: bpy.props.BoolProperty(
+        name="Progress",
+        default=True,
+        description="Expand or collapse the Progress section "
+                    "(force-opened while a batch is running)",
+    )
+
     # ── Job Log ───────────────────────────────────────────────────────────────
 
     show_job_log: bpy.props.BoolProperty(
@@ -2690,9 +2713,29 @@ def _poll_batch_progress_impl():
         # .render.done so the bar advances during the bake pass (before any
         # unphased <stem>.done — written only after the FINAL pass — appears).
         # Bake-only mode (no render pass in this batch) collapses to N phases.
-        _all_files     = os.listdir(jobs_dir)
-        _bake_done_n   = sum(1 for _f in _all_files if _BAKE_DONE_RE.match(_f))
-        _render_done_n = sum(1 for _f in _all_files if _RENDER_DONE_RE.match(_f))
+        #
+        # v0.7.0 BUG-014: like the unphased done count (BUG-012, v0.6.0), the
+        # phased counts must EXCLUDE failed jobs.  The .bat writes
+        # `.bake.done` for both success (`done <stem>`) and failure
+        # (`error exit N <stem>`); naive counting puts crashed bakes into
+        # the "13/13 baked" total — user reported 2026-06-01 with a
+        # 13-job batch where 1 bake crashed but Bake count still said 13/13.
+        # Same content-read pattern as the BUG-012 fix below.
+        _all_files = os.listdir(jobs_dir)
+        def _count_phase_success(_re):
+            n = 0
+            for _f in _all_files:
+                if not _re.match(_f):
+                    continue
+                try:
+                    with open(os.path.join(jobs_dir, _f), "r") as _fh:
+                        if "error" not in _fh.read().lower():
+                            n += 1
+                except OSError:
+                    pass
+            return n
+        _bake_done_n   = _count_phase_success(_BAKE_DONE_RE)
+        _render_done_n = _count_phase_success(_RENDER_DONE_RE)
         _bake_only     = not s.render_simulation_result
         # v0.6.0 BUG-012: show "(N done)" with successful count, and append
         # ", F failed" only when failed > 0 (avoids visual noise on clean runs).
@@ -4148,136 +4191,179 @@ class SMOKE_PT_panel(bpy.types.Panel):
 
         layout.separator()
 
-        # ── Iteration mode + job count ────────────────────────────────────
-        job_count = sum(1 for _ in generate_jobs(s))
-        box  = layout.box()
-        box.label(text="Iteration Mode:")
-        box.prop(s, "iteration_mode", expand=True)
-        box.label(text=f"{job_count} job(s) will be created")
-
-        layout.separator()
-
-        # ── Render settings ──────────────────────────────────────────────────
-        layout.prop(s, "use_placeholders",   text="Use Placeholders")
-        row_cache = layout.row()
-        row_cache.separator(factor=2.0)
-        sub_cache = row_cache.column()
-        sub_cache.enabled = not s.use_placeholders
-        sub_cache.prop(s, "use_existing_cache", text="Use Existing Cache")
-        layout.prop(s, "auto_retry_failed",  text="Automatically Retry Failed Jobs")
-
-        # Render Simulation Result (TODO-26): when off, run a bake-only batch and
-        # grey out everything that only matters when rendering.
-        layout.prop(s, "render_simulation_result", text="Render Simulation Result")
-        _render_on = s.render_simulation_result
-
-        # Render Animation (TODO-33): still-only mode skips the PNG sequence + MP4.
-        # Only meaningful when rendering is on at all.
-        row_anim = layout.row()
-        row_anim.enabled = _render_on
-        row_anim.prop(s, "render_animation", text="Render Animation")
-
-        row = layout.row()
-        row.enabled = _render_on
-        row.prop(s, "render_mode",    text="Render Engine")
-        row.prop(s, "render_samples", text="Samples")
-
-        # Disable Export/Append while a batch is running (TODO-28 safeguard): the
-        # running cmd.exe already parsed the .bat, so editing it now can't help.
+        # v0.7.0 TODO-44: pre-compute _running here so both the Output and
+        # Progress sections can reference it (and the Progress auto-expand
+        # logic below).
         _running = _batch_is_running()
-        row_mode = layout.row(align=True)
-        row_mode.enabled = not _running
-        row_mode.prop(s, "export_mode", expand=True)
-        export_row = layout.row()
-        # Grey out the button when no jobs would be created so the user can't
-        # click it and get a misleading "Exported 0 job(s)" success message.
-        # In LIMITED mode the fallback baseline ensures count >= 1, so this
-        # only fires in pathological cases (e.g. all-empty lists in ALL mode).
-        export_row.enabled = job_count > 0 and not _running
-        export_row.operator(
-            "smoke.export_batch",
-            text=f"Export Batch  ({job_count} jobs)",
-            icon='EXPORT',
+
+        # ── Output (collapsible: Iteration Mode + render settings + Run Batch) ──
+        box_out = layout.box()
+        row_out = box_out.row()
+        row_out.prop(s, "show_output",
+                     icon='TRIA_DOWN' if s.show_output else 'TRIA_RIGHT',
+                     emboss=False, text="")
+        row_out.label(text="Output")
+        # job_count needed for both the in-section label and the Export Batch
+        # button; compute outside the if so the button-enable logic below
+        # has access regardless of collapse state (though the button only
+        # draws inside the if).
+        job_count = sum(1 for _ in generate_jobs(s))
+        if s.show_output:
+            # ── Iteration mode + job count ────────────────────────────────
+            box_iter = box_out.box()
+            box_iter.label(text="Iteration Mode:")
+            box_iter.prop(s, "iteration_mode", expand=True)
+            box_iter.label(text=f"{job_count} job(s) will be created")
+
+            box_out.separator()
+
+            # ── Render settings ──────────────────────────────────────────
+            box_out.prop(s, "use_placeholders",   text="Use Placeholders")
+            row_cache = box_out.row()
+            row_cache.separator(factor=2.0)
+            sub_cache = row_cache.column()
+            sub_cache.enabled = not s.use_placeholders
+            sub_cache.prop(s, "use_existing_cache", text="Use Existing Cache")
+            box_out.prop(s, "auto_retry_failed",  text="Automatically Retry Failed Jobs")
+
+            # Render Simulation Result (TODO-26): when off, run a bake-only batch and
+            # grey out everything that only matters when rendering.
+            box_out.prop(s, "render_simulation_result", text="Render Simulation Result")
+            _render_on = s.render_simulation_result
+
+            # Render Animation (TODO-33): still-only mode skips the PNG sequence + MP4.
+            # Only meaningful when rendering is on at all.
+            row_anim = box_out.row()
+            row_anim.enabled = _render_on
+            row_anim.prop(s, "render_animation", text="Render Animation")
+
+            row = box_out.row()
+            row.enabled = _render_on
+            row.prop(s, "render_mode",    text="Render Engine")
+            row.prop(s, "render_samples", text="Samples")
+
+            # Disable Export/Append while a batch is running (TODO-28 safeguard): the
+            # running cmd.exe already parsed the .bat, so editing it now can't help.
+            row_mode = box_out.row(align=True)
+            row_mode.enabled = not _running
+            row_mode.prop(s, "export_mode", expand=True)
+            export_row = box_out.row()
+            # Grey out the button when no jobs would be created so the user can't
+            # click it and get a misleading "Exported 0 job(s)" success message.
+            # In LIMITED mode the fallback baseline ensures count >= 1, so this
+            # only fires in pathological cases (e.g. all-empty lists in ALL mode).
+            export_row.enabled = job_count > 0 and not _running
+            export_row.operator(
+                "smoke.export_batch",
+                text=f"Export Batch  ({job_count} jobs)",
+                icon='EXPORT',
+            )
+
+            # Status line from last export (word-wrapped at 60 chars)
+            if s.last_export_info:
+                col = box_out.column(align=True)
+                col.scale_y = 0.75
+                info = s.last_export_info
+                col.label(text=info[:60])
+                if len(info) > 60:
+                    col.label(text=info[60:])
+
+            box_out.separator()
+            # "Display Results When Finished" is meaningless in bake-only mode; grey
+            # it out there (the property is also force-cleared by its update callback).
+            row_show = box_out.row()
+            row_show.enabled = _render_on
+            row_show.prop(s, "show_results")
+            # Run Batch is enabled only when a runnable batch exists on disk (TODO-25)
+            # and no batch is already running (TODO-28 safeguard).
+            run_row = box_out.row()
+            run_row.enabled = _batch_ready(bpy.path.abspath(s.output_path)) and not _running
+            run_row.operator("smoke.run_batch", text="Run Batch", icon='PLAY')
+
+        layout.separator()
+
+        # ── Progress (collapsible: bars + summary + Job Log) ──────────────
+        # v0.7.0 TODO-44: progress display lives in its own collapsible.
+        # Auto-expand whenever a batch is running OR a post-batch summary
+        # is visible — overrides the user's manual collapse so they can't
+        # accidentally hide active progress.  The toggle still binds to
+        # show_progress so the manual choice persists for the next batch.
+        _progress_active = (
+            _running
+            or bool(s.batch_summary_line1)
+            or bool(s.batch_progress)
+            or bool(s.job_log_items)
         )
+        _effective_show_progress = s.show_progress or _progress_active
 
-        # Status line from last export (word-wrapped at 60 chars)
-        if s.last_export_info:
-            col = layout.column(align=True)
-            col.scale_y = 0.75
-            info = s.last_export_info
-            col.label(text=info[:60])
-            if len(info) > 60:
-                col.label(text=info[60:])
+        box_prog = layout.box()
+        row_prog = box_prog.row()
+        row_prog.prop(s, "show_progress",
+                      icon='TRIA_DOWN' if _effective_show_progress else 'TRIA_RIGHT',
+                      emboss=False, text="")
+        row_prog.label(text="Progress")
+        if _progress_active and not s.show_progress:
+            # Visual hint that the section is force-opened (subtle — the
+            # arrow icon already shows DOWN).  Skip an extra label to keep
+            # the header tight.
+            pass
 
-        layout.separator()
-        # "Display Results When Finished" is meaningless in bake-only mode; grey
-        # it out there (the property is also force-cleared by its update callback).
-        row_show = layout.row()
-        row_show.enabled = _render_on
-        row_show.prop(s, "show_results")
-        # Run Batch is enabled only when a runnable batch exists on disk (TODO-25)
-        # and no batch is already running (TODO-28 safeguard).
-        run_row = layout.row()
-        run_row.enabled = _batch_ready(bpy.path.abspath(s.output_path)) and not _running
-        run_row.operator("smoke.run_batch", text="Run Batch", icon='PLAY')
+        if _effective_show_progress:
+            if s.batch_summary_line1:
+                box_prog.label(text=s.batch_summary_line1, icon='CHECKMARK')
+                box_prog.label(text=s.batch_summary_line2)
+                if s.batch_summary_line3:
+                    box_prog.label(text=s.batch_summary_line3)
+                if s.batch_summary_line4:
+                    box_prog.label(text=s.batch_summary_line4)
+                    box_prog.operator("smoke.retry_failed", icon='FILE_REFRESH')
+                box_prog.operator("smoke.setup_results", icon='IMAGE_DATA')
+            elif s.batch_progress:
+                # Bar 3a — current sub-task (what is happening right now)
+                if s.batch_subtask_text:
+                    try:
+                        box_prog.progress(factor=s.batch_subtask_factor, type='BAR',
+                                          text=s.batch_subtask_text)
+                    except AttributeError:
+                        box_prog.label(text=s.batch_subtask_text)
 
-        if s.batch_summary_line1:
-            layout.label(text=s.batch_summary_line1, icon='CHECKMARK')
-            layout.label(text=s.batch_summary_line2)
-            if s.batch_summary_line3:
-                layout.label(text=s.batch_summary_line3)
-            if s.batch_summary_line4:
-                layout.label(text=s.batch_summary_line4)
-                layout.operator("smoke.retry_failed", icon='FILE_REFRESH')
-            layout.operator("smoke.setup_results", icon='IMAGE_DATA')
-        elif s.batch_progress:
-            # Bar 3a — current sub-task (what is happening right now)
-            if s.batch_subtask_text:
+                # Bar 3b — job stage progress (how many sub-tasks are complete)
+                if s.batch_job_text:
+                    try:
+                        box_prog.progress(factor=s.batch_job_factor, type='BAR',
+                                          text=s.batch_job_text)
+                    except AttributeError:
+                        box_prog.label(text=s.batch_job_text)
+
+                # Bar 3c — overall job count (X of Y jobs complete)
                 try:
-                    layout.progress(factor=s.batch_subtask_factor, type='BAR',
-                                    text=s.batch_subtask_text)
+                    box_prog.progress(factor=s.batch_overall_factor, type='BAR',
+                                      text=s.batch_progress)
                 except AttributeError:
-                    layout.label(text=s.batch_subtask_text)
+                    box_prog.label(text=s.batch_progress, icon='TIME')
 
-            # Bar 3b — job stage progress (how many sub-tasks are complete)
-            if s.batch_job_text:
-                try:
-                    layout.progress(factor=s.batch_job_factor, type='BAR',
-                                    text=s.batch_job_text)
-                except AttributeError:
-                    layout.label(text=s.batch_job_text)
+                if s.batch_time_remaining:
+                    box_prog.label(text=s.batch_time_remaining, icon='TIME')
 
-            # Bar 3c — overall job count (X of Y jobs complete)
-            try:
-                layout.progress(factor=s.batch_overall_factor, type='BAR',
-                                text=s.batch_progress)
-            except AttributeError:
-                layout.label(text=s.batch_progress, icon='TIME')
-
-            if s.batch_time_remaining:
-                layout.label(text=s.batch_time_remaining, icon='TIME')
-
-        layout.separator()
-
-        # ── Job Log (only shown once populated; auto-expands on Run Batch) ──────
-        if s.job_log_items:
-            box_log = layout.box()
-            row_log = box_log.row()
-            row_log.prop(s, "show_job_log",
-                         icon='TRIA_DOWN' if s.show_job_log else 'TRIA_RIGHT',
-                         emboss=False, text="")
-            row_log.label(text="Job Log")
-            if s.show_job_log:
-                hdr = box_log.row()
-                hdr.label(text="", icon='BLANK1')
-                hdr.label(text="#")
-                hdr.label(text="Job Name")
-                box_log.template_list(
-                    "SMOKE_UL_job_log", "",
-                    s, "job_log_items",
-                    s, "job_log_index",
-                    rows=min(len(s.job_log_items), 8),
-                )
+            # ── Job Log (nested inside Progress; only shown once populated) ──
+            if s.job_log_items:
+                box_log = box_prog.box()
+                row_log = box_log.row()
+                row_log.prop(s, "show_job_log",
+                             icon='TRIA_DOWN' if s.show_job_log else 'TRIA_RIGHT',
+                             emboss=False, text="")
+                row_log.label(text="Job Log")
+                if s.show_job_log:
+                    hdr = box_log.row()
+                    hdr.label(text="", icon='BLANK1')
+                    hdr.label(text="#")
+                    hdr.label(text="Job Name")
+                    box_log.template_list(
+                        "SMOKE_UL_job_log", "",
+                        s, "job_log_items",
+                        s, "job_log_index",
+                        rows=min(len(s.job_log_items), 8),
+                    )
 
         layout.separator()
 
@@ -4419,6 +4505,9 @@ def _reset_on_load(dummy=None):
         s.batch_summary_line3 = s.batch_summary_line4 = ""
         s.batch_progress         = ""
         s.show_job_log           = False
+        # v0.7.0 TODO-44: reset collapsible section state on .blend load
+        s.show_output            = True
+        s.show_progress          = True
         s.job_log_auto_scroll    = True
         _job_statuses.clear()
         _job_log_rows.clear()

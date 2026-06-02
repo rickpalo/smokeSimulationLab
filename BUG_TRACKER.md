@@ -764,6 +764,114 @@ equals the requested frame count, and the bake bar reads "N of 20".
 
 ---
 
+## BUG-014: Bake/Render phased counts include failed jobs (Bake 13/13 with 1 crashed bake)
+
+**Status:** `DEPLOYED / UNVERIFIED` (v0.6.1)
+**Files:** `__init__.py` — `_poll_batch_progress_impl` phased-count block
+
+### Symptoms (filed 2026-06-01)
+User observed during a 13-job batch with 1 bake crash: the live progress
+display showed `Bake 13/13  Render 0/13  (0/13 done)` even though one of
+those 13 bakes had crashed (job 5 with the ⚠ icon in the Job Log).  The
+crash didn't reduce the bake count.
+
+### Root Cause
+Same family as BUG-012, but for the phased counters.  v0.6.0 fixed the
+unphased `(N done)` count to read `.done` content and exclude `"error"`
+files.  The phased counters at the same call site were left as:
+
+```python
+_bake_done_n   = sum(1 for _f in _all_files if _BAKE_DONE_RE.match(_f))
+_render_done_n = sum(1 for _f in _all_files if _RENDER_DONE_RE.match(_f))
+```
+
+The `.bat` writes `.bake.done` for BOTH success (`done <stem>`) and
+failure (`error exit N <stem>`), so naive matching counts crashed bakes
+as completed.  The unphased fix (BUG-012) caught one display string; this
+one caught the other.
+
+### Fix (v0.6.1)
+Extracted a `_count_phase_success(_re)` helper that reads each matching
+file's content and excludes `"error"`.  Both `_bake_done_n` and
+`_render_done_n` use it.
+
+### Tests Added
+`tests/test_todo44_sections.py::TestBug014PhasedCountsExcludeFailed`
+(4 tests): helper exists, helper reads content, both counters use the
+helper, naive regex-only counting is gone.
+
+### Verification
+Re-run a batch with an intentional bake failure and confirm the Bake N/M
+counter drops by 1 when the crash happens (instead of staying at 13/13).
+
+---
+
+## BUG-013: slow=False jobs inherit slow=True caches (v0.6.0 TODO-39 backwards-compat collision)
+
+**Status:** `OPEN` — scheduled for next patch (v0.6.1 or v0.7.0)
+**Files:** `__init__.py` — `make_name()` (~line 660)
+**Filed:** 2026-06-01 from user observation in 13-job batch
+
+### Symptoms
+User ran a job with addon setting `slow_dissolve` UNCHECKED.  Worker cfg
+log confirms `'slow_dissolve': False`.  Filename produced is correctly
+`R128_V0.0_A0.0_B0.0_D100_N-OFF` (no `-Slow` suffix, per TODO-39
+backwards-compat).  But the rendered output shows the smoke physics
+behavior of a slow=True bake, and the user observed "the text wasn't
+changed" suggesting the cache was reused from an earlier slow=True run.
+
+### Root Cause (v0.6.0 regression from TODO-39)
+TODO-39 added the `-Slow` filename suffix ONLY when `slow_dissolve=True`,
+to preserve backwards-compat with existing on-disk caches from pre-v0.6.0.
+The asymmetry creates a collision:
+
+| Era              | slow=True name | slow=False name |
+|------------------|----------------|-----------------|
+| v0.5.x and prior | `D100`         | `D100`          |
+| v0.6.0+          | `D100-Slow`    | `D100`          |
+
+A v0.6.0 slow=False job with `use_existing_cache=True` finds and
+SKIP-bakes a v0.5.x cache that was actually produced with slow=True
+— the underlying bake data is wrong, but the addon doesn't know.
+
+### Fix options
+**(A) Always add an explicit indicator (recommended).**  Change
+`make_name()` so use_dissolve=True jobs always include a Slow/Fast
+indicator.  E.g. `D100-Slow` / `D100-Fast`.  The plain `D100` form is
+retired.  All pre-v0.6.0 caches become orphaned (no longer match any
+new job name) — user must wipe and re-bake.  Names also fully
+disambiguate slow vs fast going forward; no more collision.
+
+**(B) Add `-Fast` for slow=False only.**  Like (A) but slow=True jobs
+keep the `-Slow` suffix from v0.6.0 (already shipping).  Same outcome
+as (A); cosmetically the v0.6.0 slow=True caches survive the
+transition while pre-v0.6.0 slow=True caches become orphaned.
+
+**(C) Status quo + user education.**  Document that mixing v0.5.x
+caches with v0.6.0 slow=False jobs is unsafe; rely on user to wipe
+Cache/ before mixing.  Worst option — sets up future bug reports.
+
+### Recommended approach
+Option (B).  Worker change is one line in make_name; new test asserts
+slow=False produces `-Fast`.  v0.6.0 slow=True caches (with `-Slow`
+names) survive intact; the user just needs to acknowledge orphaning
+old pre-v0.6.0 caches (or re-bake them).
+
+### Reproduction recipe
+1. Run a job in v0.5.5 with `slow_dissolve=True, dissolve_speed=100`,
+   `use_dissolve=True`.  Confirm cache at `Cache/R..._D100_..._N-OFF/`.
+2. Update to v0.6.0.  Same params except `slow_dissolve=False`.
+   `use_existing_cache=True`.  Export + Run Batch.
+3. Worker logs "SKIP BAKE — all N frames confirmed" reusing the v0.5.x
+   cache.  Render uses slow=True physics with slow=False text overlay.
+
+### Workaround until fix
+Before running v0.6.0 batches with slow=False, manually delete or rename
+any `Cache/...D<N>_...` directories from pre-v0.6.0 runs that were
+actually slow=True.  Or use `use_existing_cache=False` to force re-bake.
+
+---
+
 ## BUG-012: Failed Jobs Counted as "Done" in Live Progress Display
 
 **Status:** `DEPLOYED / UNVERIFIED` (v0.6.0)

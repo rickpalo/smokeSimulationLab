@@ -4,7 +4,91 @@ Items to address once file synchronization catches up (~5,000 PNGs behind as of 
 
 ---
 
-## TODO-44: Collapsible Output + Progress sections (UI reorg) — **OPEN** (v0.7.0, prerequisite for param expansion)
+## TODO-46: Time estimate doesn't account for two-pass bake-then-render — **OPEN** (v0.7.0)
+
+**Filed 2026-06-01.** User observation from a 13-job batch (~25 min into a
+render-pass job): the addon displayed `Job stage 3 of 4 (~15 min
+remaining this job)` and `All jobs: ~25 min remaining` — but with 8 jobs
+left to render and ~15 min per render, 8 × 15 = 120 min, not 25.
+
+**Root cause hypothesis:** the all-jobs estimate uses a per-job multiplier
+that doesn't model the two-pass pipeline.  With v0.4.0+ two-pass
+(`bake all` then `render all`), the current render-pass job N still has
+to be followed by render-pass jobs N+1, N+2, ... — but the estimator may
+be treating it as "average remaining job time × jobs remaining" using a
+"job time" that approximates a single-pass job (bake + render serially)
+instead of "remaining renders × per-render time" (the actual remaining
+work, since all bakes are done).
+
+**Fix sketch:**
+- Determine current phase (bake / render) by checking whether
+  `_bake_done_n == total` (all bakes complete).
+- If yes → remaining time = sum of render times for jobs not yet rendered.
+- If no → remaining time = sum of (bake + render) times for jobs not yet
+  baked + sum of render times for jobs baked but not yet rendered.
+- Per-job rates already collected (perf_log + estim_log) — use rolling
+  averages from completed jobs in the current batch when available;
+  fall back to the `_BAKE_RATE_PER_RES3_FRAME` / `_RENDER_RATE_*`
+  defaults when not.
+
+**Files:** `__init__.py` — `_poll_batch_progress_impl` "All jobs:" ETA
+block; possibly `_format_eta` callers and `_estim_log` consumers.
+
+**Priority:** medium — affects user confidence in time estimates but
+doesn't block any workflow.  Bundle with the bake-bar refactor
+(TODO-31, TODO-36) so the whole bar+ETA system gets one cleanup pass.
+
+---
+
+## TODO-45: Iterate Slow Dissolve checkbox + audit no-dissolve-jobs-when-off — **OPEN** (v0.7.0)
+
+**Filed 2026-06-01.** Two related items:
+
+### Part A: Iterate Slow Dissolve checkbox
+Add a checkbox **"Iterate Slow Dissolve"** on the same row as the existing
+**Slow Dissolve** checkbox in the Dissolve section.  When checked, every
+job with `slow_dissolve=True` automatically gets a matching companion
+job with `slow_dissolve=False` (and otherwise identical params), so the
+user gets a slow-vs-fast comparison without manually duplicating jobs.
+
+**Existing precedent:** the addon already has analogous
+`iterate_dissolve_both` (use_dissolve On vs Off) and `iterate_noise_both`
+(use_noise On vs Off) checkboxes implemented in `generate_jobs_limited`
+and `generate_jobs_all`.  The new `iterate_slow_dissolve` follows the
+same pattern at one level of nesting deeper.
+
+**Visibility:**
+- Only meaningful when `use_dissolve=True` (greyed out otherwise).
+- Companion job is created regardless of whether `slow_dissolve` itself
+  is True or False — the iteration adds the other value to the sweep.
+
+**Files:** `__init__.py` — add `iterate_slow_dissolve` BoolProperty
+adjacent to existing `slow_dissolve`; extend `generate_jobs_limited` /
+`generate_jobs_all`'s dissolve-sweep blocks to fork the slow/fast
+variants when the new flag is on; UI row update in `_dissolve_ui()`.
+
+### Part B: Audit — no dissolve jobs when use_dissolve is off
+User request: "double check we don't create Dissolve jobs when the
+Dissolve is Off."
+
+Inspect `generate_jobs_*` to confirm that with `use_dissolve=False`:
+- `dissolve_speed` is not swept (no jobs with varying speeds get created)
+- `slow_dissolve` is not iterated even if Iterate Slow Dissolve is on
+- The `_default_job` correctly carries `use_dissolve=False` through to
+  every job dict regardless of which other axis is being swept
+
+This is likely already correct (the `sweepable` list excludes
+dissolve_speed when use_dissolve is off — see line 457) but worth
+asserting with a regression test.
+
+---
+
+## TODO-44: Collapsible Output + Progress sections (UI reorg) — **DONE** (v0.6.1)
+
+**Filed + Resolved 2026-05-29 → 2026-06-01.**  See RELEASING.md v0.6.1 row
+and `tests/test_todo44_sections.py` (19 regression tests covering
+property registration, panel structure, auto-expand logic, and Job Log
+nesting inside Progress).
 
 **Filed 2026-05-29.** The Setup panel is getting tall.  v0.7.0 will add
 TODO-41 (Time Scale, Adaptive Time Step, CFL, Timesteps Max/Min) and
