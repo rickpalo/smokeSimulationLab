@@ -51,7 +51,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "BatchSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 6, 3),
+    "version":     (0, 7, 0),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > BatchLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging "
@@ -84,7 +84,7 @@ DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.6.3"
+_EXPECTED_WORKER_VERSION   = "0.7.0"
 _EXPECTED_LAUNCHER_VERSION = "0.6.3"
 
 
@@ -120,6 +120,17 @@ ITERABLE_PARAMS = [
     "noise_upres",
     "noise_strength",
     "noise_spatial_scale",
+    # v0.7.0 TODO-41: gas-side simulation timing parameters
+    "time_scale",
+    "cfl_number",
+    "timesteps_max",
+    "timesteps_min",
+    # v0.7.0 TODO-42: Fire Parameters (only applied when use_fire is True)
+    "burning_rate",
+    "flame_smoke",
+    "flame_vorticity",
+    "flame_max_temp",
+    "flame_ignition",
 ]
 
 # Hard bounds for each iterable parameter.  Used as a reliable fallback when
@@ -133,6 +144,17 @@ _PARAM_BOUNDS = {
     "noise_upres":         (1.0,  None),
     "noise_strength":      (0.0,  None),
     "noise_spatial_scale": (0.0,  None),
+    # v0.7.0 TODO-41
+    "time_scale":          (0.001, None),  # must be > 0 to avoid divide-by-zero
+    "cfl_number":          (0.5,  10.0),
+    "timesteps_max":       (1.0,  100.0),
+    "timesteps_min":       (1.0,  100.0),
+    # v0.7.0 TODO-42 (Blender's Fire settings — all non-negative floats)
+    "burning_rate":        (0.01, 4.0),
+    "flame_smoke":         (0.0,  8.0),
+    "flame_vorticity":     (0.0,  2.0),
+    "flame_max_temp":      (1.0,  10.0),
+    "flame_ignition":      (0.5,  10.0),
 }
 
 # Default per-frame / per-stage timing estimates used before real data is available.
@@ -193,6 +215,112 @@ def _sync_frame_defaults(self, context):
         self.sim_frame_end   = context.scene.frame_end
 
 
+# v0.7.0 TODO-40: when the user picks a fluid domain object in the addon
+# panel, copy the domain's CURRENT settings into the addon's `_begin`
+# (baseline) values + master toggles.  Only baseline values are touched —
+# any `_end` / `_step` / `_use_range` / `_use_list` sweep configuration the
+# user has already set up is preserved, so re-selecting a domain doesn't
+# wipe an in-progress sweep design.
+#
+# Each property read is wrapped in try/except so older Blender builds or
+# liquid-domain objects (missing fire/noise/dissolve attrs) don't crash
+# the callback — the missing properties are just silently skipped.
+#
+# The Blender attribute names don't always match our addon naming:
+#   d.cfl_condition           → s.cfl_number_begin
+#   d.use_dissolve_smoke      → s.use_dissolve  (master toggle)
+#   d.use_dissolve_smoke_log  → s.slow_dissolve (master toggle)
+#   d.noise_scale             → s.noise_upres_begin
+#   d.noise_pos_scale         → s.noise_spatial_scale_begin
+# All others map by direct name with `_begin` suffix.
+_DOMAIN_IMPORT_MAP = (
+    # (Blender domain attr, addon param name).  None for the addon name
+    # means the attr maps to a master toggle (handled separately).
+    ("resolution_max",        "resolution"),
+    ("vorticity",             "vorticity"),
+    ("alpha",                 "alpha"),
+    ("beta",                  "beta"),
+    ("dissolve_speed",        "dissolve_speed"),
+    ("noise_scale",           "noise_upres"),
+    ("noise_strength",        "noise_strength"),
+    ("noise_pos_scale",       "noise_spatial_scale"),
+    # v0.7.0 TODO-41 gas timing
+    ("time_scale",            "time_scale"),
+    ("cfl_condition",         "cfl_number"),
+    ("timesteps_max",         "timesteps_max"),
+    ("timesteps_min",         "timesteps_min"),
+    # v0.7.0 TODO-42 fire
+    ("burning_rate",          "burning_rate"),
+    ("flame_smoke",           "flame_smoke"),
+    ("flame_vorticity",       "flame_vorticity"),
+    ("flame_max_temp",        "flame_max_temp"),
+    ("flame_ignition",        "flame_ignition"),
+)
+
+
+def _import_domain_params(self, context):
+    """PointerProperty update callback for `domain_obj`.
+
+    When the user picks a new fluid domain object, copy its current
+    FluidDomainSettings into the addon's `_begin` (baseline) values and
+    master toggles.  Sweep config (`_end` / `_step` / `_use_range` /
+    `_use_list` / `_list`) is left untouched so an in-progress sweep
+    design isn't blown away by re-selecting the same domain.
+
+    No-op when the new selection is None, has no Fluid modifier, or has
+    a non-DOMAIN fluid_type (e.g. an emitter/flow object).
+    """
+    obj = self.domain_obj
+    if obj is None:
+        return
+    mod = next((m for m in obj.modifiers if m.type == 'FLUID'), None)
+    if mod is None or mod.fluid_type != 'DOMAIN':
+        return
+    d = mod.domain_settings
+    if d is None:
+        return
+
+    # Direct mapping: copy each domain attr to s.<addon_name>_begin.
+    for _battr, _paddon in _DOMAIN_IMPORT_MAP:
+        try:
+            _val = getattr(d, _battr)
+        except AttributeError:
+            continue  # property absent in this Blender version
+        # The addon's _begin properties are Int / Float depending on the
+        # param; pass-through works because RNA does the coercion.
+        try:
+            setattr(self, _paddon + "_begin", _val)
+        except (AttributeError, TypeError):
+            continue
+
+    # Master toggles (separately because addon attr names differ from
+    # the Blender attr names).
+    for _battr, _paddon in (
+        ("use_dissolve_smoke",     "use_dissolve"),
+        ("use_dissolve_smoke_log", "slow_dissolve"),
+        ("use_noise",              "use_noise"),
+        ("use_adaptive_timesteps", "use_adaptive_timesteps"),
+    ):
+        try:
+            setattr(self, _paddon, bool(getattr(d, _battr)))
+        except (AttributeError, TypeError):
+            continue
+
+    # use_fire is an addon-side override flag, not a Blender domain
+    # attribute (fire is driven by flow_type on flow objects).  Probe
+    # whether the domain has any fire characteristics: a non-default
+    # burning_rate or flame_ignition value suggests the user intends to
+    # use fire — flip use_fire on so the imported fire values get applied
+    # at bake time.  False positives here are harmless (user can uncheck).
+    try:
+        self.use_fire = (
+            float(getattr(d, "burning_rate", 0.75)) != 0.75
+            or float(getattr(d, "flame_ignition", 1.5)) != 1.5
+        )
+    except (AttributeError, TypeError):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Settings save/load — helper functions
 # ---------------------------------------------------------------------------
@@ -200,6 +328,10 @@ def _sync_frame_defaults(self, context):
 _SWEEP_PARAMS = [
     "resolution", "vorticity", "alpha", "beta",
     "dissolve_speed", "noise_upres", "noise_strength", "noise_spatial_scale",
+    # v0.7.0 TODO-41 + TODO-42 — gas timing + fire params
+    "time_scale", "cfl_number", "timesteps_max", "timesteps_min",
+    "burning_rate", "flame_smoke", "flame_vorticity", "flame_max_temp",
+    "flame_ignition",
 ]
 
 
@@ -214,6 +346,9 @@ def _settings_dict(s):
         "iterate_slow_dissolve": getattr(s, "iterate_slow_dissolve", False),
         "use_noise":             s.use_noise,
         "iterate_noise_both":    getattr(s, "iterate_noise_both", False),
+        # v0.7.0 TODO-41 / TODO-42 master toggles
+        "use_adaptive_timesteps": getattr(s, "use_adaptive_timesteps", True),
+        "use_fire":               getattr(s, "use_fire", False),
         "params": {},
     }
     for name in _SWEEP_PARAMS:
@@ -240,6 +375,11 @@ def _apply_settings_dict(s, data):
     s.use_noise      = data.get("use_noise",       False)
     if hasattr(s, "iterate_noise_both"):
         s.iterate_noise_both = data.get("iterate_noise_both", False)
+    # v0.7.0 TODO-41 / TODO-42 master toggles
+    if hasattr(s, "use_adaptive_timesteps"):
+        s.use_adaptive_timesteps = data.get("use_adaptive_timesteps", True)
+    if hasattr(s, "use_fire"):
+        s.use_fire = data.get("use_fire", False)
     params = data.get("params", {})
     for name in _SWEEP_PARAMS:
         if name not in params:
@@ -384,6 +524,13 @@ def expand_param(s, name):
     -------
     list of float/int values to iterate over
     """
+    # v0.7.0 defensive: real SmokeSettings always has every sweep param's
+    # _begin attribute, but test SimpleNamespace fixtures may not enumerate
+    # every property (especially after adding TODO-41/42 params).  Return a
+    # single-element sentinel so callers' `[0]` index never crashes and so
+    # _default_job stays robust when called from older fixtures.
+    if not hasattr(s, name + "_begin"):
+        return [0]
     begin = getattr(s, name + "_begin")
 
     # Mode 1: explicit list
@@ -444,6 +591,19 @@ def _default_job(s):
         "use_dissolve":        s.use_dissolve,
         "slow_dissolve":       s.slow_dissolve,
         "use_noise":           s.use_noise,
+        # v0.7.0 TODO-41: gas timing parameters
+        "time_scale":          expand_param(s, "time_scale")[0],
+        "use_adaptive_timesteps": getattr(s, "use_adaptive_timesteps", True),
+        "cfl_number":          expand_param(s, "cfl_number")[0],
+        "timesteps_max":       expand_param(s, "timesteps_max")[0],
+        "timesteps_min":       expand_param(s, "timesteps_min")[0],
+        # v0.7.0 TODO-42: fire parameters
+        "use_fire":            getattr(s, "use_fire", False),
+        "burning_rate":        expand_param(s, "burning_rate")[0],
+        "flame_smoke":         expand_param(s, "flame_smoke")[0],
+        "flame_vorticity":     expand_param(s, "flame_vorticity")[0],
+        "flame_max_temp":      expand_param(s, "flame_max_temp")[0],
+        "flame_ignition":      expand_param(s, "flame_ignition")[0],
     }
 
 
@@ -478,13 +638,23 @@ def generate_jobs_limited(s):
     dict — job parameter dict suitable for JSON serialisation
     """
     # Determine which parameters are enabled for sweeping.
-    # Gas params and resolution are always available.
-    # Dissolve and noise params only when their section is enabled.
+    # Gas params, resolution, time_scale are always available.
+    # Dissolve / noise / adaptive-timesteps / fire params only when their
+    # section is enabled.
     sweepable = ["resolution", "vorticity", "alpha", "beta"]
+    # v0.7.0 TODO-41: time_scale is always-on (no master enable).
+    sweepable.append("time_scale")
     if s.use_dissolve:
         sweepable.append("dissolve_speed")
     if s.use_noise:
         sweepable += ["noise_upres", "noise_strength", "noise_spatial_scale"]
+    # v0.7.0 TODO-41: CFL / timesteps only when adaptive timesteps are on.
+    if getattr(s, "use_adaptive_timesteps", True):
+        sweepable += ["cfl_number", "timesteps_max", "timesteps_min"]
+    # v0.7.0 TODO-42: fire sub-params only when use_fire is on.
+    if getattr(s, "use_fire", False):
+        sweepable += ["burning_rate", "flame_smoke", "flame_vorticity",
+                      "flame_max_temp", "flame_ignition"]
 
     yielded = False
     for param_name in sweepable:
@@ -626,10 +796,43 @@ def generate_jobs_all(s):
                          [expand_param(s, "noise_strength")[0]],
                          [expand_param(s, "noise_spatial_scale")[0]])]
 
+    # v0.7.0 TODO-41: gas-timing axes always present in the product.
+    # Adaptive-only sub-params (cfl_number, timesteps_*) collapse to their
+    # begin value when adaptive is off, since they have no effect then.
+    use_adapt = getattr(s, "use_adaptive_timesteps", True)
+    time_scale_vals    = param("time_scale")
+    if use_adapt:
+        cfl_vals           = param("cfl_number")
+        timesteps_max_vals = param("timesteps_max")
+        timesteps_min_vals = param("timesteps_min")
+    else:
+        cfl_vals           = [expand_param(s, "cfl_number")[0]]
+        timesteps_max_vals = [expand_param(s, "timesteps_max")[0]]
+        timesteps_min_vals = [expand_param(s, "timesteps_min")[0]]
+
+    # v0.7.0 TODO-42: fire sub-params collapse to single values when fire is off.
+    use_fire = getattr(s, "use_fire", False)
+    if use_fire:
+        burning_rate_vals    = param("burning_rate")
+        flame_smoke_vals     = param("flame_smoke")
+        flame_vorticity_vals = param("flame_vorticity")
+        flame_max_temp_vals  = param("flame_max_temp")
+        flame_ignition_vals  = param("flame_ignition")
+    else:
+        burning_rate_vals    = [expand_param(s, "burning_rate")[0]]
+        flame_smoke_vals     = [expand_param(s, "flame_smoke")[0]]
+        flame_vorticity_vals = [expand_param(s, "flame_vorticity")[0]]
+        flame_max_temp_vals  = [expand_param(s, "flame_max_temp")[0]]
+        flame_ignition_vals  = [expand_param(s, "flame_ignition")[0]]
+
     for (use_d, slow_d, dissolve) in dissolve_states:
         for (use_n, nu, ns, nss) in noise_states:
-            for combo in itertools.product(res, vort, alpha, beta,
-                                           dissolve, nu, ns, nss):
+            for combo in itertools.product(
+                    res, vort, alpha, beta,
+                    dissolve, nu, ns, nss,
+                    time_scale_vals, cfl_vals, timesteps_max_vals, timesteps_min_vals,
+                    burning_rate_vals, flame_smoke_vals, flame_vorticity_vals,
+                    flame_max_temp_vals, flame_ignition_vals):
                 yield {
                     "resolution":          combo[0],
                     "vorticity":           combo[1],
@@ -642,6 +845,19 @@ def generate_jobs_all(s):
                     "use_dissolve":        use_d,
                     "slow_dissolve":       slow_d,
                     "use_noise":           use_n,
+                    # v0.7.0 TODO-41: gas timing params
+                    "time_scale":          combo[8],
+                    "use_adaptive_timesteps": use_adapt,
+                    "cfl_number":          combo[9],
+                    "timesteps_max":       combo[10],
+                    "timesteps_min":       combo[11],
+                    # v0.7.0 TODO-42: fire params
+                    "use_fire":            use_fire,
+                    "burning_rate":        combo[12],
+                    "flame_smoke":         combo[13],
+                    "flame_vorticity":     combo[14],
+                    "flame_max_temp":      combo[15],
+                    "flame_ignition":      combo[16],
                 }
 
 
@@ -1328,7 +1544,13 @@ class SmokeSettings(bpy.types.PropertyGroup):
     domain_obj: bpy.props.PointerProperty(
         type=bpy.types.Object,
         name="Domain Object",
-        description="The Mantaflow fluid domain object to bake",
+        description=(
+            "The Mantaflow fluid domain object to bake.  "
+            "v0.7.0 TODO-40: selecting a domain auto-imports its current "
+            "settings into the addon's baseline (_begin) values — sweep "
+            "config (range/list/step) is preserved"
+        ),
+        update=_import_domain_params,
     )
 
     output_path: bpy.props.StringProperty(
@@ -1554,6 +1776,142 @@ class SmokeSettings(bpy.types.PropertyGroup):
         default=False, update=make_toggle_list("noise_spatial_scale"))
     noise_spatial_scale_list:      bpy.props.CollectionProperty(type=ValueItem)
     noise_spatial_scale_index:     bpy.props.IntProperty()
+
+    # ── Time + Adaptive Timesteps  (v0.7.0 TODO-41) ──────────────────────────
+    # Time Scale — d.time_scale (always-on global sim speed multiplier).
+    # Adaptive Timesteps + CFL + Timesteps Max/Min — Blender's adaptive
+    # timestep system; CFL/max/min only matter when adaptive is on.
+    show_time: bpy.props.BoolProperty(
+        default=True,
+        description="Expand or collapse the Time / Adaptive Timesteps section",
+    )
+    use_adaptive_timesteps: bpy.props.BoolProperty(
+        name="Adaptive Time Step",
+        description=(
+            "Enable Blender's adaptive timestepping (uses CFL Number, "
+            "Timesteps Max, Timesteps Min).  When off, simulation runs "
+            "at a fixed substep count"
+        ),
+        default=True,
+    )
+
+    # time_scale — d.time_scale
+    time_scale_begin:     bpy.props.FloatProperty(default=1.0)
+    time_scale_end:       bpy.props.FloatProperty(default=1.0)
+    time_scale_step:      bpy.props.FloatProperty(default=0)
+    time_scale_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("time_scale"))
+    time_scale_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("time_scale"))
+    time_scale_list:      bpy.props.CollectionProperty(type=ValueItem)
+    time_scale_index:     bpy.props.IntProperty()
+
+    # cfl_number — d.cfl_condition
+    cfl_number_begin:     bpy.props.FloatProperty(default=4.0)
+    cfl_number_end:       bpy.props.FloatProperty(default=4.0)
+    cfl_number_step:      bpy.props.FloatProperty(default=0)
+    cfl_number_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("cfl_number"))
+    cfl_number_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("cfl_number"))
+    cfl_number_list:      bpy.props.CollectionProperty(type=ValueItem)
+    cfl_number_index:     bpy.props.IntProperty()
+
+    # timesteps_max — d.timesteps_max
+    timesteps_max_begin:     bpy.props.IntProperty(default=4)
+    timesteps_max_end:       bpy.props.IntProperty(default=4)
+    timesteps_max_step:      bpy.props.IntProperty(default=0)
+    timesteps_max_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("timesteps_max"))
+    timesteps_max_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("timesteps_max"))
+    timesteps_max_list:      bpy.props.CollectionProperty(type=ValueItem)
+    timesteps_max_index:     bpy.props.IntProperty()
+
+    # timesteps_min — d.timesteps_min
+    timesteps_min_begin:     bpy.props.IntProperty(default=1)
+    timesteps_min_end:       bpy.props.IntProperty(default=1)
+    timesteps_min_step:      bpy.props.IntProperty(default=0)
+    timesteps_min_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("timesteps_min"))
+    timesteps_min_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("timesteps_min"))
+    timesteps_min_list:      bpy.props.CollectionProperty(type=ValueItem)
+    timesteps_min_index:     bpy.props.IntProperty()
+
+    # ── Fire Parameters  (v0.7.0 TODO-42) ────────────────────────────────────
+    # Fire is enabled per-flow-object in the .blend; the addon's use_fire
+    # checkbox controls whether the worker APPLIES the addon's fire-tuning
+    # values to the domain (when off, the .blend's existing fire settings
+    # are left untouched — same model as use_noise).
+    show_fire: bpy.props.BoolProperty(
+        default=True,
+        description="Expand or collapse the Fire Parameters section",
+    )
+    use_fire: bpy.props.BoolProperty(
+        name="Use Fire",
+        description=(
+            "When enabled, the addon writes its Fire Parameters into the "
+            "domain.  When disabled, the .blend's existing fire settings "
+            "are left as-is"
+        ),
+        default=False,
+    )
+
+    # burning_rate — d.burning_rate (UI label "Reaction Speed")
+    burning_rate_begin:     bpy.props.FloatProperty(default=0.75)
+    burning_rate_end:       bpy.props.FloatProperty(default=0.75)
+    burning_rate_step:      bpy.props.FloatProperty(default=0)
+    burning_rate_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("burning_rate"))
+    burning_rate_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("burning_rate"))
+    burning_rate_list:      bpy.props.CollectionProperty(type=ValueItem)
+    burning_rate_index:     bpy.props.IntProperty()
+
+    # flame_smoke — d.flame_smoke (UI label "Flames Smoke")
+    flame_smoke_begin:     bpy.props.FloatProperty(default=1.0)
+    flame_smoke_end:       bpy.props.FloatProperty(default=1.0)
+    flame_smoke_step:      bpy.props.FloatProperty(default=0)
+    flame_smoke_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("flame_smoke"))
+    flame_smoke_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("flame_smoke"))
+    flame_smoke_list:      bpy.props.CollectionProperty(type=ValueItem)
+    flame_smoke_index:     bpy.props.IntProperty()
+
+    # flame_vorticity — d.flame_vorticity (separate from gas vorticity!)
+    flame_vorticity_begin:     bpy.props.FloatProperty(default=0.5)
+    flame_vorticity_end:       bpy.props.FloatProperty(default=0.5)
+    flame_vorticity_step:      bpy.props.FloatProperty(default=0)
+    flame_vorticity_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("flame_vorticity"))
+    flame_vorticity_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("flame_vorticity"))
+    flame_vorticity_list:      bpy.props.CollectionProperty(type=ValueItem)
+    flame_vorticity_index:     bpy.props.IntProperty()
+
+    # flame_max_temp — d.flame_max_temp (UI label "Temp Max")
+    flame_max_temp_begin:     bpy.props.FloatProperty(default=1.7)
+    flame_max_temp_end:       bpy.props.FloatProperty(default=1.7)
+    flame_max_temp_step:      bpy.props.FloatProperty(default=0)
+    flame_max_temp_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("flame_max_temp"))
+    flame_max_temp_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("flame_max_temp"))
+    flame_max_temp_list:      bpy.props.CollectionProperty(type=ValueItem)
+    flame_max_temp_index:     bpy.props.IntProperty()
+
+    # flame_ignition — d.flame_ignition (UI label "Temp Min" / ignition temp)
+    flame_ignition_begin:     bpy.props.FloatProperty(default=1.5)
+    flame_ignition_end:       bpy.props.FloatProperty(default=1.5)
+    flame_ignition_step:      bpy.props.FloatProperty(default=0)
+    flame_ignition_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("flame_ignition"))
+    flame_ignition_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("flame_ignition"))
+    flame_ignition_list:      bpy.props.CollectionProperty(type=ValueItem)
+    flame_ignition_index:     bpy.props.IntProperty()
 
     # ── Text object names for in-render parameter labels ─────────────────────
 
@@ -4155,6 +4513,34 @@ def _noise_ui(layout, s):
     _sub_param_ui(box, s, "noise_spatial_scale", "Position Scale")
 
 
+def _fire_ui(layout, s):
+    """
+    Draw the Fire Parameters collapsible section with enable checkbox in
+    the header.  Parallel to _noise_ui.
+
+    v0.7.0 TODO-42.  Contains five sub-parameters: Reaction Speed
+    (burning_rate), Flames Smoke, Vorticity (separate from gas vorticity!),
+    Temp Max, Ignition Temp.  When use_fire is unchecked the addon leaves
+    the .blend's existing fire settings alone (same model as use_noise).
+    """
+    box = layout.box()
+    row = box.row()
+    row.prop(s, "show_fire",
+             icon='TRIA_DOWN' if s.show_fire else 'TRIA_RIGHT',
+             emboss=False, text="")
+    row.prop(s, "use_fire", text="")   # enable checkbox
+    row.label(text="Fire Parameters")
+
+    if not s.show_fire or not s.use_fire:
+        return
+
+    _sub_param_ui(box, s, "burning_rate",    "Reaction Speed")
+    _sub_param_ui(box, s, "flame_smoke",     "Flames Smoke")
+    _sub_param_ui(box, s, "flame_vorticity", "Vorticity")
+    _sub_param_ui(box, s, "flame_max_temp",  "Temp Max")
+    _sub_param_ui(box, s, "flame_ignition",  "Ignition Temp")
+
+
 # ---------------------------------------------------------------------------
 # Panel
 # ---------------------------------------------------------------------------
@@ -4271,6 +4657,29 @@ class SMOKE_PT_panel(bpy.types.Panel):
             box_sim.separator()
 
             _noise_ui(box_sim, s)
+            box_sim.separator()
+
+            # v0.7.0 TODO-41: Time / Adaptive Timesteps section.
+            # Time Scale is a standalone always-on sweepable param; the
+            # adaptive sub-block (CFL, Timesteps Max/Min) appears only
+            # when use_adaptive_timesteps is checked.
+            _standalone_param_ui(box_sim, s, "time_scale", "Time Scale",
+                                 show_prop="show_time")
+            if s.show_time:
+                # Indent the Adaptive sub-block under the Time Scale box.
+                box_adapt = box_sim.box()
+                row_adapt = box_adapt.row()
+                row_adapt.prop(s, "use_adaptive_timesteps",
+                               text="Adaptive Time Step")
+                if s.use_adaptive_timesteps:
+                    _sub_param_ui(box_adapt, s, "cfl_number",     "CFL Number")
+                    _sub_param_ui(box_adapt, s, "timesteps_max",  "Timesteps Max")
+                    _sub_param_ui(box_adapt, s, "timesteps_min",  "Timesteps Min")
+            box_sim.separator()
+
+            # v0.7.0 TODO-42: Fire Parameters section.  Parallel to
+            # Dissolve / Noise — enable checkbox gates the sub-params.
+            _fire_ui(box_sim, s)
 
         layout.separator()
 
@@ -4549,6 +4958,30 @@ def _reset_on_load(dummy=None):
         s.iterate_slow_dissolve = False
         s.use_noise             = False
         s.iterate_noise_both    = False
+
+        # v0.7.0 TODO-41: gas timing master toggle + sweep values reset to
+        # Blender's domain defaults (time_scale=1.0, cfl=4.0, max=4, min=1).
+        s.use_adaptive_timesteps = True
+        s.show_time              = True
+        for _attr, _val in (
+            ("time_scale", 1.0), ("cfl_number", 4.0),
+            ("timesteps_max", 4), ("timesteps_min", 1),
+        ):
+            setattr(s, _attr + "_step",  0)
+            setattr(s, _attr + "_begin", _val)
+            setattr(s, _attr + "_end",   _val)
+
+        # v0.7.0 TODO-42: fire master toggle (default OFF) + sweep values.
+        s.use_fire = False
+        s.show_fire = True
+        for _attr, _val in (
+            ("burning_rate",   0.75), ("flame_smoke",     1.0),
+            ("flame_vorticity", 0.5), ("flame_max_temp",  1.7),
+            ("flame_ignition",  1.5),
+        ):
+            setattr(s, _attr + "_step",  0)
+            setattr(s, _attr + "_begin", _val)
+            setattr(s, _attr + "_end",   _val)
 
         s.use_default_frames = True
         s.sim_frame_start    = 1

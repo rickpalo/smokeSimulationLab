@@ -36,12 +36,67 @@ simulation tool.  Future major versions broaden the scope:
 
 ---
 
+## TODO-47: Include v0.7.0 sim params in make_name() — **OPEN** (v0.7.1)
+
+**Filed 2026-06-02.** v0.7.0 added Time Scale, Adaptive Time Step + CFL +
+Timesteps Max/Min, plus the full Fire Parameters section.  These are
+written into the job JSON, applied by the worker, and recorded in
+results.csv — but they are NOT included in `make_name()`.
+
+**Consequence:** two jobs that differ ONLY in (e.g.) time_scale produce
+the same filename and therefore share the same cache directory.  The
+second job's bake silently SKIP-bakes from the first one's cache,
+applying the wrong simulation params.  Same class of bug as v0.5.x
+BUG-013 (the slow_dissolve cache collision that motivated the v0.6.2
+`-Slow`/`-Fast` suffixes).
+
+**Workaround in v0.7.0:** use `use_existing_cache=False` to force a
+full re-bake every time so collisions can't happen.
+
+**Fix sketch (v0.7.1):** extend `make_name()` to include the v0.7.0
+params with compact suffixes when they differ from Blender defaults:
+- `_TS<n>` for time_scale (e.g. `TS2.0` for time_scale=2.0)
+- `_AT-N` when use_adaptive_timesteps=False (skip suffix when True,
+  matching the default)
+- `_CFL<n>_TM<n>_Tm<n>` only when sweeping (skip when at defaults)
+- `_F-Y_BR<n>_FS<n>_FV<n>_TX<n>_TI<n>` when use_fire=True (else `_F-OFF`)
+Defaults-suppressed format keeps v0.6.x cache names intact when the
+new params are at their defaults; users sweeping new axes get
+unique names.  Same backwards-compat trade-off as TODO-39 / BUG-013.
+
+**Files:** `__init__.py` — `make_name()`.  Plus regression tests.
+
+---
+
 ## TODO-46: Time estimate doesn't account for two-pass bake-then-render — **OPEN** (v0.7.0)
 
 **Filed 2026-06-01.** User observation from a 13-job batch (~25 min into a
 render-pass job): the addon displayed `Job stage 3 of 4 (~15 min
 remaining this job)` and `All jobs: ~25 min remaining` — but with 8 jobs
 left to render and ~15 min per render, 8 × 15 = 120 min, not 25.
+
+**Additional data point (2026-06-02, on v0.6.3):** User ran a 76-job
+batch where most jobs were SKIP-bake (cached).  Initial "All jobs"
+estimate was 17 h 50 min.  **It stayed at exactly 17 h 50 min through
+the first 24 jobs** despite many of those completing in seconds via
+SKIP BAKE.
+
+This is more severe than the original "wrong direction" symptom: the
+estimate is **constant** (not just wrong-direction).  Implications:
+- The "All jobs" remaining estimate is computed as a static
+  per-job-time × jobs-remaining product, where per-job-time is derived
+  from a default rate constant (not from elapsed time of completed
+  jobs in THIS batch).
+- Rolling-average from completed jobs is either not collected or not
+  feeding the display.
+- For SKIP-bake jobs the per-job estimate is wildly wrong (defaults
+  assume a full bake + render).
+
+**Refined fix sketch:** beyond the two-pass aware estimator originally
+planned, the all-jobs remaining estimate should be
+`(jobs_remaining * rolling_average_job_secs)` where
+`rolling_average_job_secs` uses the last N completed jobs in THIS
+batch (fall back to defaults only when no jobs have completed yet).
 
 **Root cause hypothesis:** the all-jobs estimate uses a per-job multiplier
 that doesn't model the two-pass pipeline.  With v0.4.0+ two-pass

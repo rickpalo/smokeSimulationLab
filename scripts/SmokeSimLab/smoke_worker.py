@@ -15,7 +15,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.6.3"
+WORKER_VERSION = "0.7.0"
 
 import bpy
 import sys
@@ -497,6 +497,46 @@ if p["use_noise"]:
     d.noise_scale     = int(p["noise_upres"])
     d.noise_strength  = float(p["noise_strength"])
     d.noise_pos_scale = float(p["noise_spatial_scale"])
+
+# v0.7.0 TODO-41: gas timing parameters.  time_scale always applies (no
+# master enable).  Adaptive timestepping + CFL + timesteps_max/min only
+# matter when use_adaptive_timesteps is True.  All wrapped in try/except
+# so older Blender builds that don't expose one of these properties don't
+# crash the worker (just log a warning and continue with default).
+try:
+    d.time_scale = float(p.get("time_scale", 1.0))
+except (AttributeError, TypeError) as _e:
+    _log(f"[{name}] WARNING: could not set time_scale ({_e})")
+_use_adaptive = bool(p.get("use_adaptive_timesteps", True))
+try:
+    d.use_adaptive_timesteps = _use_adaptive
+except (AttributeError, TypeError) as _e:
+    _log(f"[{name}] WARNING: could not set use_adaptive_timesteps ({_e})")
+if _use_adaptive:
+    try:
+        d.cfl_condition = float(p.get("cfl_number", 4.0))
+        d.timesteps_max = int(p.get("timesteps_max", 4))
+        d.timesteps_min = int(p.get("timesteps_min", 1))
+    except (AttributeError, TypeError) as _e:
+        _log(f"[{name}] WARNING: could not set adaptive timestep params ({_e})")
+
+# v0.7.0 TODO-42: Fire parameters.  Only applied when use_fire is True;
+# when False, the .blend's existing fire settings are left untouched
+# (same model as use_noise).  use_fire on the addon side is a "should I
+# override?" flag — Blender's actual fire behaviour is driven by the
+# flow object's flow_type ('FIRE'/'BOTH'), not by a domain checkbox.
+if p.get("use_fire", False):
+    try:
+        d.burning_rate    = float(p["burning_rate"])
+        d.flame_smoke     = float(p["flame_smoke"])
+        d.flame_vorticity = float(p["flame_vorticity"])
+        d.flame_max_temp  = float(p["flame_max_temp"])
+        d.flame_ignition  = float(p["flame_ignition"])
+        _log(f"[{name}] Fire parameters applied (BR={p['burning_rate']}, "
+             f"FS={p['flame_smoke']}, FV={p['flame_vorticity']}, "
+             f"TMax={p['flame_max_temp']}, TIgn={p['flame_ignition']})")
+    except (AttributeError, TypeError, KeyError) as _e:
+        _log(f"[{name}] WARNING: could not set fire parameters ({_e})")
 
 # Constrain the bake to this job's frame range.  bpy.ops.fluid.bake_all() bakes
 # the domain's cache_frame_start/end, NOT the scene frame range — so without
@@ -1169,6 +1209,11 @@ else:
 # ---------------------------------------------------------------------------
 
 csv_path = os.path.join(render_dir, "results.csv")
+# v0.7.0 TODO-41/42: new columns inserted BEFORE the version column so
+# the version column stays last (legacy readers that index from the end
+# keep working; readers that index by name pick up the new fields
+# automatically).  When the relevant master toggle is off the value is
+# written as "OFF" — same convention as use_dissolve / use_noise.
 header   = [
     "name",
     "resolution",
@@ -1180,6 +1225,19 @@ header   = [
     "noise_upres",
     "noise_strength",
     "noise_spatial_scale",
+    # v0.7.0 TODO-41 — gas timing
+    "time_scale",
+    "use_adaptive_timesteps",
+    "cfl_number",
+    "timesteps_max",
+    "timesteps_min",
+    # v0.7.0 TODO-42 — fire
+    "use_fire",
+    "burning_rate",
+    "flame_smoke",
+    "flame_vorticity",
+    "flame_max_temp",
+    "flame_ignition",
     "bake_seconds",
     "version",   # addon version that produced this row (appended last so older
                  # readers/columns stay aligned); for cross-version comparison
@@ -1188,6 +1246,8 @@ write_header = not os.path.exists(csv_path)
 with open(csv_path, "a", encoding="utf-8") as fh:
     if write_header:
         fh.write(",".join(header) + "\n")
+    _use_adapt = bool(p.get("use_adaptive_timesteps", True))
+    _use_fire  = bool(p.get("use_fire", False))
     fh.write(",".join(str(x) for x in [
         name,
         p["resolution"],
@@ -1199,6 +1259,19 @@ with open(csv_path, "a", encoding="utf-8") as fh:
         p["noise_upres"]         if p["use_noise"] else "OFF",
         p["noise_strength"]      if p["use_noise"] else "OFF",
         p["noise_spatial_scale"] if p["use_noise"] else "OFF",
+        # gas timing
+        p.get("time_scale", 1.0),
+        _use_adapt,
+        p.get("cfl_number", 4.0)    if _use_adapt else "OFF",
+        p.get("timesteps_max", 4)   if _use_adapt else "OFF",
+        p.get("timesteps_min", 1)   if _use_adapt else "OFF",
+        # fire
+        _use_fire,
+        p.get("burning_rate",    0.75) if _use_fire else "OFF",
+        p.get("flame_smoke",     1.0)  if _use_fire else "OFF",
+        p.get("flame_vorticity", 0.5)  if _use_fire else "OFF",
+        p.get("flame_max_temp",  1.7)  if _use_fire else "OFF",
+        p.get("flame_ignition",  1.5)  if _use_fire else "OFF",
         int(bake_seconds),
         addon_version,
     ]) + "\n")

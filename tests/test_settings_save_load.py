@@ -35,6 +35,12 @@ def _make_s(**overrides):
         "resolution": 64, "vorticity": 0.0, "alpha": 1.0, "beta": 1.0,
         "dissolve_speed": 5, "noise_upres": 2, "noise_strength": 2.0,
         "noise_spatial_scale": 2.0,
+        # v0.7.0 TODO-41: gas timing params
+        "time_scale": 1.0, "cfl_number": 4.0,
+        "timesteps_max": 4, "timesteps_min": 1,
+        # v0.7.0 TODO-42: fire params (Blender defaults)
+        "burning_rate": 0.75, "flame_smoke": 1.0, "flame_vorticity": 0.5,
+        "flame_max_temp": 1.7, "flame_ignition": 1.5,
     }
     for name in _SWEEP_PARAMS:
         base = defaults[name]
