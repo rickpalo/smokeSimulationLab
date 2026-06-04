@@ -1,4 +1,6 @@
-# SmokeSimLab — Bug Investigation Tracker
+# BatchSimLab — Bug Investigation Tracker
+
+> _Tracker covers both pre-v0.6.3 "SmokeSimLab" history and post-rebrand "BatchSimLab" entries.  All BUG-* IDs remain stable across the rename._
 
 Each entry documents the full lifecycle of an issue: observed symptoms →
 investigation attempts → confirmed root cause → fix applied → tests added →

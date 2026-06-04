@@ -1,10 +1,14 @@
-# SmokeSimLab
+# BatchSimLab
 
-A Blender 4.x/5.x addon for batch smoke simulation parameter sweeping.
+A Blender 4.x/5.x addon for batch fluid-simulation parameter sweeping.
 
-SmokeSimLab automates the tedious process of testing many different smoke simulation settings. You define parameter ranges in a panel, click Export Batch, and a Windows batch file runs every combination — baking the simulation, rendering a playblast animation and a final still, and logging results to CSV for comparison.
+BatchSimLab (renamed from SmokeSimLab at v0.6.3) automates the tedious process of testing many different smoke simulation settings. You define parameter ranges in a panel, click Export Batch, and a Windows batch file runs every combination — baking the simulation, rendering a playblast animation and a final still, and logging results to CSV for comparison.
 
-![SmokeLab Panel](documentation/images/SmokeSimLab_Panel.png)
+**Roadmap:** smoke today (v0.x → v1.0.0), smoke + fire at v2.0.0, smoke + fire + liquid at v3.0.0. The "BatchSim" name reflects the broader scope.
+
+> The GitHub repository slug is still `SmokeSimLab` (https://github.com/rickpalo/SmokeSimLab) — v0.6.3 is a surface-only rebrand; folder names, file names, and the GitHub URL stay unchanged for backwards compatibility with existing installs.
+
+![Batch Sim Lab Panel](documentation/images/SmokeSimLab_Panel.png)
 
 ---
 
@@ -45,18 +49,18 @@ SmokeSimLab automates the tedious process of testing many different smoke simula
 
 ## Installation
 
-1. Download the latest `SmokeSimLab.zip` from the [Releases](https://github.com/rickpalo/SmokeSimLab/releases) page.
+1. Download the latest `SmokeSimLab.zip` from the [Releases](https://github.com/rickpalo/SmokeSimLab/releases) page (zip filename retains the legacy name).
 2. In Blender, open **Edit → Preferences → Add-ons**.
 3. Click **Install** and select `SmokeSimLab.zip`.
-4. Enable the **SmokeSimLab** addon in the list.
-5. The **SmokeLab** tab will appear in the 3D Viewport N-panel (press **N** to open it).
+4. Enable the **BatchSimLab** addon in the list.
+5. The **Batch Sim Lab** tab will appear in the 3D Viewport N-panel (press **N** to open it).
 
 ---
 
 ## Quick Start
 
 1. Set up your smoke simulation scene with a Mantaflow fluid domain object.
-2. Open the **SmokeLab** tab in the N-panel.
+2. Open the **Batch Sim Lab** tab in the N-panel.
 3. Set **Domain Object** to your fluid domain.
 4. Set **Output** to a folder where results will be written.
 5. Configure parameter defaults and any ranges you want to sweep.
@@ -149,7 +153,7 @@ Example: Vorticity range [0.5, 1.0, 1.5] + Noise Strength range [0.5, 1.0, 1.5]:
 
 ## Text Objects
 
-SmokeSimLab can update FONT (text) objects in your scene with current parameter values before each render, so the values appear in the rendered output.
+BatchSimLab can update FONT (text) objects in your scene with current parameter values before each render, so the values appear in the rendered output.
 
 Set the object names in the **Text Objects** section. Objects not found in the scene are silently skipped.
 

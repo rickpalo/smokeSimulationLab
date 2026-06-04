@@ -1,6 +1,38 @@
-# SmokeSimLab — Pending Issues
+# BatchSimLab — Pending Issues
 
-Items to address once file synchronization catches up (~5,000 PNGs behind as of 2026-05-06).
+> _Project renamed from "SmokeSimLab" to "BatchSimLab" at v0.6.3 (surface-only); all TODO-* IDs remain stable across the rename._
+
+---
+
+## ROADMAP — long-horizon major versions (filed 2026-06-02)
+
+The addon is being repositioned from smoke-only to a general batch
+simulation tool.  Future major versions broaden the scope:
+
+- **v0.8.0** — TODO-43 Create Default Setup operator; TODO-36 Monitor
+  Existing Jobs progress count refactor; TODO-31 RESUME bar baseline
+  fix.  (Slated UI/UX polish bundle.)
+- **v0.9.0** — Batch processing for **emitter parameters**.  Today the
+  addon only batches domain-level settings (resolution, dissolve, noise,
+  fire, time, gas).  v0.9.0 adds sweep machinery for emitter flow
+  properties — density, temperature, fuel, surface emission rate, the
+  per-emitter mesh — so a single batch can compare emitter
+  configurations rather than just domain configurations.
+- **v1.0.0** — **Smoke simulation feature-complete.**  All planned smoke-
+  related parameters (domain + emitter + noise + dissolve + cache) are
+  batch-able.  First stable release; docs and tests considered
+  production-ready.  (Addon may be renamed to a non-"smoke"-specific
+  name at v1.0.0 in preparation for v2.0.0.)
+- **v2.0.0** — **Smoke + Fire simulation.**  Builds on v1.0.0 by adding
+  full fire-simulation support: the v0.7.0 Fire Parameters become a
+  first-class section with its own emitter modes (flow_type='FIRE' /
+  'BOTH'), fire-specific cache management, fire-specific text overlays,
+  fire-only / smoke-only / both render modes.
+- **v3.0.0** — **Smoke + Fire + Fluid (liquid) simulation.**  Adds
+  liquid domain support (`domain_type='LIQUID'`): mesh + particles cache
+  layers, liquid-specific batch parameters (surface tension, viscosity,
+  diffusion, particle radius / number), liquid render modes (mesh +
+  flip-particles), and the corresponding worker bake stages.
 
 ---
 

@@ -1,7 +1,7 @@
 """
 smoke_launcher.py
 =================
-Crash-safe wrapper for a single SmokeSimLab batch job.
+Crash-safe wrapper for a single BatchSimLab batch job.
 
 Usage (written into run_smoke_batch.bat by export_batch)
 ---------------------------------------------------------
@@ -30,7 +30,7 @@ Behaviour
 No third-party dependencies — stdlib + tasklist.exe (built into Windows).
 """
 
-LAUNCHER_VERSION = "0.5.2"
+LAUNCHER_VERSION = "0.6.3"
 
 import atexit
 import ctypes
@@ -286,7 +286,7 @@ def _save_crash_log(jobs_dir, job_stem, launch_time=None, blender_exe=None):
         with open(dest, "a", encoding="utf-8") as fh:
             fh.write(f"\n=== {ts}  {job_stem} ===\n")
             fh.write(f"Blender: {_bl_ver or 'unknown'}  "
-                     f"(SmokeSimLab addon {_job_addon_version}, launcher {LAUNCHER_VERSION})\n")
+                     f"(BatchSimLab addon {_job_addon_version}, launcher {LAUNCHER_VERSION})\n")
             if _dump_present:
                 try:
                     with open(crash_src, "r", encoding="utf-8", errors="replace") as cf:

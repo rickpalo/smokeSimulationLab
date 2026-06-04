@@ -1,20 +1,21 @@
 """
 smoke_worker.py
 ===============
-Headless per-job worker for SmokeSimLab.
+Headless per-job worker for BatchSimLab (formerly SmokeSimLab through v0.6.2).
 
 Called by run_smoke_batch.bat as:
     blender.exe "<blend>" --background --factory-startup
         --python "<path>/smoke_worker.py" -- "<path>/job_NNNN.json"
 
-Keep this file in the SmokeSimLab addon folder alongside __init__.py.
+Keep this file in the addon folder (still named `SmokeSimLab/` on disk per
+the v0.6.3 surface-only rebrand) alongside __init__.py.
 export_batch() copies it to the output folder automatically.
 
 Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.6.0"
+WORKER_VERSION = "0.6.3"
 
 import bpy
 import sys
@@ -363,7 +364,7 @@ os.makedirs(render_dir, exist_ok=True)
 os.makedirs(cache_dir,  exist_ok=True)
 
 _log(f"[{name}] Job started.")
-_log(f"[{name}] Blender {bpy.app.version_string}  |  SmokeSimLab worker {WORKER_VERSION} (addon {addon_version})")
+_log(f"[{name}] Blender {bpy.app.version_string}  |  BatchSimLab worker {WORKER_VERSION} (addon {addon_version})")
 _log(f"[{name}] Phase: {phase}  (bake={do_bake}, render={do_render})")
 _dlog(f"cfg: {cfg}")
 _log(f"[{name}] Cache dir: {cache_dir}")

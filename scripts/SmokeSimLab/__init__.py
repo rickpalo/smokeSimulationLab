@@ -1,22 +1,30 @@
 """
-SmokeSimLab/__init__.py
+BatchSimLab/__init__.py
 =======================
-Blender 4.x addon — SmokeLab tab in the 3D Viewport N-panel.
+Blender 4.x / 5.x addon — Batch Sim Lab tab in the 3D Viewport N-panel.
 
-SmokeSimLab automates batch smoke simulation parameter sweeps.  For each
-parameter combination it bakes the Mantaflow fluid simulation, renders an
-OpenGL playblast animation (MP4), renders a final quality still frame (PNG),
-and logs results to a CSV file for later comparison.
+BatchSimLab automates batch smoke simulation parameter sweeps (with fire +
+fluid simulation planned for v2.0.0 / v3.0.0).  For each parameter
+combination it bakes the Mantaflow fluid simulation, renders an EEVEE / Cycles
+playblast animation (MP4), renders a final quality still frame (PNG), and
+logs results to a CSV file for later comparison.
+
+History note: this addon was originally branded "SmokeSimLab"; v0.6.3
+rebranded it to "BatchSimLab" in preparation for the v2.0.0 (fire) and
+v3.0.0 (fluid) roadmap.  Internal Python identifiers, folder names, and
+operator IDs retain the "smoke*" prefix for backwards compatibility with
+existing .blend saves and keymaps; the rename is surface-only.
 
 Installation
 ------------
-1. Zip the SmokeSimLab folder (containing __init__.py and smoke_worker.py).
+1. Zip the SmokeSimLab folder (containing __init__.py + smoke_worker.py +
+   smoke_launcher.py).
 2. In Blender: Edit → Preferences → Add-ons → Install → select the zip.
-3. Enable "SmokeSimLab" in the add-on list.
+3. Enable "BatchSimLab" in the add-on list.
 
 Workflow
 --------
-1. Set your fluid domain object and output directory in the SmokeLab panel.
+1. Set your fluid domain object and output directory in the Batch Sim Lab panel.
 2. Configure parameter defaults and optional ranges/lists.
 3. Choose iteration mode:
      • Limited Combinations — vary one parameter at a time, all others at default.
@@ -41,12 +49,13 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 # Blender reads bl_info to display the addon in Preferences → Add-ons.
 # ---------------------------------------------------------------------------
 bl_info = {
-    "name":        "SmokeSimLab",
+    "name":        "BatchSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 6, 2),
+    "version":     (0, 6, 3),
     "blender":     (4, 0, 0),
-    "location":    "View3D > Sidebar > SmokeLab",
-    "description": "Batch smoke simulation parameter sweeper with CSV logging",
+    "location":    "View3D > Sidebar > BatchLab",
+    "description": "Batch smoke simulation parameter sweeper with CSV logging "
+                   "(roadmap: fire @ v2.0.0, fluid @ v3.0.0)",
     "doc_url":     "https://github.com/rickpalo/SmokeSimLab",
     "tracker_url": "https://github.com/rickpalo/SmokeSimLab/issues",
     "category":    "Fluid Simulation",
@@ -64,16 +73,19 @@ import sys
 import time
 
 ADDON_VERSION = ".".join(str(v) for v in bl_info["version"])
-print(f"SmokeSimLab {ADDON_VERSION} loaded")
+print(f"BatchSimLab {ADDON_VERSION} loaded")
 
 
+# GitHub repo URL — repository slug stays "SmokeSimLab" for v0.6.3 surface
+# rebrand (no folder/repo rename in this version).  Future repository
+# migration could happen at v1.0.0 alongside the deeper internal rename.
 DOCS_URL = "https://github.com/rickpalo/SmokeSimLab"
 
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.
 # Keep these in sync with WORKER_VERSION / LAUNCHER_VERSION in those files.
-_EXPECTED_WORKER_VERSION   = "0.6.0"
-_EXPECTED_LAUNCHER_VERSION = "0.5.2"
+_EXPECTED_WORKER_VERSION   = "0.6.3"
+_EXPECTED_LAUNCHER_VERSION = "0.6.3"
 
 
 def _read_helper_version(path: str, var_name: str) -> str:
@@ -259,7 +271,7 @@ def _load_settings_from_path(s, path):
         s.settings_file_path   = os.path.normpath(path)
         s.settings_search_path = os.path.dirname(os.path.normpath(path))
     except (OSError, json.JSONDecodeError, KeyError) as exc:
-        print(f"[SmokeSimLab] Failed to load settings from {path!r}: {exc}")
+        print(f"[BatchSimLab] Failed to load settings from {path!r}: {exc}")
 
 
 def _is_settings_dirty(s):
@@ -1006,7 +1018,8 @@ def export_batch(context):
 
     # ── Locate and copy worker script ────────────────────────────────────────
     # __file__ is reliable here because we are installed as a proper addon,
-    # so it points to the SmokeSimLab folder, not the .blend file.
+    # so it points to the addon's folder (still `SmokeSimLab/` on disk per
+    # v0.6.3 surface rename — see module docstring), not the .blend file.
     addon_dir      = os.path.dirname(os.path.abspath(__file__))
     src_worker     = os.path.join(addon_dir, "smoke_worker.py")
     dest_worker    = os.path.join(output_path, "smoke_worker.py")
@@ -1017,7 +1030,7 @@ def export_batch(context):
         raise FileNotFoundError(
             f"smoke_worker.py not found in addon folder.\n"
             f"Expected: {src_worker}\n"
-            f"Re-install the SmokeSimLab addon."
+            f"Re-install the BatchSimLab addon."
         )
     shutil.copy2(src_worker, dest_worker)
     if os.path.exists(src_launcher):
@@ -1027,9 +1040,9 @@ def export_batch(context):
     # ── Write .bat header ────────────────────────────────────────────────────
     total_jobs = job_start_index + len(jobs)
     _bat_header = (
-        f"SmokeSimLab batch - {len(jobs)} new job(s) (total {total_jobs})"
+        f"BatchSimLab batch - {len(jobs)} new job(s) (total {total_jobs})"
         if is_append else
-        f"SmokeSimLab batch - {len(jobs)} job(s)"
+        f"BatchSimLab batch - {len(jobs)} job(s)"
     )
     # Two-phase pipeline: bake all jobs (headless), then render (per-engine mode).
     # In bake-only mode (render_simulation_result=False) the render pass is omitted.
@@ -1294,7 +1307,7 @@ class SMOKE_UL_job_log(bpy.types.UIList):
 
 class SmokeSettings(bpy.types.PropertyGroup):
     """
-    All user-facing settings for SmokeSimLab, stored on bpy.types.Scene.
+    All user-facing settings for BatchSimLab, stored on bpy.types.Scene.
 
     Storing settings on the Scene means they are saved with the .blend file
     and persist across Blender sessions.  Each iterable parameter follows
@@ -2632,7 +2645,7 @@ def _poll_batch_progress():
     try:
         return _poll_batch_progress_impl()
     except Exception as _exc:
-        print(f"[SmokeSimLab] poll timer error — {_exc}")
+        print(f"[BatchSimLab] poll timer error — {_exc}")
         return 5.0
 
 
@@ -3219,7 +3232,7 @@ def _poll_batch_progress_impl():
             if job_remaining < 0:
                 import sys
                 print(
-                    f"[SmokeSimLab] WARNING: negative job_remaining={job_remaining:.1f}  "
+                    f"[BatchSimLab] WARNING: negative job_remaining={job_remaining:.1f}  "
                     f"setup={setup_remaining:.1f}  bake={bake_remaining:.1f}  "
                     f"render={render_remaining:.1f}  still={still_remaining:.1f}  "
                     f"bake_start={_bt("bake_start_time"):.0f}  frames_baked={frames_baked}  "
@@ -3404,7 +3417,7 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         # Launch the bat in a new console window; returns immediately.
         # cwd is set to output_path so the new cmd starts with a valid directory.
         subprocess.Popen(
-            ["cmd", "/c", "start", "SmokeSimLab Batch", bat_path],
+            ["cmd", "/c", "start", "BatchSimLab Batch", bat_path],
             shell=False,
             cwd=output_path,
         )
@@ -3417,11 +3430,11 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
 
 
 class SMOKE_OT_open_docs(bpy.types.Operator):
-    """Open the SmokeSimLab documentation in a web browser."""
+    """Open the BatchSimLab documentation in a web browser."""
 
     bl_idname  = "smoke.open_docs"
     bl_label   = "Documentation"
-    bl_description = "Open the SmokeSimLab documentation on GitHub"
+    bl_description = "Open the BatchSimLab documentation on GitHub"
 
     def execute(self, context):
         bpy.ops.wm.url_open(url=DOCS_URL)
@@ -3484,7 +3497,7 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
             "@echo off",
             'cd /d "%~dp0"',
             "setlocal enabledelayedexpansion",
-            f"echo SmokeSimLab retry — {len(failed)} failed job(s)",
+            f"echo BatchSimLab retry — {len(failed)} failed job(s)",
             "echo.",
             "set ERRORS=0",
             "",
@@ -3599,7 +3612,7 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
         _redraw_panels()
 
         subprocess.Popen(
-            ["cmd", "/c", "start", "SmokeSimLab Retry", bat_path],
+            ["cmd", "/c", "start", "BatchSimLab Retry", bat_path],
             shell=False,
             cwd=output_path,
         )
@@ -3951,12 +3964,12 @@ class SMOKE_OT_monitor_existing_jobs(bpy.types.Operator):
 
 
 class SMOKE_OT_reset_to_defaults(bpy.types.Operator):
-    """Reset ALL SmokeSimLab settings to factory defaults."""
+    """Reset ALL BatchSimLab settings to factory defaults."""
 
     bl_idname      = "smoke.reset_to_defaults"
     bl_label       = "Reset To Defaults"
     bl_description = (
-        "Reset ALL SmokeSimLab settings to factory defaults: simulation parameters, "
+        "Reset ALL BatchSimLab settings to factory defaults: simulation parameters, "
         "render settings, output path, domain object, utilities toggles, and job log "
         "are all cleared.  This cannot be undone."
     )
@@ -3967,7 +3980,7 @@ class SMOKE_OT_reset_to_defaults(bpy.types.Operator):
     def execute(self, context):
         _reset_on_load()
         _redraw_panels()
-        self.report({'INFO'}, "SmokeSimLab: all settings reset to defaults")
+        self.report({'INFO'}, "BatchSimLab: all settings reset to defaults")
         return {'FINISHED'}
 
 
@@ -4148,7 +4161,7 @@ def _noise_ui(layout, s):
 
 class SMOKE_PT_panel(bpy.types.Panel):
     """
-    Main SmokeLab panel in the 3D Viewport N-panel (Sidebar → SmokeLab tab).
+    Main BatchSimLab panel in the 3D Viewport N-panel (Sidebar → Batch Sim Lab tab).
 
     Layout order:
       • Header row with title and documentation link
@@ -4163,11 +4176,11 @@ class SMOKE_PT_panel(bpy.types.Panel):
       • Export Batch button + status
     """
 
-    bl_label       = "Smoke Lab"
+    bl_label       = "Batch Sim Lab"
     bl_idname      = "SMOKE_PT_panel"
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category    = 'SmokeLab'
+    bl_category    = 'BatchLab'
 
     def draw_header(self, context):
         """
@@ -4184,7 +4197,7 @@ class SMOKE_PT_panel(bpy.types.Panel):
         layout = self.layout
 
         version = ".".join(str(v) for v in bl_info["version"])
-        layout.label(text=f"SmokeSimLab v{version}", icon='TOOL_SETTINGS')
+        layout.label(text=f"BatchSimLab v{version}", icon='TOOL_SETTINGS')
 
         # ── Setup (collapsible) ───────────────────────────────────────────
         box_setup = layout.box()

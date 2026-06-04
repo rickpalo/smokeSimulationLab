@@ -77,4 +77,6 @@ class TestLauncherCrashStamp:
     def test_crash_header_records_addon_version(self):
         src = _launcher_src()
         assert "_job_addon_version" in src
-        assert "SmokeSimLab addon {_job_addon_version}" in src
+        # v0.6.3: brand renamed SmokeSimLab → BatchSimLab in user-visible
+        # log strings (crash header is user-visible in crash_log.txt).
+        assert "BatchSimLab addon {_job_addon_version}" in src
