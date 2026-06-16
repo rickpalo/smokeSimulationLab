@@ -5,20 +5,25 @@
 ## Repository structure
 
 ```
-smokeSimulationLab/          ← repo root
-├── SmokeSimLab/
-│   ├── __init__.py          ← addon code
-│   ├── smoke_worker.py      ← headless batch worker
-│   └── smoke_launcher.py    ← crash-safe launcher wrapper
-├── documentation/
-├── tests/
+smokeSimulationLab/                  ← repo root
+├── scripts/
+│   └── SmokeSimLab/                 ← THE addon source (tracked — edit here)
+│       ├── __init__.py              ← addon code
+│       ├── smoke_worker.py          ← headless batch worker
+│       ├── smoke_launcher.py        ← crash-safe launcher wrapper
+│       └── blender_manifest.toml    ← Blender 4.2+ extension manifest
+├── tests/                           ← pytest suite
+├── tools/                           ← analysis helpers (analyze_estim.py, …)
+├── docs/                            ← GitHub Pages extension-update feed (index.json + *.zip)
+├── dist/                            ← built extension zips (git-ignored)
 ├── README.md
-├── LICENSE
 └── .gitignore
 ```
 
-Your local working copies live in `scripts/SmokeSimLab/` (ignored by git).
-When ready to release, copy them into `SmokeSimLab/` at the repo root.
+There is a **single tracked source tree** at `scripts/SmokeSimLab/` — you edit
+it in place and release straight from it. There is **no** separate
+`SmokeSimLab/` release-copy directory and **no** copy step (an earlier version
+of this doc described one; it never existed).
 
 ---
 
@@ -26,7 +31,7 @@ When ready to release, copy them into `SmokeSimLab/` at the repo root.
 
 ### 1. Update the version number
 
-Open `SmokeSimLab/__init__.py` and bump the version in `bl_info`:
+Open `scripts/SmokeSimLab/__init__.py` and bump the version in `bl_info`:
 
 ```python
 bl_info = {
@@ -43,32 +48,27 @@ Use the format `(major, minor, patch)`:
 
 Also update `WORKER_VERSION` in `smoke_worker.py` and `LAUNCHER_VERSION` in
 `smoke_launcher.py` if those files changed, and keep `_EXPECTED_WORKER_VERSION`
-/ `_EXPECTED_LAUNCHER_VERSION` in `__init__.py` in sync with them.
+/ `_EXPECTED_LAUNCHER_VERSION` in `__init__.py` in sync with them. Keep
+`blender_manifest.toml`'s `version` in sync with `bl_info` too — the
+`test_extension_manifest.py::TestManifestVersionSync` test enforces this.
 
-### 2. Copy your updated scripts into the repo folder
-
-```
-scripts/SmokeSimLab/__init__.py       →   SmokeSimLab/__init__.py
-scripts/SmokeSimLab/smoke_worker.py   →   SmokeSimLab/smoke_worker.py
-scripts/SmokeSimLab/smoke_launcher.py →   SmokeSimLab/smoke_launcher.py
-```
-
-### 3. Run tests
+### 2. Run tests
 
 ```bash
 python -m pytest tests/
 ```
 
-All tests must pass before tagging a release.
+All tests must pass before tagging a release. (No copy step — you edit and
+release `scripts/SmokeSimLab/` directly.)
 
-### 4. Commit your changes
+### 3. Commit your changes
 
 ```bash
-git add SmokeSimLab/__init__.py SmokeSimLab/smoke_worker.py SmokeSimLab/smoke_launcher.py
+git add scripts/SmokeSimLab/
 git commit -m "v0.2.21: description of what changed"
 ```
 
-### 5. Tag the commit and push
+### 4. Tag the commit and push
 
 ```bash
 git tag v0.2.21
@@ -78,7 +78,7 @@ git push origin main --tags
 The tag must start with `v` followed by numbers, e.g. `v0.2.21`.
 Pushing the tag triggers the GitHub Actions release workflow automatically.
 
-### 6. Check the release on GitHub
+### 5. Check the release on GitHub
 
 Go to: https://github.com/rickpalo/SmokeSimLab/releases
 

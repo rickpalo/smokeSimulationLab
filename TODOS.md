@@ -1,38 +1,168 @@
-# BatchSimLab — Pending Issues
+# BatchSimLab — Active Issues
 
-> _Project renamed from "SmokeSimLab" to "BatchSimLab" at v0.6.3 (surface-only); all TODO-* IDs remain stable across the rename._
+> _Project renamed from "SmokeSimLab" to "BatchSimLab" at v0.6.3 (surface-only);
+> all TODO-* IDs remain stable across the rename._
+
+**This file lists only OPEN / IN-PROGRESS / PARTIAL work.**
+
+- Long-horizon major-version plan → [ROADMAP.md](ROADMAP.md)
+- Finished / rejected / cancelled tasks → [TODOS_COMPLETED.md](TODOS_COMPLETED.md)
+- Per-version changelog → `RELEASING.md`; bugs → `BUG_TRACKER.md`
+
+Repo is source of truth — verify line refs against current code before acting.
 
 ---
 
-## ROADMAP — long-horizon major versions (filed 2026-06-02)
+## Active TODO index
 
-The addon is being repositioned from smoke-only to a general batch
-simulation tool.  Future major versions broaden the scope:
+| ID | Title | Status | Target |
+|----|-------|--------|--------|
+| TODO-55 | Batch **emitter / flow object** parameters | OPEN (spec) | v0.9.0 |
+| TODO-54 | RELEASING.md describes a release-copy layout that doesn't exist | OPEN (doc-only) | — |
+| TODO-51 | Better time estimates — samples + noise up-res terms | IN PROGRESS (step 1 done) | v0.8.0 |
+| TODO-46 | "All jobs" ETA doesn't model two-pass bake-then-render | OPEN | v0.8.0 |
+| TODO-36 | Monitor Existing Jobs — progress count wildly off mid-bake | OPEN | v0.8.0 |
+| TODO-31 | RESUME progress bar should start at "(already-baked + 1) of total" | OPEN (needs decision) | v0.8.0 |
+| TODO-27 | Restore crash dumps (relax Job Object kill window) | PARTIAL | — |
+| TODO-24 | Per-frame bake timing not collected | OPEN | — |
+| TODO-23 | Retry overall batch time estimate is unreliable | OPEN | — |
+| TODO-22 | Crash timing inconsistency (5-min stall vs immediate) | INSTRUMENTED (root cause open) | — |
 
-- **v0.8.0** — TODO-43 Create Default Setup operator; TODO-36 Monitor
-  Existing Jobs progress count refactor; TODO-31 RESUME bar baseline
-  fix.  (Slated UI/UX polish bundle.)
-- **v0.9.0** — Batch processing for **emitter parameters**.  Today the
-  addon only batches domain-level settings (resolution, dissolve, noise,
-  fire, time, gas).  v0.9.0 adds sweep machinery for emitter flow
-  properties — density, temperature, fuel, surface emission rate, the
-  per-emitter mesh — so a single batch can compare emitter
-  configurations rather than just domain configurations.
-- **v1.0.0** — **Smoke simulation feature-complete.**  All planned smoke-
-  related parameters (domain + emitter + noise + dissolve + cache) are
-  batch-able.  First stable release; docs and tests considered
-  production-ready.  (Addon may be renamed to a non-"smoke"-specific
-  name at v1.0.0 in preparation for v2.0.0.)
-- **v2.0.0** — **Smoke + Fire simulation.**  Builds on v1.0.0 by adding
-  full fire-simulation support: the v0.7.0 Fire Parameters become a
-  first-class section with its own emitter modes (flow_type='FIRE' /
-  'BOTH'), fire-specific cache management, fire-specific text overlays,
-  fire-only / smoke-only / both render modes.
-- **v3.0.0** — **Smoke + Fire + Fluid (liquid) simulation.**  Adds
-  liquid domain support (`domain_type='LIQUID'`): mesh + particles cache
-  layers, liquid-specific batch parameters (surface tension, viscosity,
-  diffusion, particle radius / number), liquid render modes (mesh +
-  flip-particles), and the corresponding worker bake stages.
+Also pending (not a TODO): **tag `v0.7.6` on GitHub** (built + feed live, not yet tagged).
+
+---
+
+## TODO-55: Batch **emitter / flow object** parameters — **OPEN (spec)** — target v0.9.0
+
+**Filed 2026-06-16.**  Today a batch sweeps **domain**-level settings only. This
+TODO is the v0.9.0 scope expansion (see [ROADMAP.md](ROADMAP.md)): let a single
+batch sweep **emitter (flow object)** properties too. A domain can have multiple
+emitters; each gets its own collapsible sub-section in Simulation Parameters
+(default collapsed) exposing the iterable properties with the same Range / List
+choice the domain params already use.
+
+### A. Emitter discovery (the "does the domain know its emitters?" question)
+
+**Reality check:** Blender's fluid **domain** does *not* keep an explicit
+backlink to its flow objects. Mantaflow includes every object in the scene that
+has a `FLUID` modifier with `fluid_type == 'FLOW'` and that overlaps the domain
+bounds. So "selecting the domain auto-populates its emitters" must be
+implemented by **scanning the scene**, not by reading a list off the domain.
+
+**Approach (user-approved 2026-06-16):**
+1. Scan the scene for **all** fluid-emitter objects — those with a `FLUID`
+   modifier whose `fluid_type == 'FLOW'`.
+2. **Filter out any emitter that is not inside the selected domain**, using the
+   domain object's world-space bounding box. An emitter counts as "inside" when
+   its world-space bounds intersect the domain's world-space bounds (use a
+   bounding-box overlap test on `obj.bound_box` transformed by
+   `obj.matrix_world`; a generous AABB-intersection is fine — exact mesh
+   containment is unnecessary and Mantaflow itself works on the bounds).
+3. Return the survivors ordered deterministically (by object name) so the
+   per-emitter UI sections and job-dict keys are stable across re-exports.
+
+**This addon is documented as SINGLE-DOMAIN only.** With one domain in the
+scene, the inside-domain filter cleanly attributes every relevant emitter to it.
+Multi-domain scenes are explicitly out of scope (a second domain would need
+per-domain emitter attribution; not supported). State this in the README /
+panel help so the assumption is visible to users.
+
+- Discovery helper (pure, testable): split into
+  `find_fluid_emitters(scene) -> list[Object]` (step 1, modifier scan) and
+  `emitters_inside_domain(emitters, domain_obj) -> list[Object]` (step 2,
+  bounds filter) so each is unit-testable without a full scene. A thin
+  `find_emitters(scene, domain_obj)` composes them.
+
+### B. Auto-populate on domain select
+
+When the user picks the domain (existing `domain_obj` pointer), populate a
+per-emitter UI state seeded with each emitter's **current** flow-setting values
+(so the Range/List defaults start at the live scene values, not arbitrary
+constants). Re-scan when the domain pointer changes or on an explicit "Refresh
+Emitters" action (and on `_reset_on_load`). Keep emitter identity keyed by
+object **name** (matches how jobs/caches are keyed elsewhere).
+
+### C. Initial iterable property set
+
+Map the user's terms to `bpy.types.FluidFlowSettings` (verify exact attr names
+against the running Blender 5.x before coding — these are the expected mappings):
+
+| UI label (user's term) | FluidFlowSettings attr | Notes |
+|------------------------|------------------------|-------|
+| Initial Temperature | `temperature` | "Initial Temperature" in the Flow panel |
+| Density | `density` | smoke density |
+| Surface Emission | `surface_distance` | |
+| Volume Emission | `volume_density` | |
+| Initial Velocity (enable) | `use_initial_velocity` | gates the four below |
+| → Source | `velocity_factor` | only when initial-velocity on |
+| → Normal | `velocity_normal` | only when initial-velocity on |
+| → Initial X / Y / Z | `velocity_coord[0..2]` | 3-float vector; only when on |
+
+The four velocity terms are only sweepable when `use_initial_velocity` is on
+(mirror how dissolve_speed is excluded from the sweep when `use_dissolve` is
+off — the `sweepable` gating pattern in `generate_jobs_*`).
+
+### D. UI — per-emitter section in Simulation Parameters
+
+- One collapsible box **per discovered emitter**, default **collapsed**,
+  labelled with the emitter object name. Lives inside the existing Simulation
+  Parameters area alongside the domain param sections (reuse the
+  `show_*`/TRIA collapse pattern from TODO-44).
+- Inside each: the Range / List choice for every iterable property in (C), using
+  the **same** `_sub_param_ui()` / range-or-list widgets the domain params use,
+  so behaviour and look are consistent.
+- A dynamic number of emitters means dynamic UI + dynamic properties — likely a
+  `CollectionProperty` of an `EmitterSettings` PropertyGroup (one element per
+  emitter), since Blender properties must be statically registered. Each element
+  carries the per-property min/max/step (Range) or value-list (List) + the
+  enable flag, keyed by emitter name.
+
+### E. Job generation, worker, naming (the hard part — cache safety)
+
+This is why it's a major version, not a point release:
+
+1. **Job dict schema.** Each `job_NNNN.json` gains an `emitters` block:
+   `{ "<emitter_name>": { "temperature": v, "density": v, ... , "use_initial_velocity": bool, "velocity_factor": v, "velocity_normal": v, "velocity_coord": [x,y,z] } }`.
+   `generate_jobs_limited` / `generate_jobs_all` must take the **cartesian product
+   across domain params × every swept emitter property** — guard the combinatorial
+   blow-up (a job-count preview + warning, like the existing "N jobs will be
+   created" label).
+2. **Worker applies them.** `smoke_worker.py` must, before baking, look up each
+   flow object by name and set its `flow_settings` from the job's `emitters`
+   block (skip/warn if a named emitter is missing in the scene). Worker version
+   bump + re-export.
+3. **make_name() / cache safety (CRITICAL — BUG-013 / BUG-014 family).** Emitter
+   params **must** be encoded into the job name so two jobs differing only in an
+   emitter value don't share a cache dir and silently SKIP-bake the wrong data.
+   Use the defaults-suppressed compact encoding (TODO-47/48): emit a per-emitter
+   suffix only for properties that differ from the live/default value. Multiple
+   emitters → namespaced suffix (e.g. `E1.T1.5_E1.D1_E2.T2`). A
+   `TestNoCacheCollisions`-style test must prove every swept emitter property
+   yields distinct names.
+4. **results.csv** gains the emitter columns; **perf_log / estimates** may later
+   need an emitter-density term (defer; ties to TODO-51).
+
+### Open design questions (resolve when picked up)
+
+- Multi-domain attribution (deferred — see A).
+- Property registration for a *dynamic* emitter count (CollectionProperty vs
+  rebuilding properties on refresh).
+- Velocity vector as one List axis vs three independent axes (3 independent
+  axes explodes the product fast — maybe sweep magnitude + keep direction, or
+  treat the XYZ vector as a single List of presets).
+- Whether emitter sweeps combine with domain sweeps by full cartesian product
+  (powerful but huge) or a "vary one axis at a time" Limited mode.
+
+### Tests
+`find_emitters` (discovery + ordering); auto-populate seeding from flow settings;
+the velocity-gated `sweepable` exclusion; job-generation product (count +
+content); worker flow-settings application (by name, missing-emitter guard);
+`make_name` emitter encoding + no-collision regression.
+
+**Files:** `__init__.py` (EmitterSettings PropertyGroup + CollectionProperty,
+`find_emitters`, domain-select populate, per-emitter UI, `generate_jobs_*`,
+`make_name`, `export_batch`); `smoke_worker.py` (apply flow settings, version
+bump); tests.
 
 ---
 
@@ -58,622 +188,90 @@ working-copy/release-copy split entirely.  Doc-only; no code or version bump.
 
 ---
 
-## TODO-53: Launcher .vdb heartbeat to the job log — **DONE** (v0.7.5)
-
-**Resolved 2026-06-15.**  The launcher's watchdog loop now appends a
-`[heartbeat] baking <data|noise>: data X/N  noise Y/N` line to the job log,
-throttled to once per `_HEARTBEAT_INTERVAL` (30 s) and **only when the combined
-data+noise VDB count has grown**.  New `_count_cache_vdb(output_path, name)`
-scans `Cache/<name>/data` + `noise` with `os.scandir` (never `os.walk` — the
-Norton/Synology filter chain blocked recursive walks in worker v0.5.3/0.5.4),
-swallowing any OSError so a heartbeat failure never kills the job.
-
-Effect: a healthy bake refreshes the log mtime on every new frame, so the
-existing 1800 s stale-log watchdog can't false-kill a slow-but-progressing
-bake; a true hang produces no new frames → no heartbeat → log goes stale → the
-watchdog fires as designed.  The noise-hang case (TODO-49 job 8) is now caught
-cleanly: once the data bake fills to N, the combined total only grows if noise
-frames appear, so a stuck noise bake leaves the log stale with a final
-`data N/N  noise 0/N` heartbeat that pinpoints the phase.  Reuses the same
-frame-numbered VDB pattern the worker's TODO-52 boundary line exposes.
-
-Tests: `test_todo53_heartbeat.py` (11) — counting, scandir-not-walk guard,
-write-only-on-growth guard, throttle, version match.  Launcher → 0.6.4;
-addon → 0.7.5 (gate constant).  **Re-export required.**
-
-**Original spec retained below.**
-
----
-
-## TODO-53: Launcher .vdb heartbeat to the job log — (spec)
-
-**Filed 2026-06-15.**  The stale-log watchdog ([smoke_launcher.py] `_STALE_LOG_TIMEOUT
-= 1800`) watches the job **log file's mtime**, but the worker's `_log()` writes
-nothing during the blocking `bake_data()` / `bake_noise()` calls — so the log is
-silent for the entire bake even while the background Blender's console counter
-moves and `.vdb` files stream to disk.  That's the inconsistency behind "keep
-the timer but make it reliable": a genuinely slow high-res bake could approach
-the 30-min window with a totally silent log.
-
-**User's idea (adopted):** have the **launcher** (which already runs the
-watchdog loop in a separate process) periodically count `.vdb` files in the
-job's cache `data/` + `noise/` subdirs and append a short heartbeat line to the
-job log, e.g. `[heartbeat] data 247/500  noise 0/500`.  Benefits:
-- The log mtime advances during a healthy bake → the existing 1800 s timer
-  stays as-is and never false-kills a slow-but-progressing bake.
-- A true hang writes no new `.vdb` → no heartbeat → log goes stale → watchdog
-  fires as designed.
-- The log becomes self-explanatory (you can see bake progress in the log, not
-  just the console).
-
-**Notes:** the launcher already reads the job `.json` for paths and loops on a
-timer, so it has everything it needs; reuse the `_(\d{4})\.vdb$` counting logic
-that `_count_vdb_frames` uses on the addon side.  Pairs naturally with TODO-52
-(both hinge on counting data/ + noise/ frames).  Launcher change → launcher
-version bump + re-export.
-
----
-
-## TODO-52: Separate "Baking noise" stage in the progress model — **DONE** (v0.7.4)
-
-**Resolved 2026-06-15.**  Implemented as a **sub-stage** of the Baking
-macro-stage (label + subtask bar), not a full separate band: the worker logs
-`Baking noise (bake_noise)...` between `bake_data()` and `bake_noise()` (both
-branches; worker → 0.7.2), and `_STAGES` gains
-`("Baking noise (", "Baking noise", 1)` at the **same** completed-rank as the
-data bake — so the stage *label* flips to "Baking noise" (rightmost-keyword
-match) and the subtask bar restarts 0→N counting the `noise/` subdir (via
-`_count_vdb_frames(..., subdir="noise")`), while Bar-3 band math and
-`_TOTAL_SUBTASKS` stay untouched.  A hung noise bake now shows
-"Baking noise (0 of 500)" instead of a frozen data bar at "500 of 500"
-(TODO-49).  **Deferred (intentionally):** giving noise its own time-estimate
-*band* (dynamic `_TOTAL_SUBTASKS` 4↔5) — the user confirmed estimates aren't
-vital, and a separate band risks the complex multi-bar poller for little gain.
-Re-open that slice if per-phase ETA accuracy becomes important (ties to
-TODO-51).  Tests: `test_todo52_noise_stage.py` (9) + the existing
-`TestStagesMatchWorkerLog` guard now covers the noise keyword.  Addon → 0.7.4;
-worker → 0.7.2.  **Re-export required.**
-
-**Original spec retained below.**
-
----
-
-## TODO-52: Separate "Baking noise" stage in the progress model — (spec)
-
-**Filed 2026-06-15.**  The live bake bar is driven by `_count_vdb_frames`, which
-counts only the cache **`data/`** subdir.  So the bar fills 0 → N during the
-data bake, then **freezes at "N of N" for the entire noise (up-res) bake**
-(which writes to the **`noise/`** subdir, uncounted).  This is exactly the
-frozen "Baking 500 of 500" seen in TODO-49 — the data pass finished and the
-noise pass ran invisibly until it crashed/hung.
-
-**Design decision (2026-06-15, user-approved): a discrete "Baking noise" stage,
-not a single combined data+noise bar.**  Considered two options:
-- (A) Combined — one bake bar over `data + noise` frames (total 2N).
-- (B) Separate stage — `Baking` (data) then a distinct `Baking noise` stage,
-  conditional on `use_noise`.
-
-Chose **(B)** because: (1) **diagnosis** — the noise pass is exactly where
-TODO-49 crashes/hangs occur, so a frozen "Baking noise 0/500" is far more
-legible than a combined bar stuck at 640/1000; (2) **estimate accuracy** — data
-vs noise frames have very different per-frame cost, and the architecture already
-estimates time *per stage* (Bar 2 band allocation), so one combined rate would
-lurch when crossing into noise; (3) **fits the model** — `_STAGES` is already a
-conditional staged system (render is skipped in bake-only mode), so inserting a
-conditional stage extends the existing pattern instead of special-casing the
-bake denominator.
-
-Resulting stage sequence:
-- **noise off:** Starting → Baking → Rendering → (Still) → Complete
-- **noise on:**  Starting → Baking → **Baking noise** → Rendering → (Still) → Complete
-
-**Implementation:**
-1. **Worker (shared with TODO-53):** emit a boundary log line between the two
-   bake calls — `_log(f"[{name}] Baking noise (bake_noise)...")` — in *both* the
-   FULL and RESUME bake branches, so the poller can match a new stage keyword.
-   Worker version bump + re-export.
-2. **Addon `_STAGES`:** insert `("Baking noise (", "Baking noise", 2)` and
-   re-rank Rendering 2→3 / Still 3→4.  Note `"Baking noise ("` does **not**
-   contain the substring `"Baking ("`, so the data-stage keyword won't
-   false-match the noise line; the highest-rank matched keyword wins as today.
-3. **Per-job stage count:** make `_TOTAL_SUBTASKS` effective value depend on the
-   running job's `use_noise` (5 with noise, 4 without) so Bar 3 band math and
-   "Job stage X of N" stay correct — mirror how bake-only mode already varies
-   the stage set.
-4. **Noise subtask bar:** when in the `Baking noise` stage, count `noise/` VDBs
-   (reuse `_count_vdb_frames`'s `_(\d{4})\.vdb$` logic on the `noise/` subdir)
-   and show `Baking noise (X of N)`, mirroring the existing data-bake subtask
-   text at `__init__.py` ~line 3517-3538.
-
-**Tests:** extend `test_progress_helpers.py` with a noise-enabled fixture
-(noise/ counting); add a `_STAGES` test asserting the noise keyword appears in
-`smoke_worker.py` (regression guard like `TestStagesMatchWorkerLog`) and that
-`"Baking noise ("` is ranked above `"Baking ("`.  Addon + worker change →
-re-export required.
-
----
-
 ## TODO-51: Better time-estimate formulas — add samples + noise up-res terms — **IN PROGRESS** (step 1 done, v0.7.3)
 
 **Step 1 (data collection) DONE in v0.7.3:** the worker `_perf` record now logs
-`render_samples`, `use_noise`, and `noise_upres` (worker → 0.7.1, re-export
-required).  **Next:** run a calibration batch that *varies samples and
-noise_upres at a fixed resolution* (see calibration note at the end), then do
-steps 2-3 (analysis + model).
+`render_samples`, `use_noise`, and `noise_upres` (worker → 0.7.1).  **Next:** run
+a calibration batch that *varies samples and noise_upres at a fixed resolution*
+(see calibration note below), then do steps 2-3 (analysis + model).
 
-**Filed 2026-06-15.**  Two observations from the 2026-06-15 batch:
-1. **Render time rises with noise up-res even at the same output resolution.**
-   Higher `noise_upres` makes a denser volumetric grid, so EEVEE raymarches more
-   steps per pixel — the render gets slower even though camera width×height is
-   unchanged.
+**Two observations from the 2026-06-15 batch:**
+1. **Render time rises with noise up-res even at the same output resolution** —
+   higher `noise_upres` makes a denser volumetric grid, so EEVEE raymarches more
+   steps per pixel.
 2. **Render samples affect render time** and aren't in the model at all.
 
 **Current model** (`__init__.py`, constants block ~line 160-180):
 - Bake:   `bake_secs ≈ _BAKE_RATE_PER_RES3_FRAME × resolution³ × frames`
-  (median of res=128 samples; ignores the separate **noise bake pass** cost,
-  which also scales with `noise_upres` — see [[project_noise_bake_ceiling]]).
-- Render: `render_secs ≈ rate × width × height × frames`
-  (EEVEE rate = median of 167 samples, cv=27%).  **Independent of samples AND
-  noise up-res** — which is exactly the scatter the user is seeing.
-
-**Blocker — data collection gap (do this FIRST):**  the per-job perf record in
-`smoke_worker.py` (`_perf`, ~line 1291) records `resolution`, `render_width`,
-`render_height`, `frame_end`, and the derived per-pixel/per-res³ rates — but
-**NOT `render_samples` and NOT `noise_upres`/`use_noise`**.  So the existing
-`perf_log.json` corpus can't fit a samples or noise term.  Until those fields
-are logged, "collect data" can't produce the needed signal.
-- `render_samples` is read at worker line 327 (`cfg.get("render_samples", 16)`)
-  and lives in each `job_NNNN.json` cfg, so historical data *could* be
-  back-joined by `job_name`, but cleanest is to add both fields to `_perf`.
-- `noise_upres` is in the results CSV but not in `perf_log.json`.
+  (ignores the separate **noise bake pass** cost — see
+  [[project_noise_bake_ceiling]]).
+- Render: `render_secs ≈ rate × width × height × frames` (EEVEE rate = median of
+  167 samples, cv=27%). **Independent of samples AND noise up-res** — exactly the
+  scatter the user is seeing.
 
 **Plan when picked up:**
-1. **Worker (data):** add `render_samples`, `noise_upres`, `use_noise` to the
-   `_perf` dict; worker version bump + re-export.  Run a calibration batch that
-   *varies samples and noise_upres* at a fixed resolution so the terms are
-   separable.
+1. **Worker (data):** _done_ — fields added in v0.7.3.  Still need the calibration
+   batch (below).
 2. **Analysis:** extend `tools/analyze_estim.py` to fit:
-   - Render (EEVEE):  `render_secs ≈ (a + b·samples) × pixels × frames ×
-     f(noise_upres)` — start with samples roughly linear (+ fixed overhead) and
-     a volume term that grows with `noise_upres` (try linear then a power fit;
-     the volume grid edge is res×upres, so cost may track the up-res voxel count
-     rather than output pixels).
-   - Bake:  add a noise-bake term so total bake ≈ data-bake(res³) +
-     noise-bake(f(res, noise_upres)); the noise pass is currently folded into
-     one res³ rate and underestimates high-upres jobs.
+   - Render (EEVEE): `render_secs ≈ (a + b·samples) × pixels × frames ×
+     f(noise_upres)` (samples ~linear + overhead; volume term growing with
+     up-res — try linear then power; cost may track the up-res voxel count
+     res×upres rather than output pixels).
+   - Bake: add a noise-bake term so total ≈ data-bake(res³) +
+     noise-bake(f(res, noise_upres)).
    - Re-check Cycles once real Cycles data exists (still a placeholder).
 3. **Addon (model):** replace the flat `_RENDER_RATE_EEVEE_PER_PIXEL_FRAME` /
-   `_BAKE_RATE_PER_RES3_FRAME` usage with the new multi-term formulas; keep the
-   old constants as fallbacks when samples/upres are unknown.  New estimator
-   functions each get tests (feedback_testing); pin a few known (samples, upres)
-   → expected-seconds rows as regression anchors.
+   `_BAKE_RATE_PER_RES3_FRAME` usage with multi-term formulas; keep the old
+   constants as fallbacks when samples/upres are unknown. New estimator functions
+   each get tests; pin a few (samples, upres) → expected-seconds regression rows.
 
 **Acceptance:** estimate error (predicted vs actual in `estim_log.jsonl`) drops
-materially for high-sample and high-upres jobs; cv on the EEVEE render rate
-falls once samples/noise are modelled instead of averaged over.
+materially for high-sample and high-upres jobs; EEVEE-rate cv falls once samples
+/ noise are modelled instead of averaged over.
 
 **Calibration-batch design (own checklist item — the existing corpus is almost
 all EEVEE @ 16 samples, so there's no variance to fit until this runs):**
 - Fix resolution (e.g. 128) and frame count low (e.g. 60) to keep it cheap.
-- Sweep `render_samples` across several values (e.g. 4, 16, 32, 64, 128) with
-  noise off → isolates the samples term.
+- Sweep `render_samples` (e.g. 4, 16, 32, 64, 128) with noise off → isolates the
+  samples term.
 - Sweep `noise_upres` (1, 2, 3) at one fixed sample count → isolates the noise
   term in both render and bake.
 - One cross cell (high samples × high upres) to check the terms compose.
-- Re-run on each machine of interest (rates are hardware-specific); tag perf
-  records so analyze_estim can fit per-machine if needed.
-
----
-
-## TODO-49: Warn when noise up-res grid exceeds the safe ceiling — **DONE** (v0.7.2)
-
-**Filed + Resolved 2026-06-15.**  During a 10-job batch on the i9-13900 /
-128 GB machine (Blender 5.1.1), the 256-resolution jobs failed in the **noise**
-bake (the data bake finished — progress bar reached "Baking 500 of 500" — then
-`bpy.ops.fluid.bake_noise()` never returned):
-
-| Job | res × upres | edge | outcome |
-|-----|-------------|------|---------|
-| many 128 jobs | 128×3 | 384³ | OK |
-| job 6 | 256×2 | 512³ | OK |
-| job 7 | 256×3 | 768³ | crash — `EXCEPTION_ACCESS_VIOLATION` in `tbbmalloc.dll`, exit 1 |
-| job 8 | 256×4 | 1024³ | hang — stale-log watchdog killed it after 30 min |
-
-Root cause is in Mantaflow's high-resolution noise bake (32-bit grid indexing
-overflows once the vec3 element count passes 2³¹ near 1024³), **not** our code —
-consistent with the existing finding that the stack-trace crashes trace to
-Blender internals.  It is **not** a hard limit: after re-exporting and
-restarting twice, every job (including 256×4) eventually completed.
-
-**Fix (v0.7.2, addon-only):** new module-level helpers `noise_grid_edge()` and
-`noise_grid_exceeds_ceiling()` + constant `_NOISE_UPRES_EDGE_WARN = 512`
-(exclusive; the known-good 512³ case does not warn).  The Export Batch panel
-counts jobs over the ceiling and shows a non-blocking red warning box
-("N job(s) exceed the noise up-res ceiling … may crash or hang … retry if it
-stalls").  Export is **not** disabled — the user can continue.  Covered by
-`test_noise_ceiling.py` (8 tests).
-
----
-
-## TODO-50: Per-job-line status + warning tooltip in the Job Log list — **CANCELLED** (2026-06-15)
-
-**Cancelled the day it was filed.**  Blender's `UIList.label()` has no tooltip
-API, and the user decided the inline-glyph fallback ("◐/⚠ + status word in the
-row text") isn't worth it either.  The aggregate panel warning box from TODO-49
-already covers the noise-ceiling case; per-row job status is visible enough via
-the existing status icon + unicode prefix.  Re-open only if a concrete need for
-per-row hover text resurfaces.
-
-**Original spec retained below for reference.**
-
-**Filed 2026-06-15.**  Two related asks for the `SMOKE_UL_job_log` rows:
-
-1. **Status tooltip** — each job line should expose its lifecycle state as
-   human-readable text: "Not Started", "Baking", "Baked, Waiting for Render",
-   "Rendering", "Complete", plus the error states already tracked
-   ("Retrying", "Failed", "Crashed").  These map onto the existing
-   `_job_statuses` values (`NOT_STARTED`, `IN_PROGRESS` → Baking,
-   `BAKED` → Baked/Waiting for Render, `RENDERING`, `COMPLETE`, `RETRYING`,
-   `FAILED`, `CRASHED`).
-2. **Noise-ceiling warning tooltip** — surface the TODO-49 warning per offending
-   job line (which res×upres tripped it), not just the aggregate panel box.
-
-**Blocker / design note:** Blender's `UIList.draw_item` uses `layout.label()`,
-which has **no hover-tooltip API** — tooltips only attach to props/operators.
-Options to evaluate when picking this up:
-- (a) Inline glyphs instead of tooltips — the rows already carry a unicode
-  status prefix (▶ ◐ ◉ ✓ ✗ ⚠); add a ⚠ marker for over-ceiling jobs and a
-  short status word in the row text.
-- (b) Replace the per-row label with a tiny disabled `operator()` whose
-  `description=` carries the tooltip (heavier; one operator per state).
-- (c) A details sub-panel that prints the selected row's full status + any
-  warnings below the list.
-Recommend (a) for the inline status word + ⚠, optionally (c) for full text.
-
----
-
-## TODO-48: Compact filename format — trim trailing zeros + shorter OFF indicator — **DONE** (v0.7.1)
-
-**Filed + Resolved 2026-06-02 → 2026-06-05.**  Bundled with TODO-47 in
-v0.7.1.  New `_fmt_num()` helper trims trailing zeros via
-`round(x, 3):g`; single-char `x` replaces `-OFF` (Dx / Nx / ATx).
-See RELEASING.md v0.7.1 row + `test_v071_make_name.py` (33 tests).
-
-**Original spec retained below.**
-
-**Filed 2026-06-02.**  `make_name()` produces verbose filenames that get
-long as more sweep params get added.  Two compaction wins:
-
-### A. Trim insignificant trailing digits
-Current `round(x, 2)` + string conversion produces `0.0`, `1.0`, `0.50`
-— the trailing zeros are noise when the value is already an integer or
-short decimal:
-
-| Current   | After fix |
-|-----------|-----------|
-| `V0.0`    | `V0`      |
-| `A1.0`    | `A1`      |
-| `B0.50`   | `B0.5`    |
-| `NS2.25`  | `NS2.25`  (unchanged) |
-
-**Implementation:** swap `round(x, 2)` for `f"{round(x, 3):g}"` (same
-pattern used in v0.6.0 TODO-38 for text-object precision).  `:g` format
-naturally trims trailing zeros while preserving real precision.
-
-### B. Replace `-OFF` with a single character `x`
-User suggestion (2026-06-02): "come up with a good shorthand for 'OFF';
-maybe an X".  Options to choose from when implementing:
-
-| Current   | Option 1 (`x`) | Option 2 (`X`) | Option 3 (`Off`) |
-|-----------|----------------|----------------|------------------|
-| `D-OFF`   | `Dx`           | `DX`           | `Doff`           |
-| `N-OFF`   | `Nx`           | `NX`           | `Noff`           |
-| `F-OFF`   | `Fx`           | `FX`           | `Foff`           |
-
-Recommend **lowercase `x` with no dash** (`Dx`, `Nx`, `Fx`) — most
-compact, visually distinct from value-bearing forms like `D5-Fast`
-(no value letter could be `x`), no shouting capitals.
-
-### Combined example
-Current full default-fire-off name:
-```
-R128_V0.0_A1.0_B1.0_D5-Fast_N2_NS2.0_SC2.0
-```
-After TODO-47 + TODO-48 with all v0.7.0 params at defaults:
-```
-R128_V0_A1_B1_D5-Fast_N2_NS2_SC2  (unchanged — defaults suppressed)
-```
-After with non-default fire on (BR=1.5, FS=1, FV=0.5, TMax=1.7, TIgn=1.5):
-```
-R128_V0_A1_B1_D5-Fast_N2_NS2_SC2_F-Y_BR1.5_FS1_FV0.5_TMax1.7_TIgn1.5
-```
-Same scene with fire off:
-```
-R128_V0_A1_B1_D5-Fast_N2_NS2_SC2  (no Fx suffix — match default-off)
-```
-
-Decision: append `_Fx` always when fire is OFF, OR suppress when default?
-Recommend SUPPRESS for backwards-compat with pre-v0.7.1 names.  Fire
-is OFF by default, so omitting the suffix preserves v0.6.x cache names
-exactly when nothing fire-related is touched.
-
-### Bundle with TODO-47
-Both this TODO and TODO-47 modify `make_name()`.  Ship them together
-in v0.7.1 so users only see ONE cache-name change (orphaning event)
-rather than two back-to-back.  v0.7.1 release notes should clearly
-explain that pre-v0.7.1 caches will not be matched and need to be
-re-baked OR manually renamed.
-
-**Files:** `__init__.py` — `make_name()`.  Plus regression tests
-covering the compact format, the `x` suffix, default-suppression for
-the new v0.7.0 params, and backwards-compat (no surprise renames when
-nothing's been changed from v0.6.x).
-
----
-
-## TODO-47: Include v0.7.0 sim params in make_name() — **DONE** (v0.7.1)
-
-**Filed + Resolved 2026-06-02 → 2026-06-05.**  Bundled with TODO-48 in
-v0.7.1.  v0.7.0 params now appear in filenames with defaults-suppressed
-format (`_TS<n>` only when time_scale ≠ 1.0, full `_F-Y_BR<n>...` block
-only when use_fire is on, etc.).  `TestNoCacheCollisions` (5 tests)
-proves every new param produces distinct filenames so cache collisions
-of the BUG-013 / BUG-014 family can't recur.  See RELEASING.md v0.7.1.
-
-**Original spec retained below.**
-
-**Filed 2026-06-02.** v0.7.0 added Time Scale, Adaptive Time Step + CFL +
-Timesteps Max/Min, plus the full Fire Parameters section.  These are
-written into the job JSON, applied by the worker, and recorded in
-results.csv — but they are NOT included in `make_name()`.
-
-**Consequence:** two jobs that differ ONLY in (e.g.) time_scale produce
-the same filename and therefore share the same cache directory.  The
-second job's bake silently SKIP-bakes from the first one's cache,
-applying the wrong simulation params.  Same class of bug as v0.5.x
-BUG-013 (the slow_dissolve cache collision that motivated the v0.6.2
-`-Slow`/`-Fast` suffixes).
-
-**Workaround in v0.7.0:** use `use_existing_cache=False` to force a
-full re-bake every time so collisions can't happen.
-
-**Fix sketch (v0.7.1):** extend `make_name()` to include the v0.7.0
-params with compact suffixes when they differ from Blender defaults:
-- `_TS<n>` for time_scale (e.g. `TS2.0` for time_scale=2.0)
-- `_AT-N` when use_adaptive_timesteps=False (skip suffix when True,
-  matching the default)
-- `_CFL<n>_TM<n>_Tm<n>` only when sweeping (skip when at defaults)
-- `_F-Y_BR<n>_FS<n>_FV<n>_TX<n>_TI<n>` when use_fire=True (else `_F-OFF`)
-Defaults-suppressed format keeps v0.6.x cache names intact when the
-new params are at their defaults; users sweeping new axes get
-unique names.  Same backwards-compat trade-off as TODO-39 / BUG-013.
-
-**Files:** `__init__.py` — `make_name()`.  Plus regression tests.
+- Re-run per machine (rates are hardware-specific); tag perf records so
+  analyze_estim can fit per-machine.
 
 ---
 
 ## TODO-46: Time estimate doesn't account for two-pass bake-then-render — **OPEN** (v0.7.0)
 
-**Filed 2026-06-01.** User observation from a 13-job batch (~25 min into a
-render-pass job): the addon displayed `Job stage 3 of 4 (~15 min
-remaining this job)` and `All jobs: ~25 min remaining` — but with 8 jobs
-left to render and ~15 min per render, 8 × 15 = 120 min, not 25.
+**Filed 2026-06-01.** User observation from a 13-job batch: the addon showed
+`Job stage 3 of 4 (~15 min remaining this job)` and `All jobs: ~25 min remaining`
+— but with 8 jobs left to render at ~15 min each, 8 × 15 = 120 min, not 25.
 
-**Additional data point (2026-06-02, on v0.6.3):** User ran a 76-job
-batch where most jobs were SKIP-bake (cached).  Initial "All jobs"
-estimate was 17 h 50 min.  **It stayed at exactly 17 h 50 min through
-the first 24 jobs** despite many of those completing in seconds via
-SKIP BAKE.
-
-This is more severe than the original "wrong direction" symptom: the
-estimate is **constant** (not just wrong-direction).  Implications:
-- The "All jobs" remaining estimate is computed as a static
-  per-job-time × jobs-remaining product, where per-job-time is derived
-  from a default rate constant (not from elapsed time of completed
-  jobs in THIS batch).
-- Rolling-average from completed jobs is either not collected or not
-  feeding the display.
-- For SKIP-bake jobs the per-job estimate is wildly wrong (defaults
-  assume a full bake + render).
-
-**Refined fix sketch:** beyond the two-pass aware estimator originally
-planned, the all-jobs remaining estimate should be
-`(jobs_remaining * rolling_average_job_secs)` where
-`rolling_average_job_secs` uses the last N completed jobs in THIS
-batch (fall back to defaults only when no jobs have completed yet).
-
-**Root cause hypothesis:** the all-jobs estimate uses a per-job multiplier
-that doesn't model the two-pass pipeline.  With v0.4.0+ two-pass
-(`bake all` then `render all`), the current render-pass job N still has
-to be followed by render-pass jobs N+1, N+2, ... — but the estimator may
-be treating it as "average remaining job time × jobs remaining" using a
-"job time" that approximates a single-pass job (bake + render serially)
-instead of "remaining renders × per-render time" (the actual remaining
-work, since all bakes are done).
+**Additional data point (2026-06-02, v0.6.3):** a 76-job batch (most SKIP-bake)
+showed an initial "All jobs" estimate of 17 h 50 min that **stayed at exactly
+17 h 50 min through the first 24 jobs** despite many completing in seconds via
+SKIP BAKE.  So the estimate is **constant**, not just wrong-direction:
+- The "All jobs" remaining estimate is a static per-job-time × jobs-remaining
+  product where per-job-time comes from a default rate constant (not from elapsed
+  time of completed jobs in THIS batch).
+- Rolling-average from completed jobs is either not collected or not feeding the
+  display.
+- For SKIP-bake jobs the per-job estimate is wildly wrong (defaults assume a full
+  bake + render).
 
 **Fix sketch:**
-- Determine current phase (bake / render) by checking whether
-  `_bake_done_n == total` (all bakes complete).
-- If yes → remaining time = sum of render times for jobs not yet rendered.
-- If no → remaining time = sum of (bake + render) times for jobs not yet
-  baked + sum of render times for jobs baked but not yet rendered.
-- Per-job rates already collected (perf_log + estim_log) — use rolling
-  averages from completed jobs in the current batch when available;
-  fall back to the `_BAKE_RATE_PER_RES3_FRAME` / `_RENDER_RATE_*`
-  defaults when not.
+- Determine current phase by checking whether `_bake_done_n == total`.
+- All bakes done → remaining = sum of render times for not-yet-rendered jobs.
+- Else → remaining = sum of (bake + render) for not-yet-baked + sum of render for
+  baked-but-not-rendered.
+- Use rolling averages from completed jobs in the current batch when available;
+  fall back to `_BAKE_RATE_PER_RES3_FRAME` / `_RENDER_RATE_*` defaults otherwise.
 
-**Files:** `__init__.py` — `_poll_batch_progress_impl` "All jobs:" ETA
-block; possibly `_format_eta` callers and `_estim_log` consumers.
-
-**Priority:** medium — affects user confidence in time estimates but
-doesn't block any workflow.  Bundle with the bake-bar refactor
-(TODO-31, TODO-36) so the whole bar+ETA system gets one cleanup pass.
-
----
-
-## TODO-45: Iterate Slow Dissolve checkbox + audit no-dissolve-jobs-when-off — **DONE** (v0.6.2)
-
-**Filed + Resolved 2026-06-01 → 2026-06-02.**  New `iterate_slow_dissolve`
-BoolProperty + UI checkbox paired with Slow Dissolve on the same row in
-the Dissolve section.  When checked AND `use_dissolve=True`, every
-dissolve-using job in both LIMITED and ALL modes gets a companion with
-the opposite slow_dissolve value.  Combines cleanly with
-`iterate_dissolve_both`.  Part B audit confirmed (with regression test)
-that no dissolve sweep jobs are created when `use_dissolve` is off.
-Tests: 11 new in `test_todo45_iterate_slow.py`.  See RELEASING.md v0.6.2.
-
-**Original spec retained below for reference.**
-
-**Filed 2026-06-01.** Two related items:
-
-### Part A: Iterate Slow Dissolve checkbox
-Add a checkbox **"Iterate Slow Dissolve"** on the same row as the existing
-**Slow Dissolve** checkbox in the Dissolve section.  When checked, every
-job with `slow_dissolve=True` automatically gets a matching companion
-job with `slow_dissolve=False` (and otherwise identical params), so the
-user gets a slow-vs-fast comparison without manually duplicating jobs.
-
-**Existing precedent:** the addon already has analogous
-`iterate_dissolve_both` (use_dissolve On vs Off) and `iterate_noise_both`
-(use_noise On vs Off) checkboxes implemented in `generate_jobs_limited`
-and `generate_jobs_all`.  The new `iterate_slow_dissolve` follows the
-same pattern at one level of nesting deeper.
-
-**Visibility:**
-- Only meaningful when `use_dissolve=True` (greyed out otherwise).
-- Companion job is created regardless of whether `slow_dissolve` itself
-  is True or False — the iteration adds the other value to the sweep.
-
-**Files:** `__init__.py` — add `iterate_slow_dissolve` BoolProperty
-adjacent to existing `slow_dissolve`; extend `generate_jobs_limited` /
-`generate_jobs_all`'s dissolve-sweep blocks to fork the slow/fast
-variants when the new flag is on; UI row update in `_dissolve_ui()`.
-
-### Part B: Audit — no dissolve jobs when use_dissolve is off
-User request: "double check we don't create Dissolve jobs when the
-Dissolve is Off."
-
-Inspect `generate_jobs_*` to confirm that with `use_dissolve=False`:
-- `dissolve_speed` is not swept (no jobs with varying speeds get created)
-- `slow_dissolve` is not iterated even if Iterate Slow Dissolve is on
-- The `_default_job` correctly carries `use_dissolve=False` through to
-  every job dict regardless of which other axis is being swept
-
-This is likely already correct (the `sweepable` list excludes
-dissolve_speed when use_dissolve is off — see line 457) but worth
-asserting with a regression test.
-
----
-
-## TODO-44: Collapsible Output + Progress sections (UI reorg) — **DONE** (v0.6.1)
-
-**Filed + Resolved 2026-05-29 → 2026-06-01.**  See RELEASING.md v0.6.1 row
-and `tests/test_todo44_sections.py` (19 regression tests covering
-property registration, panel structure, auto-expand logic, and Job Log
-nesting inside Progress).
-
-**Filed 2026-05-29.** The Setup panel is getting tall.  v0.7.0 will add
-TODO-41 (Time Scale, Adaptive Time Step, CFL, Timesteps Max/Min) and
-TODO-42 (Fire Parameters section), which compound the problem.  Reorganise
-the existing rows into two collapsible sections *before* the new params
-land so they have a clean home.
-
-**Note on existing Setup section:** the **Output folder picker** at the
-top of the Setup section stays where it is — it's a path setting that
-naturally belongs with the other Setup fields (Domain, Text Objects).
-The new "Output" collapsible below has nothing to do with that picker;
-the name collision is unfortunate but accurate to the user's mental model
-(everything related to *producing output* lives here).
-
-**Section 1 — Output (collapsible, default state TBD):**
-Contains the iteration-mode block and everything currently shown between
-it and the Run Batch button:
-- Iteration Mode box (Limited Combinations / All Combinations radio)
-- "N job(s) will be created" label
-- Use Placeholders checkbox
-- Use Existing Cache checkbox
-- Automatically Retry Failed Jobs checkbox
-- Render Simulation Result checkbox
-- Render Animation checkbox
-- Render Engine + Samples row
-- Replace / Append toggle
-- Export Batch button
-- Last-export status line
-- Display Results When Finished checkbox
-- Run Batch button
-
-**Section 2 — Progress (collapsible, AUTO-EXPAND when active):**
-Contains everything currently shown after the Run Batch button:
-- Batch progress bar + "Starting" / "Bake N/M Render Y/M (D done)" text
-- Job stage bar + "Job stage X of 4 (~H min remaining)" text
-- Sub-task bar + "Bake N/M Render Y/M (D/T done)" text
-- Per-batch time remaining text ("All jobs: ~24 min remaining")
-- Batch summary lines after completion (success/failure counts)
-- Job Log UIList
-
-**Auto-expand logic for Progress section:**
-- When `_batch_is_running()` returns True → force the section open regardless
-  of the user's manual collapse state.
-- When the batch completes → leave it open (user wants to see the summary).
-- When the user clicks Run Batch on a fresh batch → expand it (in case the
-  user collapsed it after the last batch).
-- Manual collapse should be honoured ONLY when no batch is active AND no
-  summary is being displayed.
-
-**Implementation sketch:**
-- Add `show_output: BoolProperty(default=True)` and `show_progress:
-  BoolProperty(default=True)` to `SmokeSettings`.
-- Wrap each section's draw in
-  `box = layout.box(); row = box.row(align=True);
-   row.prop(s, "show_output", icon='TRIA_DOWN' if s.show_output else
-   'TRIA_RIGHT', emboss=False, text=""); row.label(text="Output"); ...
-   if s.show_output: <draw existing rows here>`.
-- For Progress auto-expand: at the top of the Progress section's draw,
-  `effective_show = s.show_progress or _batch_is_running() or s.batch_summary_line1`.
-  Use `effective_show` to gate the body; the `prop()` toggle still binds to
-  `show_progress` so the user's manual choice persists.
-
-**Risk:** moderate.  Pure UI restructuring — no behaviour or schema change.
-Tests are largely unaffected (they test logic, not draw order); some
-panel-source-level assertions in `test_settings_save_load.py` may need
-adjustment if they grep for specific consecutive `layout.prop()` lines.
-
-**Why before TODO-41/42:** if we add 8+ new param rows into the current
-flat layout, the panel becomes truly unusable.  Doing the reorg first
-creates the "Simulation Parameters" / "Output" / "Progress" tri-section
-structure into which the new params naturally fit.
-
----
-
-## TODO-37: Reorder Gas Parameters to match Blender's tab order — **DONE** (v0.6.0)
-
-**Filed + Resolved 2026-05-29.** Cosmetic UI fix.  The Gas Parameters section
-previously drew controls in the order **Vorticity → Buoyancy Density → Buoyancy
-Heat**, while Blender's native Fluid Domain panel shows **Buoyancy Density →
-Buoyancy Heat → Vorticity**.  Resolution (v0.6.0): swapped the three
-`_sub_param_ui()` calls in `_gas_ui()`; purely visual, property names
-(vorticity/alpha/beta), job-dict serialisation, CSV columns, and `make_name()`
-output all unchanged.  Test: `test_v060_fixes.TestTodo37GasParamsOrder`.
-
-**Files:** `__init__.py` — `_gas_ui()` at the three `_sub_param_ui()` calls
-(currently around lines 3969-3971).  Swap the call order:
-
-```python
-_sub_param_ui(box, s, "alpha",     "Buoyancy Density")  # was 2nd
-_sub_param_ui(box, s, "beta",      "Buoyancy Heat")     # was 3rd
-_sub_param_ui(box, s, "vorticity", "Vorticity")         # was 1st
-```
-
-**Risk:** zero.  The underlying property names (vorticity / alpha / beta)
-and their roles in job-dict serialisation, sweep order, CSV column order,
-make_name() output, and Limited Combinations grouping are all unaffected
-— this is purely a visual reorder of three UI rows.  Tests that assert
-sweep behaviour (`test_job_generation.py`) and naming
-(`test_job_generation.py::TestMakeName`) reference parameter names, not
-draw order, so they will continue to pass unchanged.
-
-**Bundle with:** v0.6.0's Monitor Existing Jobs / Resume bar refactor
-(TODO-31, TODO-36) — they're all UI-side changes.
+**Files:** `__init__.py` — `_poll_batch_progress_impl` "All jobs:" ETA block;
+possibly `_format_eta` callers and `_estim_log` consumers.  **Priority:** medium
+— affects confidence in estimates but blocks no workflow. Bundle with TODO-31 /
+TODO-36 / TODO-51 (one cleanup pass over the bar+ETA system).
 
 ---
 
@@ -681,889 +279,117 @@ draw order, so they will continue to pass unchanged.
 
 **Filed 2026-05-28.** User switched the output folder back to AutoTest and
 clicked **Monitor Existing Jobs** mid-bake.  Sub-task bar 1 displayed
-`Baking 5 of 197` while the cache directory was actively writing
-`frame_0471` (of 500).  Numbers:
+`Baking 5 of 197` while the cache directory was actively writing `frame_0471`
+(of 500).  Numbers:
 
 - `5` ≈ "frames baked since Monitor was clicked".
 - `197` ≈ `500 - 303` (frames still-to-bake at the moment Monitor started).
 - Actual frame being written: 471 → 168 frames baked since Monitor start — but
   the bar froze at 5.
 
-**Likely cause:** the bake-bar's baseline was captured correctly at
-Monitor-click, but the per-poll re-count of VDB files isn't updating during
-this scenario (or the `start_time` mtime filter from BUG-003 is dropping
-recent frames).  The poll's `_count_vdb_frames` may be reading a cached or
-stale view.  Inspect `_poll_batch_progress_impl`'s bake-bar section and the
-Monitor-Existing-Jobs initial state seeding.
+**Likely cause:** the bake-bar baseline was captured correctly at Monitor-click,
+but the per-poll re-count of VDB files isn't updating in this scenario (or the
+`start_time` mtime filter from BUG-003 is dropping recent frames). The poll's
+`_count_vdb_frames` may be reading a cached/stale view. Inspect
+`_poll_batch_progress_impl`'s bake-bar section and the Monitor-Existing-Jobs
+initial state seeding.
 
-**Files:** `__init__.py` — `_count_vdb_frames`, the bake-bar progress section
-in `_poll_batch_progress_impl`, `SMOKE_OT_monitor_existing_jobs.execute`.
-
----
-
-## TODO-35: Evaluate background save-`.blend` + open resume approach — **DONE** (v0.5.0)
-
-**Filed + Resolved 2026-05-28.**  Investigation by five probe scripts
-(`scripts/experiments/bg_resume_probe_v[2-7].py`) ruled out the save+reload
-approach and discovered the real fix: **cache_type='MODULAR' + bake_data()**.
-
-**Probe trail (kept for reference — all in `scripts/experiments/`):**
-- **v2:** user's original save+reload+move-back proposal → REBAKED-FROM-1.
-- **v3:** added `cache_frame_pause_data` write to the saved .blend →
-  REBAKED-FROM-1.  Finding: that property does NOT persist through
-  `save_as_mainfile` (loads as 0 in fresh process).
-- **v5:** switched to `cache_type='MODULAR'` + `bake_data()` with
-  `cache_frame_start = last_preserved` → bake succeeded but pruned frames
-  1..99 (Mantaflow honored the new lower bound as a cache range).
-- **v6 (KEY):** same-process MODULAR + `bake_data()` with
-  `cache_frame_start = 1` unchanged → **VERDICT RESUMED.** 99 frames
-  preserved (mtime untouched), boundary frame 100 rewritten once,
-  100 new frames baked in 5.5 s.  No save/reload required.
-- **v7:** v6 + `use_noise=True` + `bake_noise()` → both layers resume
-  identically.
-
-**Resolution (v0.5.0):** Worker switched to `bake_data()` (+ `bake_noise()`
-if `use_noise`) under `cache_type='MODULAR'` in BOTH the RESUME and FULL
-bake branches.  See BUG-010 Attempt 5 in `BUG_TRACKER.md` for full details.
-
-**Unlocks:**
-- TODO-31 (RESUME progress bar) — previously blocked by no real resume; now
-  the bar can show "Baking (already_baked+1) of total" because we know the
-  baseline is preserved.
-- A backlog of bake-and-restart workflows that were too slow to attempt.
+**Files:** `__init__.py` — `_count_vdb_frames`, the bake-bar progress section in
+`_poll_batch_progress_impl`, `SMOKE_OT_monitor_existing_jobs.execute`.
 
 ---
 
-## TODO-34: Render-phase fast-fail when bake didn't produce a usable cache — **DONE** (v0.4.8)
+## TODO-31: RESUME progress bar should start at "(already-baked + 1) of total" — **OPEN (needs decision)**
 
-**Filed + Resolved 2026-05-28.**  In the two-pass pipeline, if the bake phase
-crashed or left a partial cache, the render phase used to start its (expensive)
-setup, hit the post-bake guard, and only then exit — wasting the launcher
-overhead + GPU init.  Now the render-phase worker bails BEFORE the heavy setup:
-
-1. Reads `<stem>.bake.done`; if missing or contains "error" → bail.
-2. Counts `<cache_dir>` data files; if `< (frame_end - frame_start + 1)` → bail.
-3. Before exiting (1), `shutil.rmtree(cache_dir)` wipes the partial cache so
-   auto-retry's single-pass `--phase=both` sees an EMPTY cache → forces the
-   FULL-bake decision (avoids RESUME-from-1 of broken data).
-4. `sys.exit(1)` → `.render.done` reports error → auto-retry triggers.
-
-Single-pass (`--phase=both`) and the bake phase are unaffected — they own their
-own cache decisions.  Tests: `tests/test_run_batch_gating.py::TestRenderPhaseFastFail`
-(4).  Worker → 0.4.8; re-export required.
-
----
-
-## TODO-33: Render Animation checkbox — still-only mode — **DONE** (v0.4.5)
-
-**Filed 2026-05-28.** New `render_animation` BoolProperty (default True) below
-*Render Simulation Result*; greyed out when rendering is off.  When unchecked,
-the worker skips the per-frame PNG sequence + ffmpeg MP4 mux and renders only
-the final still PNG (`<name>.png`).  Useful when you only need the result image
-and don't want to spend N×frame render time on the animation.
-
-**Resolution (v0.4.5):**
-- `SmokeSettings.render_animation` BoolProperty + UI row gated on
-  `render_simulation_result`; reset-on-load default True.
-- `export_batch` writes `render_animation` into each job JSON.
-- Worker reads it (default True for pre-TODO-33 JSONs); when False:
-  - empties `frames_to_render` → animation render loop is a no-op;
-  - `if render_animation:` gates the ffmpeg block;
-  - the TODO-32 final-still copy naturally falls back to rendering (`frame_end`
-    isn't in `frames_to_render`) so `<name>.png` is still produced.
-- Tests: `tests/test_run_batch_gating.py::TestRenderAnimationGate` (4).
-- Worker → 0.4.5; re-export required.
-
----
-
-## TODO-32: Final still re-renders frame_end with identical settings — just copy it — **DONE** (v0.4.4)
-
-**Resolution (v0.4.4):** worker's "Final still" block now `shutil.copy2`'s
-`<name>_frames/frame_<frame_end>.png` → `<name>.png` when `frame_end` was in
-`frames_to_render` this run AND the source file is present.  Falls back to the
-original render path on copy failure OR when the frame was placeholder-skipped
-(source file might be stale from a prior run with different settings).  Tests:
-`tests/test_run_batch_gating.py::TestWorkerFinalStillCopy`.
-
-
-
-**Filed 2026-05-28.** The worker renders the PNG sequence (`frame_0001 …
-frame_<frame_end>.png` into `Renders/<name>_frames/`), then renders the LAST
-frame AGAIN as the standalone `Renders/<name>.png` (used by Setup Results
-Viewer).  Both renders use the same `render_mode` + `render_samples` + scene
-state, so they produce a pixel-identical image — the second render is purely
-file-placement.  Saves ~5 s/job at EEVEE 1440×1080; more at higher res / Cycles.
-
-**Proposed fix:** in the "Final still" block of `smoke_worker.py`, replace the
-second `bpy.ops.render.render(write_still=True)` with
-`shutil.copy2(<frames_dir>/frame_<frame_end>.png, <name>.png)`.
-
-**Edge cases to handle:**
-- **Missing source frame** — if `<frames_dir>/frame_<frame_end>.png` doesn't
-  exist (animation render was skipped because all frames already existed but
-  somehow `<name>.png` doesn't, or `frame_<frame_end>.png` was placeholder-
-  skipped without being baked), fall back to the existing render-still path.
-- **Placeholder/rebake mismatch** — if `use_placeholders` skipped re-rendering
-  `frame_<frame_end>.png` but the bake actually recomputed that frame, the
-  copy would be stale.  Either re-render in that case, or invalidate the
-  placeholder for `frame_end` whenever `frame_end in rebaked_frames`.
-- **Bake-only mode** — already handled (final-still block runs only when
-  `render_simulation_result` is True).
-- **Perf accounting** — `render_seconds` currently includes the final-still
-  render time.  After the change, it would include only the animation render;
-  decide whether `render_secs_per_frame` should be unchanged (it's already
-  computed over `frames_actually_rendered`, which excludes the duplicate) or
-  whether to add a separate `still_seconds` field (probably skip — they were
-  always the same render).
-- **CSV column for the still** — currently none; no change needed.
-
-**Files:** `scripts/SmokeSimLab/smoke_worker.py` — "Final still — last frame
-only" block.  **Tests:** unit-test a small helper that picks copy-or-render
-based on source-frame existence + `rebaked_frames` membership.
-
----
-
-## TODO-31: RESUME progress bar should start at "(already-baked + 1) of total"
-
-**Filed 2026-05-27.** On a resume with e.g. 100/500 frames already baked, the
-bar should read **"101 of 500"** at the start, not "0 of 332" (332 = missing).
-The completed frames should count toward the full total.
+**Filed 2026-05-27.** On a resume with e.g. 100/500 frames already baked, the bar
+should read **"101 of 500"** at the start, not "0 of 332" (332 = missing). The
+completed frames should count toward the full total.
 
 **Dependency / caveat (important):** RESUME currently **re-bakes from frame 1**
-(Mantaflow limitation, BUG-010 — there's no scripted API to truly resume
-mid-range). So while it re-bakes frames 1–100 (overwriting in place), there is
-no honest way to show "101 of 500" advancing — those frames are being redone.
-Options:
-- (a) **Display-only:** show `max(already_baked, frames_this_run) of total`, so
-  it opens at "100 of 500" and holds there until the re-bake passes frame 100,
-  then climbs. Matches the user's mental model but sits still during the 1–100
-  re-bake (looks stalled, esp. at high res).
-- (b) Honest "re-baking N of 500" climbing from 1 (current mtime-based count vs
-  full total) — accurate but doesn't match the request.
+(Mantaflow limitation, BUG-010 — no scripted API to truly resume mid-range). So
+while it re-bakes frames 1–100 (overwriting in place), there is no honest way to
+show "101 of 500" advancing — those frames are being redone. Options:
+- (a) **Display-only:** show `max(already_baked, frames_this_run) of total`, so it
+  opens at "100 of 500" and holds until the re-bake passes frame 100, then climbs.
+  Matches the mental model but sits still during the 1–100 re-bake (looks stalled,
+  esp. at high res).
+- (b) Honest "re-baking N of 500" climbing from 1 — accurate but doesn't match the
+  request.
 - Truly starting at 101 requires **real partial resume**, which BUG-010 says is
-  not achievable in scripted Mantaflow. So this TODO is blocked on that unless
-  we accept option (a)'s cosmetic behavior.
+  not achievable in scripted Mantaflow.
 
 **Files:** `__init__.py` — `_poll_batch_progress_impl` bake-bar section,
 `batch_bake_frame_baseline`. **Decision needed:** accept option (a)?
 
 ---
 
-## TODO-29: Warn when rendering is on but the scene has no camera — **DONE** (v0.4.6)
-
-**Resolution (v0.4.6):** `_scene_has_camera(scene)` helper added (pure;
-`any(obj.type == 'CAMERA' for obj in scene.objects)`).  Both Export Batch and
-Run Batch now check `render_simulation_result and not _scene_has_camera(...)`
-in their `invoke` and show a confirmation dialog if the warning fires.  Export
-Batch combines the camera warning with the existing high-resolution warning in
-one dialog (operator instance caches both flags as `_warn_cam` / `_warn_res`).
-Cancel aborts; OK proceeds anyway (so the user can dismiss with a single click
-if they know what they're doing).  Tests: `tests/test_camera_check.py` (9).
-
-**Filed 2026-05-27 (test run feedback).** If the scene has no camera and
-**Render Simulation Result** is enabled, the renders will be black / fail. On
-Run Batch, warn the user and let them cancel.
-
-**Design note (important):** `render_simulation_result` is baked into each
-`job_NNNN.json` at **Export** time, not Run time. So a Run-Batch warning can
-offer "Cancel" but cannot truly "disable renders" for the existing batch without
-re-exporting. Two clean options:
-- (A) Do the camera check at **Export** time: if no camera + render on, warn and
-  offer to export as bake-only (`render_simulation_result=False`). Simple,
-  correct, but not where the user asked.
-- (B) Do it at **Run Batch**: a dialog with "Cancel" + a checkbox "I added a
-  camera / run anyway". Choosing cancel can also flip the panel's
-  `render_simulation_result` off so a re-export is bake-only.
-- Recommended: **both** — a cheap `_scene_has_camera(scene)` helper used at
-  Export (offer bake-only) and a Run-Batch guard (offer cancel).
-
-**Files:** `__init__.py` — `SMOKE_OT_run_batch.invoke/draw`, `SMOKE_OT_export_batch`,
-a `_scene_has_camera` helper. **Tests:** `_scene_has_camera` unit test.
-
----
-
-## TODO-30: Allow renaming a job in the Job Log (double-click / F2) — **REJECTED** (2026-05-27)
-
-**Rejected:** not worth the effort. The job name is parameter-derived and
-coupled to the cache/render directory names (see analysis below), so a useful
-rename would require moving on-disk artifacts and would not survive a re-export.
-Low value for the complexity. Kept for the record.
-
-**Filed 2026-05-27 (test run feedback).** Let the user rename a job in the Job
-Log list, only while no batch is running (before or after a run).
-
-**Answer to "will renaming reset the sim / change the cache dir?": YES — it is
-not a cosmetic label.** The job `name` *is* the directory name everywhere:
-`Cache/<name>/`, `Renders/<name>_frames/`, `Renders/<name>.mp4`, `<name>.png`,
-the `name` column in `results.csv`, and the `d.cache_directory` Mantaflow bakes
-into. Renaming therefore implies, while no job runs:
-1. Rename on disk: `Cache/<old>` → `Cache/<new>`, `Renders/<old>_frames` →
-   `<new>_frames`, and the `<old>.mp4` / `<old>.png` files. Otherwise the next
-   run bakes fresh into `Cache/<new>` (i.e. it *does* reset the sim) and the old
-   artifacts orphan.
-2. Update the job's JSON `name`, `_job_log_rows`, and `job_log_items[idx]`.
-3. `results.csv` already-written rows still hold the old name (leave or rewrite?).
-
-**Design tension with BUG-005:** names are **parameter-derived** (`make_name`)
-so "same params → same dirs" holds. A manual name will NOT survive a re-export
-(export regenerates the parameter-derived name) and breaks dedup/reuse for
-identical params. So a manual rename is inherently fragile.
-
-**Decision needed before implementing:** (a) full rename that moves all artifacts
-on disk (most work, "does the right thing"), or (b) a display-only label stored
-separately from the parameter-derived dir name (keeps BUG-005 invariant; dirs
-keep the param name; only the Job Log shows the friendly label).
-
-**Files:** `__init__.py` — `SMOKE_UL_job_log` (rename op), `make_name` coupling,
-`export_batch`, `_job_log_rows`. **Tests:** rename helper + artifact-move helper.
-
----
-
-## TODO-28: Append mode overwrites run_smoke_batch.bat instead of extending it — **DONE** (v0.3.0)
-
-**Resolution (v0.3.0):**
-- `_existing_jobs_for_bat(jobs_dir, job_start_index)` reads each prior
-  `job_NNNN.json` (name + render_mode) for indices below the append start.
-- `export_batch` now re-lists those existing jobs in the .bat (via the shared
-  `_job_run_cmd` / `_job_bat_block` helpers) *before* the newly appended ones,
-  so rewriting the .bat in "w" mode no longer drops them.  Re-listed jobs are
-  cheap on a second run (SKIP BAKE / placeholders).
-- Safeguard: the Export/Append toggle and the Export Batch + Run Batch buttons
-  are disabled while a batch is running (`_batch_is_running()` in
-  `SMOKE_PT_panel.draw`) — the running cmd.exe already parsed the .bat, so
-  editing it mid-run can't help and only invites confusion.
-- Tests: `tests/test_export_append.py` — `TestExistingJobsForBat`,
-  `TestJobRunCmd`, `TestJobBatBlock`.
-
-**Observed (2026-05-27 ClaudeTest run):** User exported job_0000 (250 frames),
-clicked Run Batch, then while it was running appended job_0001 (500 frames)
-and job_0002 (200 frames).  Only job_0000 actually ran (the .bat that was
-loaded by cmd.exe when Run Batch was clicked contained only job_0000).
-Job_0001 and job_0002 were created in jobs/ but their entries were never
-in any .bat file that was executed.
-
-**Root cause:** `export_batch()` in `__init__.py` (around line 914):
-```python
-bat_path = os.path.join(output_path, "run_smoke_batch.bat")
-with open(bat_path, "w") as fh:    # "w" = truncate
-    fh.write("\n".join(bat_lines))
-```
-On Append, `bat_lines` is built from only the NEW jobs (the loop at line 830
-iterates `jobs`, which is the new batch only).  The .bat is then OVERWRITTEN,
-dropping all previously-exported jobs.
-
-**Two related symptoms:**
-1. Each Append produces a .bat that contains only the most-recently-appended
-   jobs.  Running it skips all jobs from earlier Exports/Appends.
-2. The addon's job log (UI list) DOES contain all jobs because the seed loop
-   at line 821 only clears `job_log_items` in REPLACE mode.  So the UI shows
-   N jobs but only the last batch's worth ever run, leaving the rest as
-   `NOT_STARTED` (open circle) forever — and the auto-retry mechanism may
-   then misinterpret these never-started jobs as crashes and try to retry
-   them oddly (see ClaudeTest where job_0002 got auto-retried but job_0000
-   /0001 did not match expectations).
-
-**Proposed fix:**
-- In Append mode, before the new-jobs loop, iterate existing
-  `job_NNNN.json` files (indices `0..job_start_index-1`) and emit their
-  .bat entries first.  Read the `name` and `render_mode` from each JSON to
-  produce the correct launcher command.
-- Result: the new .bat runs all existing jobs (which will SKIP BAKE / SKIP
-  RENDER if their caches+renders are already complete) followed by the new
-  ones.
-
-**Additional safeguard (separate fix):** Disable Export Batch (both modes)
-and Append while a batch is running.  This prevents the racier scenario the
-user hit where Append happened after Run Batch was already executing — the
-running cmd.exe has already parsed the .bat into memory and won't see the
-update regardless of how it's written.
-
-**Files:** `scripts/SmokeSimLab/__init__.py` — `export_batch()` lines
-820–915; also UI guards in `SMOKE_PT_panel.draw`.
-
----
-
 ## TODO-27: Restore crash dumps (relax Job Object kill window) — **PARTIAL** (v0.2.33)
 
 **v0.2.33 fix:** Added `_CRASH_DUMP_GRACE_SECS = 15` to the launcher.
-`_save_crash_log` now waits up to 15 s for `blender.crash.txt` to appear
-in `%TEMP%` with `mtime >= launch_time` before deciding the dump is
-missing.  Stale dumps from previous crashes are filtered out by mtime.
-This gives Blender's SEH handler some grace to flush the dump even when
-the Job Object's `DIE_ON_UNHANDLED_EXCEPTION` fires.
+`_save_crash_log` now waits up to 15 s for `blender.crash.txt` to appear in
+`%TEMP%` with `mtime >= launch_time` before deciding the dump is missing. Stale
+dumps from previous crashes are filtered out by mtime.
 
-**Remaining work:** If 15 s isn't enough — i.e., the Job Object truly
-terminates Blender before the SEH handler runs at all — we'd need the
-deeper changes below (options 1/2 from the original proposal).  Re-evaluate
-after the next production batch shows whether dumps start landing again.
+**Remaining work:** If 15 s isn't enough — i.e., the Job Object truly terminates
+Blender before the SEH handler runs — we'd need deeper changes:
+1. Replace `DIE_ON_UNHANDLED_EXCEPTION` with a `SetUnhandledExceptionFilter`
+   approach that writes a minidump first, then terminates.
+2. `WerReportSubmit` with a no-UI flag (dumps via WER, no dialog).
+3. Longer post-exit `%TEMP%\blender.crash.txt` polling (~30 s).
+4. Capture stderr/stdout to a `.crash_stderr` file (last 100 lines of Python
+   output even without a structured dump).
 
-**Observed:** From 2026-05-15 onward, all crashes in `crash_log.txt` show
-`[no blender.crash.txt found in %TEMP%]` — only the dated header and the
-"no dump" line.  Crashes from 2026-05-07 through 2026-05-11 had full Blender
-crash dumps with Exception Records and stack traces.
+Option 3 is least invasive. Re-evaluate after the next production batch shows
+whether dumps start landing again.
 
-**Root cause (analyzed 2026-05-27):** Our launcher's Windows Job Object
-`JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` (added v0.2.6 for WerFault
-dialog suppression) terminates Blender before its SEH crash handler can
-write `blender.crash.txt` to `%TEMP%`.  We traded crash dialogs for crash
-diagnostics — a poor trade now that the dialog blocking problem has other
-mitigations and crash dumps are valuable for diagnosis.
-
-Until 2026-05-11, Blender's crash handler was still managing to write the
-dump in the brief window before Job Object kill.  Something changed
-mid-May (possibly a Blender update changing crash handler latency) that
-now reliably loses dumps.
-
-**Proposed fix:** Give Blender's crash handler a grace window after the
-unhandled exception before the Job Object kills the process.
-
-Approaches to consider:
-1. **Replace `DIE_ON_UNHANDLED_EXCEPTION` with a SetUnhandledExceptionFilter
-   approach** that writes a minidump first, then terminates.
-2. **Use `WerFault` registration cleanup** (Windows API
-   `WerReportSubmit` with no-UI flag) so dumps are written via WER but no
-   dialog appears.
-3. **Post-exit `%TEMP%\\blender.crash.txt` polling** with a longer window
-   (currently checked once; poll for ~30 s after Blender exit).
-4. **Capture stderr/stdout to a `.crash_stderr` file** so even without the
-   structured dump we have the last 100 lines of Python output.
-
-Option 3 is the least invasive and probably catches most dumps without
-re-introducing dialog blocking.
-
-**Files:** `scripts/SmokeSimLab/smoke_launcher.py` —
-`_create_crash_suppression_job`, `_save_crash_log`,
-post-exit polling section.
-
-**Related:** See project memory `project_crash_root_cause.md` — the actual
-crashes are in Blender 5.1.1's glTF/numpy import, not in our code; better
-dumps will confirm whether new crash signatures match the same root cause.
+**Files:** `smoke_launcher.py` — `_create_crash_suppression_job`,
+`_save_crash_log`, post-exit polling. **Related:** `project_crash_root_cause` —
+the actual crashes are in Blender 5.1.1's glTF/numpy import, not our code; better
+dumps will confirm new signatures match.
 
 ---
 
-## TODO-26: "Render Simulation Result" checkbox to skip rendering entirely — **DONE** (v0.3.0)
+## TODO-24: Per-frame bake timing not collected — **OPEN**
 
-**Resolution (v0.3.0):**
-- `SmokeSettings.render_simulation_result` BoolProperty (default `True`), with an
-  update callback `_on_render_sim_result_update` that clears `show_results` when
-  rendering is turned off (avoids a meaningless "display results" in bake-only).
-- Panel: checkbox below "Automatically Retry Failed Jobs"; Render Engine + Samples
-  row and the "Display Results When Finished" row are greyed out when it is off.
-- `export_batch` writes `render_simulation_result` into each `job_NNNN.json`.
-- `smoke_worker.py` reads the flag (default `True` for pre-TODO-26 JSONs) and
-  skips the whole MP4 + still render block when `False`; results.csv and
-  perf_log records still run so the job is recorded as complete.
-- Tests: `tests/test_run_batch_gating.py` — `TestRenderSimResultUpdate`,
-  `TestWorkerRenderGuard`.
+**Observation:** `perf_log.json` stores total bake time + total frames but not
+per-frame timings.  Longer-running frames (high smoke density late in the sim)
+aren't distinguishable from early frames.  A per-frame rate model could improve
+ETA accuracy for high-frame-count jobs.
 
-**Goal:** Allow users to run a bake-only batch (no MP4 / PNG render) for cases
-where they want to validate the simulation cache before committing render time,
-or where rendering will be done later by hand with different settings.
+**Constraint:** `bpy.ops.fluid.bake_all()` is blocking — no per-frame hook without
+a `frame_change_post` handler or a monitor thread in the worker.
 
-**UI changes:**
-- Add a new BoolProperty `render_simulation_result` (default `True`) on
-  `SmokeSettings`.
-- In `SMOKE_PT_panel.draw`, place a checkbox labeled **"Render Simulation Result"**
-  *below* the "Automatically Retry Failed Jobs" checkbox and *above* the
-  Render Engine selector.
-- When `render_simulation_result` is `False`:
-  - Disable the Render Engine selector (`row.enabled = False`).
-  - Disable the Samples field.
-  - Uncheck *and* disable the "Display Results When Finished" checkbox
-    (set `display_results_when_finished = False` and gray it out).
-
-**Behaviour changes:**
-- In `smoke_worker.py`, when the job config has `render_simulation_result = False`:
-  - Skip the playblast/MP4 render step.
-  - Skip the final still PNG render step.
-  - Still write the `results.csv` row (with empty/null values for render-related
-    columns, or omit them — TBD).
-  - Still write `.done` / `.worker_done` sentinels so the launcher treats the
-    job as complete.
-- In `__init__.py`, when `render_simulation_result = False`:
-  - Skip the "show renders" / display step at batch completion.
-  - The progress bar should NOT show "Rendering animation" / "Rendering still"
-    stages (the worker will not log them).
-
-**Export changes:**
-- `SMOKE_OT_export_batch` should include `render_simulation_result` in each
-  `job_NNNN.json` so the worker knows whether to render.
-
-**Files:** `__init__.py` — `SmokeSettings`, `SMOKE_PT_panel.draw`, `export_batch`;
-`smoke_worker.py` — render section guards.
-
-**Tests:** Add a test that confirms the worker exits cleanly without rendering
-when `render_simulation_result = False`; add a UI test (if practical) that
-confirms the Render Engine / Samples / Display Results controls become disabled.
+**Proposed approach:** register a `bpy.app.handlers.frame_change_post` handler
+before `bake_all()` that timestamps each frame advance; write per-frame data to
+`perf_log.json` on completion.  **Files:** `smoke_worker.py` — bake section;
+`perf_log.json` schema.  Ties to TODO-51.
 
 ---
 
-## TODO-25: Run Batch button should be disabled until there are jobs to run — **DONE** (v0.3.0)
+## TODO-23: Retry overall batch time estimate is unreliable — **OPEN**
 
-**Resolution (v0.3.0):**
-- `_batch_ready(output_path)` returns True only when both `run_smoke_batch.bat`
-  and at least one `job_NNNN.json` exist.  Computed on the fly in
-  `SMOKE_PT_panel.draw` (no `batch_ready` property to keep in sync), so it is
-  correct after Export, Remove All Jobs, reset, or reopening a session with
-  jobs already on disk.
-- Run Batch is gated with `_batch_ready(...) and not _batch_is_running()`.
-- "Monitor Existing Jobs" is also greyed out when the jobs folder has no JSONs.
-- Tests: `tests/test_run_batch_gating.py` — `TestBatchReady`.
+**Observed:** When a retry batch starts, `batch_jobs_elapsed` resets to 0. The
+per-job estimate (bake + render for the single retry job) is correct, but the
+overall estimate across all retry jobs uses stale or zeroed elapsed time.
 
-**Observed:** The "Run Batch" button is always enabled, even when no jobs have
-been exported yet.  Clicking it in that state launches `run_smoke_batch.bat`
-which doesn't exist (or runs an empty batch), producing a confusing error.
-
-**Desired behaviour:** Disable the Run Batch button when there are no jobs to
-run.  Enable it in either of these cases:
-1. The user clicks Export Batch (jobs are written to `<output_path>/jobs/`).
-2. The panel is first drawn and the output directory already contains exported
-   jobs from a previous session (`<output_path>/jobs/*.json` exists and
-   `run_smoke_batch.bat` is present).
-
-**Implementation hints:**
-- Add a `batch_ready` BoolProperty on `SmokeSettings` (or compute it on the fly
-  in `draw()` from `os.path.isfile(...)`).
-- In `SMOKE_OT_export_batch.execute`, set `batch_ready = True` after the batch
-  is written successfully.
-- In `_reset_on_load` (and after Remove All Jobs), set `batch_ready = False`.
-- In `SMOKE_PT_panel.draw`, gate the Run Batch button with `row.enabled = batch_ready`.
-- Consider also disabling the Monitor Existing Jobs button when no jobs folder
-  exists (separate but related condition).
-
-**Files:** `__init__.py` — `SmokeSettings`, `SMOKE_OT_export_batch`,
-`SMOKE_OT_remove_all_jobs`, `_reset_on_load`, `SMOKE_PT_panel.draw`.
+**Proposed fix:** carry `batch_jobs_elapsed` across retry starts, or compute the
+overall estimate purely from per-job ETA × remaining jobs.  **Files:**
+`__init__.py` — `_poll_batch_progress_impl` overall-time-estimate section.  Bundle
+with TODO-46.
 
 ---
 
 ## TODO-22: Crash timing inconsistency — one crash stalled ~5 min, another moved immediately — **INSTRUMENTED** (v0.3.0)
 
 **v0.3.0 (diagnostics):** The launcher now logs `pid`, `exit_code`, and
-`time_to_exit` for *every* job (printed to the per-job .log, not just debug
-mode), plus `werfault_poll_secs` on a crash.  These distinguish the two
-candidate causes: a large `time_to_exit` with small `werfault_poll_secs` means
-Blender genuinely ran/hung that long; a small `time_to_exit` with a large
-`werfault_poll_secs` means the stall was the post-exit WerFault poll.  **Root
-cause still unconfirmed — revisit once a stalled crash is captured with this
-data**, then decide whether `_POST_EXIT_WERFAULT_SECS`/`_STALE_LOG_TIMEOUT`
-need tuning.
-
-**Observed (v0.2.26 batch):** Two crashes in the same batch behaved differently.
-The first crash stalled for roughly 5 minutes before the launcher moved on; the
-second crash was detected almost immediately.
-
-**Possible causes:**
-1. WerFault appeared for the first crash but `_find_werfault_for_pid` missed it
-   (process-tree mismatch or timing gap between exit and WerFault spawn), leaving
-   Blender's process lingering for several minutes before the stale-log watchdog
-   fired.
-2. Blender hung for several minutes before actually exiting with a non-zero code.
-
-**Proposed investigation:**
-- Log `proc.pid`, `exit_code`, and time-from-launch-to-exit for each job.
-- Check whether `_POST_EXIT_WERFAULT_SECS` (currently 30 s) should be extended,
-  or whether a shorter `_STALE_LOG_TIMEOUT` is needed for the hung-process case.
-
-**Files:** `smoke_launcher.py` — near WerFault post-exit poll.  TODO comment added in v0.2.26.
-
----
-
-## TODO-23: Retry overall batch time estimate is unreliable
-
-**Observed:** When a retry batch starts, `batch_jobs_elapsed` resets to 0.  The
-per-job estimate (bake + render for the single retry job) is correct, but the
-overall estimate across all retry jobs uses stale or zeroed elapsed time.
-
-**Proposed fix:** Carry `batch_jobs_elapsed` across retry starts, or compute the
-overall estimate purely from the per-job ETA multiplied by remaining jobs.
-
-**Files:** `__init__.py` — `_poll_batch_progress_impl` overall-time-estimate section.
-
----
-
-## TODO-24: Per-frame bake timing not collected
-
-**Observation:** `perf_log.json` stores total bake time + total frames but not
-per-frame timings.  Longer-running frames (high smoke density late in simulation)
-are not distinguishable from early frames.  A per-frame rate model could improve
-ETA accuracy for jobs with high frame counts.
-
-**Constraint:** `bpy.ops.fluid.bake_all()` is blocking — no way to hook per-frame
-completion without a `frame_change_post` handler or a monitor thread in the worker.
-
-**Proposed approach:** Register a `bpy.app.handlers.frame_change_post` handler
-before calling `bake_all()` that records a timestamp each time Mantaflow advances
-a frame; write the per-frame data to `perf_log.json` on completion.
-
-**Files:** `smoke_worker.py` — bake section; `perf_log.json` schema.
-
----
-
-## ~~TODO-20~~ (substantially addressed v0.2.12–v0.2.13): Crashes not being caught / logged
-
-**Observed (2026-05-11):** Blender crashes are still occurring during batch runs and
-are not being recorded — no crash log written, launcher does not detect the crash,
-and the job log UI shows no FAILED indicator.
-
-**Current crash-suppression stack (v0.2.6+):**
-- Windows Job Object with `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` (prevents
-  WerFault dialog from blocking the launcher)
-- `_find_werfault_for_pid` polls for `WerFault.exe` / `WerFaultSecure.exe`
-- `_save_crash_log` called on any non-zero exit code
-- `_POLLER_STALE_SECS = 35 min` stale-detection in the UI timer
-
-**Possible failure modes to investigate:**
-1. **Blender exits with code 0 on crash** — Python `sys.exit(0)` paths inside
-   Blender report success; launcher only flags non-zero exits.  A worker Python
-   exception that is caught internally and then `sys.exit(0)` is called will look
-   like a clean finish.
-2. **Blender hangs (no exit)** — Job Object limit only fires on unhandled exceptions;
-   a deadlock or infinite loop produces no exit at all.  The 35-min stale marker
-   in the UI is the only safeguard, and it requires Blender's log to stop updating.
-3. **Job Object creation fails silently** — `_create_crash_suppression_job` returns
-   `None` on any `OSError`; the launcher falls back to `SEM_NOGPFAULTERRORBOX` only.
-   If the Job Object failed, WerFault may still block.
-4. **Crash before log file is created** — if Blender crashes before the worker writes
-   a single log line, the launcher has no log to associate with the crash.
-
-**Proposed investigation steps:**
-- Add launcher logging: write the Job Object handle value (or "FAILED") to stderr at
-  startup.
-- Add a per-job **timeout**: if the launcher process is still alive after
-  `(estimated_bake_secs + estimated_render_secs) × N` seconds, kill it and mark as
-  CRASHED.  This handles the hang case.
-- On non-zero exit *or* timeout, write the Blender `returncode` and last N lines of
-  `blender_stderr.txt` to `crash_log.txt`.
-- Consider writing a `.crashed` sentinel file (distinct from `.done`) that the UI
-  timer shows as a red CRASHED state in the job log.
-
-**Resolution (v0.2.12–v0.2.13):**
-- `job_NNNN.worker_done` sentinel written by the worker before `quit_blender()`;
-  absence on exit-0 → CRASHED status in the UI (v0.2.12).
-- Startup timeout (120 s) kills Blender if log never appears; wall-clock timeout
-  (4 h) kills if job runs forever (v0.2.13).
-- CRASHED (unexpected crash) shown as `ERROR` icon + ⚠ prefix, distinct from
-  FAILED (controlled error exit) shown as `CANCEL` icon + ✗ prefix (v0.2.13/v0.2.19).
-- Remaining gap: Blender-restarts-itself scenario still undetected. Documented in
-  BUG_TRACKER.md BUG-002.
-
----
-
-## ~~TODO-21 / TODO-5 / TODO-17~~: Job Log rows blank for in-progress and completed jobs — **DONE** (v0.2.16+, v0.2.19)
-
-**Observed (2026-05-11):** After v0.2.9's `_job_statuses` dict fix (which moved
-`item.status` writes out of the poll timer), rows for IN_PROGRESS and COMPLETE jobs
-still go entirely blank — no job number, no job name, no status dot.
-
-**Root cause (revised):** The v0.2.9 fix only moved `item.status` to a module-level
-dict.  `draw_item` still reads `item.job_name` and `item.job_number` directly from
-the `CollectionProperty` item.  Any RNA write to the parent `SmokeSettings`
-PropertyGroup from the poll timer (e.g. `s.batch_progress`, `s.job_log_index`,
-`s.job_log_auto_scroll`) may trigger Blender to re-evaluate the PropertyGroup,
-momentarily returning default values (0 / "") for CollectionProperty item fields
-during the same draw pass.
-
-**Correct fix:** Store ALL display data (job_number, job_name) in a module-level list
-`_job_log_rows: list[(int, str)]` populated at export time.  `draw_item` reads only
-`item.job_number` from RNA (as a collection-index proxy; if 0, skip the row) and
-looks up job_name from `_job_log_rows`.  The poll timer never writes to any
-CollectionProperty item field — not status, not number, not name.
-
-**Files:** `__init__.py` — `_job_log_rows`, `export_batch`, `draw_item`,
-`SMOKE_OT_remove_all_jobs.execute`, `_reset_on_load`.
-
----
-
-## ~~TODO-1~~: Crash log written to jobs folder — **DONE** (already implemented in launcher)
-
----
-
-## ~~TODO-2~~: Retry job does not find partial bake cache — **DONE** (v0.2.3)
-
-**Root cause (confirmed from job_0000_retry.log):**  
-The `has_files` candidate check used `f.endswith('.vdb') or f.endswith('.uni')`,
-which matches Mantaflow's config/metadata `.uni` files (e.g. `fluidsimulation.uni`)
-that are created immediately on domain init — before any simulation frames are
-baked.  A candidate directory with only config files passed `has_files = True`,
-was selected as the effective cache dir, then produced empty `baked_frames` in
-the frame-counting walk (those config files don't match `_\d+\.(vdb|uni)$`).
-The code then fell into the full-rebake else-branch, switched back to the job's
-own cache dir, called `bpy.ops.fluid.free_all()`, and **destroyed the complete
-cache** before rebaking from scratch.
-
-For job_0000 specifically: the bake was complete when it crashed (crash was on
-render frame 0302). The `_0000` cache had all 500 VDB frames, but the retry
-found `_0030` (config files only), fell through to full rebake, freed `_0000`,
-and rebaked all 500 frames unnecessarily.
-
-**Fix:** Changed the `has_files` check to use the same frame-number regex as
-the frame-counting walk (`re.search(r'_\d+\.(vdb|uni)$', f)`), so config-only
-directories are skipped and only candidates with actual simulation frame data
-are accepted.
-
----
-
-## ~~TODO-3~~: "Utilities" collapsible section — **DONE** (implemented in v0.1.x)
-
----
-
-## ~~TODO-4~~: Hide Job Log section when not populated — **DONE** (v0.2.0)
-
----
-
-## ~~TODO-12~~: Full addon reset on .blend load — **DONE** (v0.2.5)
-
-`_reset_on_load` previously preserved `domain_obj`, `output_path`, `render_mode`,
-`use_dissolve`, `use_noise`, text object names, and the Utilities flags.  After
-exporting a batch run the job log rows persisted into the next session.
-
-**Fix:** `_reset_on_load` now resets every property to its factory default,
-including `domain_obj = None`, `output_path = "C:/tmp"`, all Utilities flags, and
-all UI toggle states.  The polling timer is also unregistered at the top of the
-handler so it cannot fire between property resets.
-
----
-
-## ~~TODO-13~~: Crashed job freezes progress bars — **DONE** (v0.2.5)
-
-`_poll_batch_progress` had no exception guard; an unhandled error inside the timer
-silently killed it mid-batch (Blender unregisters a timer that raises).  Also, if
-the launcher process died without writing a `.done`/`.crashed` marker the UI gave
-no indication.
-
-**Fix:**
-1. The timer is wrapped in a `_poll_batch_progress` → `_poll_batch_progress_impl`
-   pattern: the outer function catches all exceptions, prints a warning, and
-   returns `5.0` to keep the timer alive.
-2. Added `_poll_state` + `_POLLER_STALE_SECS = 35 * 60` for timer-side stale
-   detection.  When the active job's log file mtime is unchanged for 35 min the
-   `batch_subtask_text` label is set to "No log activity for N min — job may be
-   frozen."
-
----
-
-## ~~TODO-14~~: File versioning for helper scripts — **DONE** (v0.2.5)
-
-No mechanism existed to detect that `smoke_worker.py` or `smoke_launcher.py` in
-the output folder were exported from an older addon version.  The v0.2.5
-IndentationError was invisible partly because the stale worker was silently used.
-
-**Fix:**
-- `WORKER_VERSION = "0.2.5"` added to `smoke_worker.py`.
-- `LAUNCHER_VERSION = "0.2.5"` added to `smoke_launcher.py`.
-- `_EXPECTED_WORKER_VERSION` / `_EXPECTED_LAUNCHER_VERSION` constants in `__init__.py`.
-- `_read_helper_version()` reads the version string from the first 30 lines of a
-  file without importing it (avoids the `import bpy` constraint).
-- `SMOKE_OT_run_batch.execute` checks both files before starting and emits a
-  `WARNING` panel message if any version is wrong, prompting a re-export.
-
----
-
-## ~~TODO-5 / TODO-17~~: Job Log rows go blank on status transition — **DONE** (see TODO-21 above)
-
-**Observed behaviour (TODO-5, original):**  
-Job 1 is visible immediately after Export Batch.  After scrolling the list or
-after the first job starts running, the row for job 1 becomes blank (empty job
-number and name).
-
-**Additional observation (TODO-17, confirmed in a real batch run):**  
-Rows for jobs that have *completed* (COMPLETE or FAILED — i.e. a `.done` file
-exists) also go blank.  The in-progress job may blank too.  The status dot
-should remain visible and reflect the current status even after the job
-finishes.  The two observations together strongly implicate the timer–draw race
-(cause 2 below): the blank rows correlate with the moment `_update_job_log_statuses`
-writes `item.status`, which suggests the write partially invalidates the RNA
-item and causes Blender to return default values (0 / "") for the other fields
-during the same draw pass.
-
-**Suspected causes (investigate in order):**
-
-1. **`job_log_index` scroll interaction** — Blender's `template_list` tracks the
-   active-item index in `job_log_index`.  Scrolling may advance the index off-
-   screen, causing item 0 to flicker blank.
-   *Try*: initialise `job_log_index = -1` (or add a guard in `draw_item`).
-
-2. **Timer–draw race condition (most likely)** — `_update_job_log_statuses` runs
-   inside the poll timer.  Writing `item.status` while Blender is mid-draw can
-   partially invalidate the RNA item; `job_number` / `job_name` read back as
-   defaults (0 / "") during the same frame.  The fact that blanking tracks with
-   status transitions (job starts, job completes) strongly supports this.
-   *Try*: build a pending-status dict in the timer (`{idx: new_status}`) and
-   apply writes only inside a `_redraw_panels()` call or a `bpy.app.timers`
-   one-shot scheduled at 0 s from the main thread — RNA writes must not race
-   the draw thread.
-
-3. **`_item` name shadowing in `export_batch`** — already renamed to `_log_row`
-   in the seed loop; verify no other path reuses `_item`.
-
-4. **`make_name` non-determinism** — seed loop and per-job JSON loop call
-   `make_name` independently; if non-deterministic, stored names may differ.
-
-**Recommended first step:**  
-Add `print(f"draw_item: {item.job_number!r} {item.job_name!r} {item.status!r}")` at
-the top of `SMOKE_UL_job_log.draw_item` and reproduce.  If blank rows print
-`job_number=0, job_name=''`, properties are genuinely zeroed (cause 2).
-Correlate the print timestamps with timer-poll firings to confirm.
-
-**Files:** `scripts/SmokeSimLab/__init__.py` — `_update_job_log_statuses`,
-`SMOKE_UL_job_log.draw_item`, `_poll_batch_progress_impl`, `SMOKE_PT_panel.draw`.
-
-**Resolution:**
-- v0.2.16: `draw_item` uses Blender's `index` parameter directly (no RNA reads for
-  job number); `_update_job_log_statuses` keyed off `_job_log_rows[idx]` not RNA.
-- v0.2.17: `_flt_flag=0` added to `draw_item` signature for Blender 5.x compat.
-- v0.2.19: `SEQUENCE_COLOR_XX` icons replaced with stable alternatives; Unicode
-  status prefix added; `layout.alert = True` for error rows.
-  Status: DEPLOYED / UNVERIFIED — awaiting production batch run confirmation.
-
----
-
-## ~~TODO-19~~: Progress bars show 0 during bake / render — **DONE** (v0.2.8)
-
-**Observed:** Subtask bar shows "Rendering (0 of 500)" while frame_0497 is actively
-rendering.  Progress was stuck at 0 throughout the entire render; bars reset
-correctly when the job finished.
-
-**Root cause (render bar):** `_count_png_frames` used `since=batch_job_start_time`
-to exclude frames from previous runs.  `batch_job_start_time` is set when the
-poller first detects the log file.  If the log file wasn't detected until late
-(Blender restarted mid-batch, bake was skipped so render started almost
-immediately, or the file arrived via sync after many frames were rendered), all
-already-rendered frames had an mtime *before* `batch_job_start_time` and were
-filtered out.
-
-**Root cause (bake bar):** `_count_vdb_frames` always looked in
-`Cache/<current_job_name>/data/`.  When the worker bakes into an *alternate* cache
-directory (use_existing_cache + partial cache from a different job number), VDB
-files are written to that other directory and the count was always 0.
-
-**Fix:**
-- Removed the `since` mtime filter from `_count_png_frames` entirely.  Instead,
-  a `batch_render_frame_baseline` property is set (once) when the "Rendering
-  animation" stage is first detected.  Progress = (current_count − baseline),
-  capped at `render_target`.  Works correctly for: full renders (baseline=0),
-  re-renders with placeholders (baseline=existing frames), and Blender restarts
-  mid-render (baseline=frames already on disk).
-- `_count_vdb_frames` now extracts the effective cache dir from the log tail
-  (the "Effective cache dir" line added in v0.2.7) when available, so it counts
-  VDB files in the directory the worker is actually baking into.  Falls back to
-  `Cache/<name>/data/` when no log is available.
-- A `batch_bake_frame_baseline` property is set when baking starts and the bake
-  subtask shows "(new_frames of to_bake)" rather than a total count, so a partial
-  resume correctly shows e.g. "Baking (30 of 250)" rather than "Baking (280 of 500)".
-- The bake ETA uses `bake_to_go` (remaining frames adjusted for baseline) instead
-  of `frame_end − frames_baked`.
-
----
-
-## ~~TODO-18~~: Cache search logging and config-file false-positive — **DONE** (v0.2.7)
-
-**Observed:** Jobs with "Use Existing Cache" enabled still baked from scratch even
-when a complete cache existed from a previous run.
-
-**Root cause (config false-positive):** Mantaflow writes per-frame config
-checkpoints (`config/config_0001.uni`, `config_0002.uni`, …) to every cache
-directory immediately on domain init — before any simulation data is written.
-These files matched `r'_\d+\.(vdb|uni)$'`, so a directory containing *only*
-config checkpoints (no actual VDB data) passed `has_files` and was selected
-as the effective cache.  Those same filenames were then counted in `baked_frames`,
-making `bake_complete = True`, causing the bake to be skipped — but no real VDB
-data existed, so the render failed or produced the wrong frame.
-
-**Fix:** Skip the `config/` subdirectory when walking candidate directories for
-both the `has_files` check and the `baked_frames` count.  This preserves
-compatibility with the UNI data format (pre-VDB caches) while excluding
-per-frame config checkpoints.
-
-**Logging improvements:** Replaced sparse `_dlog`-only output with a full
-`_log` cache-search section that always records: the search path, the regex
-pattern used, every candidate evaluated (accept/reject + reason), the chosen
-effective cache dir, the frame range found, any missing frames, and the bake
-path taken (SKIP / RESUME / FULL).
-
----
-
-## ~~TODO-15~~: "Remove All Jobs" button in Utilities section — **DONE** (v0.2.6)
-
-New operator `SMOKE_OT_remove_all_jobs` (`bl_idname = "smoke.remove_all_jobs"`).
-`invoke()` shows a confirmation dialog before deleting anything.  Deletes the
-`jobs/` folder (with `shutil.rmtree` → per-file fallback on `PermissionError`),
-`run_smoke_batch.bat`, `smoke_worker.py`, and `smoke_launcher.py` from
-`output_path`.  Clears all job-log and batch-progress state; stops the poll timer.
-Leaves `domain_obj`, `output_path`, and all simulation parameters untouched.
-Button appears in the Utilities section with a `TRASH` icon.
-
----
-
-## ~~TODO-16~~: Reliable crash-dialog suppression — **DONE** (v0.2.6)
-
-`SEM_NOGPFAULTERRORBOX` was unreliable because Blender resets the process error
-mode during startup, and it does not cover `WerFaultSecure.exe`.  The previous
-post-exit WerFault poll also covered only 3 seconds.  `collect_crash_logs`
-defaulted to `False` and was reset by `_reset_on_load`, so `crash_log.txt` was
-never written in practice.
-
-**Fix:**
-1. `smoke_launcher.py` now creates a Windows Job Object with
-   `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` before spawning Blender and
-   assigns Blender to it immediately after `Popen`.  The Job Object limit cannot
-   be overridden by the child process, so crash dialogs are suppressed at the OS
-   level without relying on inherited error-mode flags.
-2. `_find_werfault_for_pid` now checks both `WerFault.exe` and
-   `WerFaultSecure.exe`.
-3. `_POLL_INTERVAL` reduced from 2.0 s to 0.5 s for faster WerFault detection.
-4. Post-exit WerFault poll extended from 3 s to `_POST_EXIT_WERFAULT_SECS = 30` s.
-5. `_save_crash_log` is now called unconditionally on any non-zero exit (no longer
-   gated on `collect_crash_logs`).
-6. `LAUNCHER_VERSION` bumped to `"0.2.6"`.
-
----
-
-## ~~TODO-6~~: Auto-scroll Job Log — **DONE** (v0.2.2)
-
----
-
-## ~~TODO-7~~: Update default parameter values — **DONE** (all defaults were already correct)
-
----
-
-## ~~TODO-8~~: Fix negative/zero RT_proj values — **DONE** (v0.2.1)
-
----
-
-## ~~TODO-9~~: Sort exported jobs by resolution ascending — **DONE** (v0.2.1)
-
----
-
-## ~~TODO-9~~: analyze_perf.py render tables — **DONE** (v0.2.1)
-
----
-
-## ~~TODO-10~~: Debug log — **DONE** (v0.2.2)
-
----
-
-## ~~TODO-11~~: Settings dropdown shows stale name on load — **DONE** (v0.2.4)
-
-**Observed behaviour:**  
-When the .blend file (and addon) first loads, the settings preset dropdown shows
-a `.smokesettings` filename, but the settings displayed in the panel are from
-the blend file — not re-loaded from that preset file.  The dropdown should be
-blank on load; a name should only appear after the user explicitly loads or saves
-a preset.
-
-**Root cause:**  
-`_reset_on_load` clears `settings_file_path` and `settings_snapshot` but never
-resets `settings_file_enum`.  Blender restores the saved `EnumProperty` value
-(e.g. "default") from the blend file, but the `_on_settings_enum_update`
-callback does **not** fire during RNA restoration on file load — so the dropdown
-shows the old name while the settings remain whatever is stored in the blend
-file.
-
-**Fix:** Added `s.settings_file_enum = ""` to `_reset_on_load`, immediately
-after the other `settings_*` clears.  The update callback fires but returns
-immediately (stem is empty), leaving the dropdown blank and the in-blend
-settings untouched.
-
----
-
+`time_to_exit` for *every* job (printed to the per-job .log), plus
+`werfault_poll_secs` on a crash. These distinguish the two candidate causes: a
+large `time_to_exit` with small `werfault_poll_secs` means Blender genuinely
+ran/hung; a small `time_to_exit` with a large `werfault_poll_secs` means the
+stall was the post-exit WerFault poll. **Root cause still unconfirmed — revisit
+once a stalled crash is captured with this data**, then decide whether
+`_POST_EXIT_WERFAULT_SECS` / `_STALE_LOG_TIMEOUT` need tuning.
+
+**Observed (v0.2.26 batch):** Two crashes in the same batch behaved differently —
+the first stalled ~5 min before the launcher moved on; the second was detected
+almost immediately.  **Files:** `smoke_launcher.py` — near WerFault post-exit poll.
