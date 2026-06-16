@@ -12,6 +12,54 @@ Ordered most-recent-first by TODO number where practical.
 
 ---
 
+## TODO-55: Batch emitter / flow object parameters — **DONE** (v0.9.0)
+
+**Filed + resolved 2026-06-16.**  A batch can now sweep per-emitter **flow
+object** settings, not just domain settings (the v0.9.0 roadmap target — see
+[ROADMAP.md](ROADMAP.md)).  Shipped in increments, all on `main`:
+
+- **Discovery** — `find_emitters(scene, domain)` = `find_fluid_emitters` (scan
+  for FLUID FLOW objects) → `emitters_inside_domain` (keep those whose world
+  AABB overlaps the domain's; the domain has no backlink to its emitters) →
+  sort by name.  **Single-domain addon** (documented).
+- **State** — `EmitterSettings` + `VelocityItem` PropertyGroups;
+  `SmokeSettings.emitters` CollectionProperty.  Each scalar carries the standard
+  Range/List sextet so `expand_param` works on it unchanged.
+- **UI** — collapsible **Emitters** section (one default-collapsed box per
+  emitter), auto-populated from live `FluidFlowSettings` on domain-select +
+  **Refresh Emitters**.  Params: Initial Temperature, Density, Surface Emission,
+  Volume Emission; Initial Velocity toggle → Source/Normal scalars + an Initial
+  X/Y/Z **list of vectors** (`x, y, z`, default `0,0,0`).
+- **Job gen + cache safety** — `generate_jobs` layers emitters over the domain
+  generators (LIMITED one-axis-at-a-time; ALL = domain × emitter product); the
+  `emitters` block rides into job JSON via `job_data["params"]`; `make_name`
+  encodes default-suppressed `E<i>` tokens, collision-safe (BUG-013 family,
+  `TestEmitterNameNoCollisions`); emitter-free jobs keep byte-identical names.
+- **Worker** — applies each job's emitters block to the matching flow object's
+  `flow_settings` by name before baking (before the maintain_density pass, which
+  keeps final say on density).
+- **Text overlay** — per-emitter settings prepended as line(s) to the existing
+  **Dissolve_Text** (lower-left) and **Time_Text** (lower-right) FONT objects
+  (even-indexed emitters left, odd-indexed right), e.g.
+  `Emitter1: Init Temp-1, Dens-1, SurfE-1.5, VolE-0`.
+
+Tests: `test_todo55_emitters.py` (78) + `test_todo55_worker.py` (16).  Addon +
+worker → 0.9.0; **re-export required**.  _(Roadmap note: v0.8.0's UI/ETA polish
+bundle was not done first; this shipped the emitter feature ahead of it.)_
+
+---
+
+## TODO-54: RELEASING.md describes a release-copy layout that doesn't exist — **DONE** (2026-06-16)
+
+**Doc-only.**  Rewrote RELEASING.md's "Repository structure" + numbered steps to
+match reality: a single tracked source tree at `scripts/SmokeSimLab/`, no
+`SmokeSimLab/` release-copy dir and no copy step (the old doc described a
+two-directory workflow that never existed); releases build straight from
+`scripts/SmokeSimLab/` into `dist/` (ignored) / `docs/` (feed).  No code, no
+version bump.
+
+---
+
 ## TODO-53: Launcher .vdb heartbeat to the job log — **DONE** (v0.7.5)
 
 **Resolved 2026-06-15.**  The launcher's watchdog loop now appends a

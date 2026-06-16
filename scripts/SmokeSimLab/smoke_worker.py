@@ -15,7 +15,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.7.2"
+WORKER_VERSION = "0.9.0"
 
 import bpy
 import sys
@@ -149,6 +149,41 @@ def _set_text(obj_name, value_str):
         _log(f"  WARNING: '{obj_name}' not found or not a FONT object")
 
 
+def _emitter_overlay_line(ename, ep):
+    """Format one emitter's settings as a single overlay line, e.g.
+    "Emitter1: Init Temp-1, Dens-1, SurfE-1.5, VolE-0".  When initial velocity
+    is on, the Source/Normal/Initial-XYZ values are appended."""
+    def g(k, d=0.0):
+        return f"{round(float(ep.get(k, d)), 3):g}"
+    line = (f"{ename}: Init Temp-{g('temperature', 1.0)}, Dens-{g('density', 1.0)}, "
+            f"SurfE-{g('surface_distance', 1.5)}, VolE-{g('volume_density', 0.0)}")
+    if ep.get("use_initial_velocity"):
+        vc = ep.get("velocity_coord", [0.0, 0.0, 0.0]) or [0.0, 0.0, 0.0]
+        vc_str = ",".join(f"{round(float(c), 3):g}" for c in vc)
+        line += (f", Vel S-{g('velocity_factor', 0.0)} N-{g('velocity_normal', 0.0)} "
+                 f"({vc_str})")
+    return line
+
+
+def _format_emitter_overlay(emitters):
+    """Return (left_text, right_text): one line per emitter, split across the
+    two existing corner FONT objects — even-indexed emitters (sorted by name,
+    matching make_name's E0/E1 order) go lower-left, odd-indexed lower-right.
+    Empty dict → ("", "")."""
+    if not emitters:
+        return "", ""
+    left, right = [], []
+    for i, ename in enumerate(sorted(emitters)):
+        line = _emitter_overlay_line(ename, emitters[ename])
+        (left if i % 2 == 0 else right).append(line)
+    return "\n".join(left), "\n".join(right)
+
+
+def _prepend(extra, base):
+    """Prepend an emitter overlay block above existing text, blank-line free."""
+    return f"{extra}\n{base}" if extra else base
+
+
 def update_text_objects(text_map, params, bake_seconds=None):
     """
     Update scene FONT objects with current job parameter values.
@@ -183,7 +218,13 @@ def update_text_objects(text_map, params, bake_seconds=None):
         noise_str = "Noise-None"
     _set_text(text_map.get("noise", ""), noise_str)
 
-    # Dissolve — combined string or "Dissolve-None"
+    # v0.9.0 TODO-55: per-emitter settings overlay.  Rather than new FONT
+    # objects, the emitter lines are PREPENDED to the existing corner text:
+    # lower-left = the Dissolve text object, lower-right = the Time text object.
+    # Even-indexed emitters → left, odd-indexed → right (sorted by name).
+    left_str, right_str = _format_emitter_overlay(params.get("emitters", {}))
+
+    # Dissolve — combined string or "Dissolve-None" (emitter lines prepended).
     if params["use_dissolve"]:
         slow = "Yes" if params["slow_dissolve"] else "No"
         dissolve_str = (
@@ -192,9 +233,9 @@ def update_text_objects(text_map, params, bake_seconds=None):
         )
     else:
         dissolve_str = "Dissolve-None"
-    _set_text(text_map.get("dissolve", ""), dissolve_str)
+    _set_text(text_map.get("dissolve", ""), _prepend(left_str, dissolve_str))
 
-    # Bake time — only written after bake completes
+    # Bake time — only written after bake completes (emitter lines prepended).
     if bake_seconds is not None:
         hrs  = int(bake_seconds // 3600)
         mins = int((bake_seconds % 3600) // 60)
@@ -205,7 +246,7 @@ def update_text_objects(text_map, params, bake_seconds=None):
             time_str = f"Bake: {mins} min {secs} sec"
         else:
             time_str = f"Bake: {secs} sec"
-        _set_text(text_map.get("time", ""), time_str)
+        _set_text(text_map.get("time", ""), _prepend(right_str, time_str))
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +619,59 @@ obj.select_set(True)
 # Let Mantaflow reinitialize with new settings before baking
 bpy.context.view_layer.update()
 _time.sleep(3.0)
+
+# ---------------------------------------------------------------------------
+# v0.9.0 TODO-55: apply per-emitter flow settings from the job's emitters block
+#
+# Runs BEFORE the maintain_density pass below so that pass keeps the final say
+# on density (an explicit emitter density sweep only takes effect when
+# maintain_density is off, i.e. emitter_densities is empty).  Each emitter is
+# matched to a scene object by name; each attr is set defensively so a renamed/
+# missing object or a liquid-flow object missing an attr is logged, not fatal.
+# ---------------------------------------------------------------------------
+
+job_emitters = p.get("emitters", {})
+if job_emitters:
+    _log(f"[{name}] Applying flow settings for {len(job_emitters)} emitter(s)")
+    for _ename, _ep in job_emitters.items():
+        _eobj = bpy.data.objects.get(_ename)
+        if _eobj is None:
+            _log(f"[{name}] WARNING: emitter '{_ename}' not in scene — skipped")
+            continue
+        _flow = None
+        for _mod in _eobj.modifiers:
+            if _mod.type == 'FLUID' and _mod.fluid_type == 'FLOW':
+                _flow = _mod.flow_settings
+                break
+        if _flow is None:
+            _log(f"[{name}] WARNING: '{_ename}' has no FLUID FLOW modifier — skipped")
+            continue
+        # Scalar flow settings (addon name == FluidFlowSettings attr).
+        for _attr in ("temperature", "density", "surface_distance", "volume_density"):
+            if _attr in _ep:
+                try:
+                    setattr(_flow, _attr, float(_ep[_attr]))
+                except (AttributeError, TypeError, ValueError) as _exc:
+                    _log(f"[{name}] WARNING: set {_attr} on '{_ename}' failed: {_exc}")
+        # Initial velocity block (Source / Normal / Initial X,Y,Z).
+        if _ep.get("use_initial_velocity"):
+            try:
+                _flow.use_initial_velocity = True
+            except AttributeError:
+                pass
+            for _attr in ("velocity_factor", "velocity_normal"):
+                if _attr in _ep:
+                    try:
+                        setattr(_flow, _attr, float(_ep[_attr]))
+                    except (AttributeError, TypeError, ValueError) as _exc:
+                        _log(f"[{name}] WARNING: set {_attr} on '{_ename}' failed: {_exc}")
+            _vc = _ep.get("velocity_coord")
+            if _vc is not None:
+                try:
+                    _flow.velocity_coord = (float(_vc[0]), float(_vc[1]), float(_vc[2]))
+                except (AttributeError, TypeError, ValueError, IndexError) as _exc:
+                    _log(f"[{name}] WARNING: set velocity_coord on '{_ename}' failed: {_exc}")
+        _log(f"[{name}] Emitter '{_ename}': flow settings applied")
 
 # ---------------------------------------------------------------------------
 # Apply pre-computed emitter densities (scaled at export time, not here)

@@ -60,8 +60,9 @@ class TestWorkerVersionBump:
 
     def test_addon_expects_matching_worker(self):
         # The version gate compares the exported worker against this constant;
-        # bumped to 0.7.2 by TODO-52 (worker noise-boundary log line).
-        assert ssl._EXPECTED_WORKER_VERSION == "0.7.2"
+        # bumped to 0.9.0 by TODO-55 (worker applies per-emitter flow settings
+        # + the emitter text overlay).
+        assert ssl._EXPECTED_WORKER_VERSION == "0.9.0"
 
 
 class TestPerfRecordEstimationFields:
