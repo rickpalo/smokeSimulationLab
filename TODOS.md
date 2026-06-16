@@ -51,12 +51,25 @@ vector list). `SmokeSettings.emitters` CollectionProperty added. Pure
 `_emitter_sync_plan(existing, desired)` reconciler preserves in-progress sweep
 config across a Refresh.
 
-**Next: increment 2c** = wire it up — `_populate_emitters(s, scene)` +
-`_seed_emitter_from_flow` (seed `_begin` from live flow settings), call from the
-domain-select callback + a "Refresh Emitters" operator; per-emitter collapsible
-UI section (section D) with the velocity-vector UIList + add/remove ops; clear
-`emitters` in `_reset_on_load`. Then increment 3 (job-gen + make_name) and 4
-(worker applies flow settings).
+**Increment 2c DONE:** UI + wiring (panel now shows the Emitters section, but
+emitter values do NOT yet affect output — that's increments 3/4, so version
+stays 0.7.6, no release yet). `_populate_emitters` + `_seed_emitter_from_flow`
+(seed `_begin` from live flow settings) called from the domain-select callback;
+`SMOKE_OT_refresh_emitters` Refresh button; per-emitter collapsible section
+(`_emitters_ui`) with `_emitter_sub_param_ui` + the velocity vector UIList
+(`SMOKE_UL_velocity_list`) and add/remove ops
+(`smoke.add/remove_emitter_value`, `smoke.add/remove_emitter_velocity`);
+`emitters` cleared in `_reset_on_load`. Schema + wiring tests (51 in the file).
+
+**Next: increment 3** = job generation + `make_name`. Read each emitter's swept
+values (reuse `expand_param` on the EmitterSettings element + the parsed
+velocity vectors), extend `generate_jobs_limited` / `generate_jobs_all` to
+include emitter axes (with the job-count blow-up guard), write an `emitters`
+block into each `job_NNNN.json`, and **encode emitter params into `make_name`**
+(cache-collision safety — BUG-013 family; `TestNoCacheCollisions`-style proof).
+Then **increment 4** = worker applies the per-emitter flow settings by name
+before baking (version bump + re-export). Bump to **v0.9.0** + release when 3+4
+land and the feature works end to end.
 
 **Filed 2026-06-16.**  Today a batch sweeps **domain**-level settings only. This
 TODO is the v0.9.0 scope expansion (see [ROADMAP.md](ROADMAP.md)): let a single

@@ -277,3 +277,78 @@ class TestEmitterSyncPlan:
         # An existing emitter still desired is never in add or remove → kept.
         add, remove = ssl._emitter_sync_plan(["Keep"], ["Keep", "New"])
         assert "Keep" not in add and "Keep" not in remove
+
+
+# --- EmitterSettings PropertyGroup schema ---------------------------------
+
+class TestEmitterSettingsSchema:
+    """The scalar emitter params must carry the full Range/List sextet so
+    expand_param() works on an EmitterSettings instance unchanged."""
+
+    _SCALARS = [
+        "temperature", "density", "surface_distance", "volume_density",
+        "velocity_factor", "velocity_normal",
+    ]
+    _SEXTET = ("_begin", "_end", "_step", "_use_range", "_use_list",
+               "_list", "_index")
+
+    def test_each_scalar_has_full_sextet(self):
+        ann = ssl.EmitterSettings.__annotations__
+        for p in self._SCALARS:
+            for suffix in self._SEXTET:
+                assert p + suffix in ann, f"missing {p}{suffix}"
+
+    def test_velocity_and_toggle_present(self):
+        ann = ssl.EmitterSettings.__annotations__
+        assert "use_initial_velocity" in ann
+        assert "velocity_list" in ann
+        assert "velocity_index" in ann
+        assert "name" in ann and "show" in ann
+
+    def test_velocity_item_fields(self):
+        ann = ssl.VelocityItem.__annotations__
+        assert "text" in ann and "marked" in ann
+
+    def test_emitters_collection_on_settings(self):
+        ann = ssl.SmokeSettings.__annotations__
+        assert "emitters" in ann
+        assert "show_emitters" in ann
+
+
+# --- wiring (source-level, like test_camera_check) ------------------------
+
+def _src():
+    path = os.path.join(os.path.dirname(__file__), "..",
+                        "scripts", "SmokeSimLab", "__init__.py")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+class TestEmitterWiring:
+    def test_new_classes_registered(self):
+        for cls in (
+            ssl.VelocityItem, ssl.EmitterSettings, ssl.SMOKE_UL_velocity_list,
+            ssl.SMOKE_OT_refresh_emitters, ssl.SMOKE_OT_add_emitter_value,
+            ssl.SMOKE_OT_remove_emitter_value, ssl.SMOKE_OT_add_emitter_velocity,
+            ssl.SMOKE_OT_remove_emitter_velocity,
+        ):
+            assert cls in ssl.classes, f"{cls.__name__} not registered"
+
+    def test_propertygroups_registered_before_settings(self):
+        # CollectionProperty(type=EmitterSettings) needs the element type
+        # registered first.
+        idx = {c: i for i, c in enumerate(ssl.classes)}
+        assert idx[ssl.ValueItem] < idx[ssl.EmitterSettings]
+        assert idx[ssl.VelocityItem] < idx[ssl.EmitterSettings]
+        assert idx[ssl.EmitterSettings] < idx[ssl.SmokeSettings]
+
+    def test_panel_draws_emitters_section(self):
+        assert "_emitters_ui(box_sim, s)" in _src()
+
+    def test_domain_select_populates_emitters(self):
+        # _import_domain_params calls _populate_emitters at the end.
+        src = _src()
+        assert "_populate_emitters(self, scene)" in src
+
+    def test_reset_on_load_clears_emitters(self):
+        assert "s.emitters.clear()" in _src()

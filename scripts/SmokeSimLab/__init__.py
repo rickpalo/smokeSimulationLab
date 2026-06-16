@@ -358,6 +358,15 @@ def _import_domain_params(self, context):
     except (AttributeError, TypeError):
         pass
 
+    # v0.9.0 TODO-55: refresh the per-emitter sections for the new domain.
+    # Update callbacks must never raise, so guard broadly.
+    try:
+        scene = getattr(context, "scene", None) if context else None
+        if scene is not None:
+            _populate_emitters(self, scene)
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Settings save/load — helper functions
@@ -1201,6 +1210,88 @@ def _emitter_sync_plan(existing_names, desired_names):
     to_add    = [n for n in desired  if n not in existing]
     to_remove = [n for n in existing if n not in desired]
     return to_add, to_remove
+
+
+# Map: addon EmitterSettings scalar name → bpy.types.FluidFlowSettings attr.
+# (Names happen to match 1:1, but keep the map explicit so a future rename or a
+# differently-named Blender attr is a one-line change.)
+_EMITTER_FLOW_IMPORT_MAP = (
+    ("temperature",      "temperature"),       # Initial Temperature
+    ("density",          "density"),           # Density
+    ("surface_distance", "surface_distance"),  # Surface Emission
+    ("volume_density",   "volume_density"),    # Volume Emission
+    ("velocity_factor",  "velocity_factor"),   # Source (velocity)
+    ("velocity_normal",  "velocity_normal"),   # Normal (velocity)
+)
+
+
+def _flow_settings_of(obj):
+    """Return the FluidFlowSettings of *obj*'s FLOW modifier, or None."""
+    try:
+        for m in obj.modifiers:
+            if m.type == 'FLUID' and m.fluid_type == 'FLOW':
+                return m.flow_settings
+    except AttributeError:
+        pass
+    return None
+
+
+def _seed_emitter_from_flow(em, flow):
+    """Seed an EmitterSettings element's baseline (_begin) values from the
+    emitter's CURRENT flow settings (TODO-55 section B auto-populate).
+
+    Sweep config (_end/_step/_use_range/_use_list/_list) is left at defaults —
+    only baselines + the velocity seed are written.  Each read is guarded so a
+    liquid flow object or an older Blender build missing an attr is skipped
+    rather than crashing.  No-op when *flow* is None.
+    """
+    if flow is None:
+        return
+    for addon_name, flow_attr in _EMITTER_FLOW_IMPORT_MAP:
+        try:
+            setattr(em, addon_name + "_begin", float(getattr(flow, flow_attr)))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    try:
+        em.use_initial_velocity = bool(getattr(flow, "use_initial_velocity"))
+    except (AttributeError, TypeError):
+        pass
+    # Seed the velocity vector list with the emitter's current Initial X/Y/Z.
+    try:
+        coord = getattr(flow, "velocity_coord")
+        vec = (float(coord[0]), float(coord[1]), float(coord[2]))
+    except (AttributeError, TypeError, IndexError, ValueError):
+        vec = _VELOCITY_DEFAULT
+    em.velocity_list.clear()
+    item = em.velocity_list.add()
+    item.text = _format_velocity_vector(vec)
+
+
+def _populate_emitters(s, scene):
+    """Sync `s.emitters` with the flow objects discovered inside the domain.
+
+    Adds an element per newly-discovered emitter (seeded from its live flow
+    settings), removes elements whose object is gone / no longer inside the
+    domain, and leaves existing elements — and their in-progress sweep config —
+    untouched.  Safe to call repeatedly (Refresh Emitters button + domain
+    select).  No-op-ish when there's no scene.
+    """
+    domain = getattr(s, "domain_obj", None)
+    objs = find_emitters(scene, domain) if scene is not None else []
+    by_name = {o.name: o for o in objs}
+    to_add, to_remove = _emitter_sync_plan(
+        [em.name for em in s.emitters], list(by_name.keys()))
+
+    if to_remove:
+        remove_set = set(to_remove)
+        for i in range(len(s.emitters) - 1, -1, -1):
+            if s.emitters[i].name in remove_set:
+                s.emitters.remove(i)
+
+    for name in to_add:
+        em = s.emitters.add()
+        em.name = name
+        _seed_emitter_from_flow(em, _flow_settings_of(by_name[name]))
 
 
 # ---------------------------------------------------------------------------
@@ -2872,6 +2963,142 @@ class SMOKE_OT_remove_value(bpy.types.Operator):
             lst.remove(idx)
 
         setattr(s, self.param + "_index", max(min(idx, len(lst) - 1), 0))
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
+# v0.9.0 TODO-55: per-emitter operators + the velocity-vector UIList.
+#
+# The domain-param add/remove ops above target s.<param>_list directly; emitter
+# lists live on a collection element (s.emitters[i].<param>_list), so these
+# variants carry an emitter_index alongside the param name.
+# ---------------------------------------------------------------------------
+
+class SMOKE_UL_velocity_list(bpy.types.UIList):
+    """Initial-Velocity vectors: checkbox marks a row for deletion; the text
+    field is the editable "x, y, z" value (tinted red when it can't be parsed)."""
+    def draw_item(self, context, layout, data, item, icon,
+                  active_data, active_propname):
+        row = layout.row(align=True)
+        row.prop(item, "marked", text="")
+        if _parse_velocity_vector(item.text) is None:
+            row.alert = True   # malformed vector — visible cue to fix it
+        row.prop(item, "text", text="", emboss=True)
+
+
+class SMOKE_OT_refresh_emitters(bpy.types.Operator):
+    """Re-scan the scene for flow objects inside the domain and update the
+    per-emitter sections (keeps any in-progress sweep config)."""
+
+    bl_idname  = "smoke.refresh_emitters"
+    bl_label   = "Refresh Emitters"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        s = context.scene.smoke_settings
+        _populate_emitters(s, context.scene)
+        self.report({'INFO'}, f"{len(s.emitters)} emitter(s) inside the domain")
+        return {'FINISHED'}
+
+
+def _emitter_of(context, emitter_index):
+    """Return s.emitters[emitter_index] or None if out of range."""
+    s = context.scene.smoke_settings
+    if 0 <= emitter_index < len(s.emitters):
+        return s.emitters[emitter_index]
+    return None
+
+
+class SMOKE_OT_add_emitter_value(bpy.types.Operator):
+    """Add a value to a per-emitter scalar parameter's explicit-value list."""
+
+    bl_idname  = "smoke.add_emitter_value"
+    bl_label   = "Add Value"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    emitter_index: bpy.props.IntProperty()
+    param:         bpy.props.StringProperty()
+
+    def execute(self, context):
+        em = _emitter_of(context, self.emitter_index)
+        if em is None:
+            return {'CANCELLED'}
+        lst      = getattr(em, self.param + "_list")
+        default  = float(getattr(em, self.param + "_begin"))
+        current  = [item.value for item in lst]
+        new_item = lst.add()
+        new_item.value = _next_list_value(current, default)
+        setattr(em, self.param + "_index", len(lst) - 1)
+        return {'FINISHED'}
+
+
+class SMOKE_OT_remove_emitter_value(bpy.types.Operator):
+    """Remove checked items (or the highlighted item) from a per-emitter list."""
+
+    bl_idname  = "smoke.remove_emitter_value"
+    bl_label   = "Remove Value"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    emitter_index: bpy.props.IntProperty()
+    param:         bpy.props.StringProperty()
+
+    def execute(self, context):
+        em = _emitter_of(context, self.emitter_index)
+        if em is None:
+            return {'CANCELLED'}
+        lst = getattr(em, self.param + "_list")
+        idx = getattr(em, self.param + "_index")
+        marked = [i for i, item in enumerate(lst) if item.marked]
+        if marked:
+            for i in sorted(marked, reverse=True):
+                lst.remove(i)
+        elif len(lst) > 0:
+            lst.remove(idx)
+        setattr(em, self.param + "_index", max(min(idx, len(lst) - 1), 0))
+        return {'FINISHED'}
+
+
+class SMOKE_OT_add_emitter_velocity(bpy.types.Operator):
+    """Add an Initial-Velocity vector entry (defaults to "0, 0, 0")."""
+
+    bl_idname  = "smoke.add_emitter_velocity"
+    bl_label   = "Add Velocity Vector"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    emitter_index: bpy.props.IntProperty()
+
+    def execute(self, context):
+        em = _emitter_of(context, self.emitter_index)
+        if em is None:
+            return {'CANCELLED'}
+        item = em.velocity_list.add()
+        item.text = _format_velocity_vector(_VELOCITY_DEFAULT)
+        em.velocity_index = len(em.velocity_list) - 1
+        return {'FINISHED'}
+
+
+class SMOKE_OT_remove_emitter_velocity(bpy.types.Operator):
+    """Remove checked Initial-Velocity vectors (or the highlighted one)."""
+
+    bl_idname  = "smoke.remove_emitter_velocity"
+    bl_label   = "Remove Velocity Vector"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    emitter_index: bpy.props.IntProperty()
+
+    def execute(self, context):
+        em = _emitter_of(context, self.emitter_index)
+        if em is None:
+            return {'CANCELLED'}
+        lst = em.velocity_list
+        idx = em.velocity_index
+        marked = [i for i, item in enumerate(lst) if item.marked]
+        if marked:
+            for i in sorted(marked, reverse=True):
+                lst.remove(i)
+        elif len(lst) > 0:
+            lst.remove(idx)
+        em.velocity_index = max(min(idx, len(lst) - 1), 0)
         return {'FINISHED'}
 
 
@@ -4989,6 +5216,94 @@ def _fire_ui(layout, s):
     _sub_param_ui(box, s, "flame_ignition",  "Ignition Temp")
 
 
+def _emitter_sub_param_ui(box, em, ei, name, label):
+    """Per-emitter analogue of _sub_param_ui — data block is the EmitterSettings
+    element `em`; add/remove ops carry the emitter index `ei` and `param`."""
+    box.separator()
+    box.label(text=f"{label}:")
+
+    row = box.row()
+    row.prop(em, f"{name}_use_range", text="Range", toggle=True)
+    row.prop(em, f"{name}_use_list",  text="List",  toggle=True)
+
+    if getattr(em, f"{name}_use_range"):
+        box.prop(em, f"{name}_begin", text="Begin")
+        box.prop(em, f"{name}_end",   text="End")
+        box.prop(em, f"{name}_step",  text="Step")
+    elif getattr(em, f"{name}_use_list"):
+        row = box.row()
+        # Unique list-id per emitter+param so Blender doesn't share UI state.
+        row.template_list("SMOKE_UL_value_list", f"em{ei}_{name}",
+                          em, f"{name}_list", em, f"{name}_index")
+        col = row.column(align=True)
+        op = col.operator("smoke.add_emitter_value", text="", icon='ADD')
+        op.emitter_index, op.param = ei, name
+        op = col.operator("smoke.remove_emitter_value", text="", icon='REMOVE')
+        op.emitter_index, op.param = ei, name
+    else:
+        box.prop(em, f"{name}_begin", text="Value")
+
+
+def _emitter_velocity_ui(box, em, ei):
+    """Draw the Initial Velocity block: the master toggle, then (when on) the
+    Source / Normal scalars and the list of Initial X/Y/Z vectors."""
+    box.separator()
+    box.prop(em, "use_initial_velocity", text="Initial Velocity")
+    if not em.use_initial_velocity:
+        return
+    _emitter_sub_param_ui(box, em, ei, "velocity_factor", "Source")
+    _emitter_sub_param_ui(box, em, ei, "velocity_normal", "Normal")
+    box.separator()
+    box.label(text="Initial X/Y/Z vectors:")
+    box.label(text=_VELOCITY_FORMAT_HINT, icon='INFO')
+    row = box.row()
+    row.template_list("SMOKE_UL_velocity_list", f"em{ei}_velocity",
+                      em, "velocity_list", em, "velocity_index")
+    col = row.column(align=True)
+    col.operator("smoke.add_emitter_velocity", text="", icon='ADD').emitter_index = ei
+    col.operator("smoke.remove_emitter_velocity", text="", icon='REMOVE').emitter_index = ei
+
+
+def _emitters_ui(layout, s):
+    """Draw the Emitters collapsible section — one sub-box per discovered
+    emitter (default collapsed), each exposing its iterable flow params.
+
+    v0.9.0 TODO-55.  Single-domain addon: emitters are the FLOW objects found
+    inside the selected domain (Refresh icon re-scans)."""
+    box = layout.box()
+    row = box.row()
+    row.prop(s, "show_emitters",
+             icon='TRIA_DOWN' if s.show_emitters else 'TRIA_RIGHT',
+             emboss=False, text="")
+    row.label(text="Emitters")
+    row.operator("smoke.refresh_emitters", text="", icon='FILE_REFRESH')
+
+    if not s.show_emitters:
+        return
+    if not s.domain_obj:
+        box.label(text="Select a domain to list its emitters.", icon='INFO')
+        return
+    if len(s.emitters) == 0:
+        box.label(text="No emitters found inside the domain.", icon='INFO')
+        box.label(text="Add flow objects, then click the refresh icon.")
+        return
+
+    for ei, em in enumerate(s.emitters):
+        ebox = box.box()
+        hrow = ebox.row()
+        hrow.prop(em, "show",
+                  icon='TRIA_DOWN' if em.show else 'TRIA_RIGHT',
+                  emboss=False, text="")
+        hrow.label(text=em.name, icon='OBJECT_DATA')
+        if not em.show:
+            continue
+        _emitter_sub_param_ui(ebox, em, ei, "temperature",      "Initial Temperature")
+        _emitter_sub_param_ui(ebox, em, ei, "density",          "Density")
+        _emitter_sub_param_ui(ebox, em, ei, "surface_distance", "Surface Emission")
+        _emitter_sub_param_ui(ebox, em, ei, "volume_density",   "Volume Emission")
+        _emitter_velocity_ui(ebox, em, ei)
+
+
 # ---------------------------------------------------------------------------
 # Panel
 # ---------------------------------------------------------------------------
@@ -5128,6 +5443,11 @@ class SMOKE_PT_panel(bpy.types.Panel):
             # v0.7.0 TODO-42: Fire Parameters section.  Parallel to
             # Dissolve / Noise — enable checkbox gates the sub-params.
             _fire_ui(box_sim, s)
+            box_sim.separator()
+
+            # v0.9.0 TODO-55: per-emitter sweep sections (one per flow object
+            # inside the domain; Refresh re-scans).
+            _emitters_ui(box_sim, s)
 
         layout.separator()
 
@@ -5520,6 +5840,10 @@ def _reset_on_load(dummy=None):
         _job_statuses.clear()
         _job_log_rows.clear()
         s.job_log_items.clear()
+        # v0.9.0 TODO-55: emitters are scene-specific; re-discovered on
+        # domain-select / Refresh, so clear stale ones from the prior file.
+        s.emitters.clear()
+        s.show_emitters        = True
         s.batch_total          = 0
         s.batch_jobs_dir       = ""
         s.batch_overall_factor = 0.0
@@ -5580,6 +5904,7 @@ classes = [
     VelocityItem,
     EmitterSettings,
     SMOKE_UL_value_list,
+    SMOKE_UL_velocity_list,
     SmokeJobItem,
     SMOKE_UL_job_log,
     SmokeSettings,
@@ -5590,6 +5915,11 @@ classes = [
     SMOKE_OT_load_settings,
     SMOKE_OT_add_value,
     SMOKE_OT_remove_value,
+    SMOKE_OT_refresh_emitters,
+    SMOKE_OT_add_emitter_value,
+    SMOKE_OT_remove_emitter_value,
+    SMOKE_OT_add_emitter_velocity,
+    SMOKE_OT_remove_emitter_velocity,
     SMOKE_OT_open_docs,
     SMOKE_OT_retry_failed,
     SMOKE_OT_setup_results,
