@@ -32,7 +32,15 @@ Also pending (not a TODO): **tag `v0.7.6` on GitHub** (built + feed live, not ye
 
 ---
 
-## TODO-55: Batch **emitter / flow object** parameters — **OPEN (spec)** — target v0.9.0
+## TODO-55: Batch **emitter / flow object** parameters — **IN PROGRESS** — target v0.9.0
+
+**Increment 1 DONE (2026-06-16):** discovery foundation landed (dormant, not yet
+wired to UI). New pure helpers in `__init__.py`: `_is_flow_object`,
+`find_fluid_emitters` (scan), `_world_aabb` / `_aabb_overlap` (bounds math),
+`emitters_inside_domain` (filter), `find_emitters` (composed). 23 tests in
+`tests/test_todo55_emitters.py`. **Next:** increment 2 = EmitterSettings
+PropertyGroup + CollectionProperty + per-emitter UI (section D) and the
+domain-select populate (section B).
 
 **Filed 2026-06-16.**  Today a batch sweeps **domain**-level settings only. This
 TODO is the v0.9.0 scope expansion (see [ROADMAP.md](ROADMAP.md)): let a single
