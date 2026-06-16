@@ -238,3 +238,42 @@ class TestFormatVelocityVector:
     def test_round_trips_with_parse(self):
         vec = (1.5, 0.0, -2.0)
         assert ssl._parse_velocity_vector(ssl._format_velocity_vector(vec)) == vec
+
+
+# --- _emitter_sync_plan (collection reconciliation) -----------------------
+
+class TestEmitterSyncPlan:
+    def test_fresh_adds_all(self):
+        add, remove = ssl._emitter_sync_plan([], ["A", "B"])
+        assert add == ["A", "B"]
+        assert remove == []
+
+    def test_all_present_no_change(self):
+        add, remove = ssl._emitter_sync_plan(["A", "B"], ["A", "B"])
+        assert add == []
+        assert remove == []
+
+    def test_new_emitter_added(self):
+        add, remove = ssl._emitter_sync_plan(["A"], ["A", "B"])
+        assert add == ["B"]
+        assert remove == []
+
+    def test_stale_emitter_removed(self):
+        add, remove = ssl._emitter_sync_plan(["A", "B"], ["A"])
+        assert add == []
+        assert remove == ["B"]
+
+    def test_mixed_add_and_remove(self):
+        # B vanished, C appeared; A preserved (not in either list).
+        add, remove = ssl._emitter_sync_plan(["A", "B"], ["A", "C"])
+        assert add == ["C"]
+        assert remove == ["B"]
+
+    def test_add_order_follows_desired(self):
+        add, _ = ssl._emitter_sync_plan([], ["z", "a", "m"])
+        assert add == ["z", "a", "m"]   # plan preserves caller's (sorted) order
+
+    def test_existing_preserved_implicitly(self):
+        # An existing emitter still desired is never in add or remove → kept.
+        add, remove = ssl._emitter_sync_plan(["Keep"], ["Keep", "New"])
+        assert "Keep" not in add and "Keep" not in remove

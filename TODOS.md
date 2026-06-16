@@ -37,10 +37,26 @@ Also pending (not a TODO): **tag `v0.7.6` on GitHub** (built + feed live, not ye
 **Increment 1 DONE (2026-06-16):** discovery foundation landed (dormant, not yet
 wired to UI). New pure helpers in `__init__.py`: `_is_flow_object`,
 `find_fluid_emitters` (scan), `_world_aabb` / `_aabb_overlap` (bounds math),
-`emitters_inside_domain` (filter), `find_emitters` (composed). 23 tests in
-`tests/test_todo55_emitters.py`. **Next:** increment 2 = EmitterSettings
-PropertyGroup + CollectionProperty + per-emitter UI (section D) and the
-domain-select populate (section B).
+`emitters_inside_domain` (filter), `find_emitters` (composed). tests in `tests/test_todo55_emitters.py` (now 42 total).
+
+**Increment 2a DONE:** Initial Velocity vector parse/format helpers
+(`_parse_velocity_vector` / `_format_velocity_vector`, list-of-vectors model).
+
+**Increment 2b DONE:** state layer (dormant). `VelocityItem` + `EmitterSettings`
+PropertyGroups registered; `EmitterSettings` carries the Range/List sextet for
+each scalar (temperature, density, surface_distance, volume_density, plus
+velocity_factor=Source / velocity_normal=Normal gated by `use_initial_velocity`)
+so `expand_param()` works on it unchanged, plus `velocity_list` (the XYZ
+vector list). `SmokeSettings.emitters` CollectionProperty added. Pure
+`_emitter_sync_plan(existing, desired)` reconciler preserves in-progress sweep
+config across a Refresh.
+
+**Next: increment 2c** = wire it up — `_populate_emitters(s, scene)` +
+`_seed_emitter_from_flow` (seed `_begin` from live flow settings), call from the
+domain-select callback + a "Refresh Emitters" operator; per-emitter collapsible
+UI section (section D) with the velocity-vector UIList + add/remove ops; clear
+`emitters` in `_reset_on_load`. Then increment 3 (job-gen + make_name) and 4
+(worker applies flow settings).
 
 **Filed 2026-06-16.**  Today a batch sweeps **domain**-level settings only. This
 TODO is the v0.9.0 scope expansion (see [ROADMAP.md](ROADMAP.md)): let a single

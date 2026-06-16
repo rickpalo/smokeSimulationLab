@@ -1186,6 +1186,23 @@ def find_emitters(scene, domain_obj):
     return emitters_inside_domain(find_fluid_emitters(scene), domain_obj)
 
 
+def _emitter_sync_plan(existing_names, desired_names):
+    """Reconcile the `emitters` collection with the currently-discovered set.
+
+    Returns (to_add, to_remove): emitter names to append (newly discovered) and
+    names to drop (object gone / no longer inside the domain).  EXISTING
+    elements are preserved so a user's in-progress sweep config survives a
+    Refresh — only genuinely new/stale emitters are touched.  `to_add` follows
+    `desired_names` order; `to_remove` follows `existing_names` order.  Pure /
+    unit-testable; the bpy collection mutation lives in `_populate_emitters`.
+    """
+    existing = list(existing_names)
+    desired  = list(desired_names)
+    to_add    = [n for n in desired  if n not in existing]
+    to_remove = [n for n in existing if n not in desired]
+    return to_add, to_remove
+
+
 # ---------------------------------------------------------------------------
 # v0.9.0 TODO-55: emitter Initial Velocity is swept as a LIST OF XYZ VECTORS.
 # The user adds as many "x, y, z" vectors as they want to compare (default
@@ -1702,6 +1719,130 @@ class SMOKE_UL_value_list(bpy.types.UIList):
         row.prop(item, "value", text="", emboss=True)
 
 
+class VelocityItem(bpy.types.PropertyGroup):
+    """One Initial-Velocity vector entry, stored as an "x, y, z" string.
+
+    v0.9.0 TODO-55: an emitter's Initial Velocity is swept as a LIST of explicit
+    XYZ vectors.  Each entry holds the raw user text (validated against
+    `_parse_velocity_vector`); `marked` flags the row for deletion in the UIList,
+    mirroring ValueItem.
+    """
+    text:   bpy.props.StringProperty(
+        name="Velocity",
+        description='Initial velocity vector, format "x, y, z" (e.g. 0, 0, 1)',
+        default="0, 0, 0",
+    )
+    marked: bpy.props.BoolProperty(default=False)
+
+
+class EmitterSettings(bpy.types.PropertyGroup):
+    """Per-emitter sweep settings — one element per discovered flow object.
+
+    v0.9.0 TODO-55.  Held in `SmokeSettings.emitters` (a CollectionProperty),
+    keyed by the flow object's `name`.  Each SCALAR emitter property reuses the
+    exact same Range/List sextet as the domain params, so `expand_param()` works
+    on an EmitterSettings instance with no changes:
+
+        <p>_begin / _end / _step / _use_range / _use_list / _list / _index
+
+    Scalars always available (map to bpy.types.FluidFlowSettings):
+        temperature       → temperature        (Initial Temperature)
+        density           → density            (Density)
+        surface_distance  → surface_distance   (Surface Emission)
+        volume_density    → volume_density     (Volume Emission)
+
+    Gated by `use_initial_velocity` (mirrors the use_dissolve / use_noise
+    gating in generate_jobs_*):
+        velocity_factor   → velocity_factor    (Source — scalar)
+        velocity_normal   → velocity_normal    (Normal — scalar)
+        velocity_list     → velocity_coord     (Initial X/Y/Z — list of vectors)
+    """
+    name: bpy.props.StringProperty(default="")
+    show: bpy.props.BoolProperty(
+        default=False,
+        description="Expand or collapse this emitter's parameters",
+    )
+
+    # Initial Temperature — flow_settings.temperature
+    temperature_begin:     bpy.props.FloatProperty(default=1.0)
+    temperature_end:       bpy.props.FloatProperty(default=1.0)
+    temperature_step:      bpy.props.FloatProperty(default=0)
+    temperature_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("temperature"))
+    temperature_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("temperature"))
+    temperature_list:      bpy.props.CollectionProperty(type=ValueItem)
+    temperature_index:     bpy.props.IntProperty()
+
+    # Density — flow_settings.density
+    density_begin:     bpy.props.FloatProperty(default=1.0)
+    density_end:       bpy.props.FloatProperty(default=1.0)
+    density_step:      bpy.props.FloatProperty(default=0)
+    density_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("density"))
+    density_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("density"))
+    density_list:      bpy.props.CollectionProperty(type=ValueItem)
+    density_index:     bpy.props.IntProperty()
+
+    # Surface Emission — flow_settings.surface_distance
+    surface_distance_begin:     bpy.props.FloatProperty(default=1.5)
+    surface_distance_end:       bpy.props.FloatProperty(default=1.5)
+    surface_distance_step:      bpy.props.FloatProperty(default=0)
+    surface_distance_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("surface_distance"))
+    surface_distance_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("surface_distance"))
+    surface_distance_list:      bpy.props.CollectionProperty(type=ValueItem)
+    surface_distance_index:     bpy.props.IntProperty()
+
+    # Volume Emission — flow_settings.volume_density
+    volume_density_begin:     bpy.props.FloatProperty(default=0.0)
+    volume_density_end:       bpy.props.FloatProperty(default=0.0)
+    volume_density_step:      bpy.props.FloatProperty(default=0)
+    volume_density_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("volume_density"))
+    volume_density_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("volume_density"))
+    volume_density_list:      bpy.props.CollectionProperty(type=ValueItem)
+    volume_density_index:     bpy.props.IntProperty()
+
+    # ── Initial Velocity (master toggle gates the three below) ───────────────
+    use_initial_velocity: bpy.props.BoolProperty(
+        default=False,
+        description=(
+            "Sweep this emitter's initial velocity — Source (factor), Normal, "
+            "and the Initial X/Y/Z vector list"
+        ),
+    )
+
+    # Source — flow_settings.velocity_factor (scalar)
+    velocity_factor_begin:     bpy.props.FloatProperty(default=0.0)
+    velocity_factor_end:       bpy.props.FloatProperty(default=0.0)
+    velocity_factor_step:      bpy.props.FloatProperty(default=0)
+    velocity_factor_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("velocity_factor"))
+    velocity_factor_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("velocity_factor"))
+    velocity_factor_list:      bpy.props.CollectionProperty(type=ValueItem)
+    velocity_factor_index:     bpy.props.IntProperty()
+
+    # Normal — flow_settings.velocity_normal (scalar)
+    velocity_normal_begin:     bpy.props.FloatProperty(default=0.0)
+    velocity_normal_end:       bpy.props.FloatProperty(default=0.0)
+    velocity_normal_step:      bpy.props.FloatProperty(default=0)
+    velocity_normal_use_range: bpy.props.BoolProperty(
+        default=False, update=make_toggle_range("velocity_normal"))
+    velocity_normal_use_list:  bpy.props.BoolProperty(
+        default=False, update=make_toggle_list("velocity_normal"))
+    velocity_normal_list:      bpy.props.CollectionProperty(type=ValueItem)
+    velocity_normal_index:     bpy.props.IntProperty()
+
+    # Initial X/Y/Z — flow_settings.velocity_coord (list of XYZ vectors)
+    velocity_list:  bpy.props.CollectionProperty(type=VelocityItem)
+    velocity_index: bpy.props.IntProperty()
+
+
 class SmokeJobItem(bpy.types.PropertyGroup):
     """One row in the Job Log panel section."""
     job_number: bpy.props.IntProperty(name="Job #",  default=0)
@@ -1853,6 +1994,17 @@ class SmokeSettings(bpy.types.PropertyGroup):
     show_sim_params: bpy.props.BoolProperty(
         default=True,
         description="Expand or collapse the entire Simulation Parameters section",
+    )
+
+    # ── v0.9.0 TODO-55: per-emitter sweep settings ───────────────────────────
+    # One EmitterSettings element per flow object discovered inside the domain
+    # (see find_emitters / _populate_emitters).  Populated on domain-select and
+    # via the Refresh Emitters button; each gets its own collapsible UI section.
+    emitters:        bpy.props.CollectionProperty(type=EmitterSettings)
+    emitters_index:  bpy.props.IntProperty()
+    show_emitters:   bpy.props.BoolProperty(
+        default=True,
+        description="Expand or collapse the Emitters section",
     )
 
     # ── Frame range ───────────────────────────────────────────────────────────
@@ -5425,6 +5577,8 @@ def _restore_job_log_on_load(_dummy=None):
 
 classes = [
     ValueItem,
+    VelocityItem,
+    EmitterSettings,
     SMOKE_UL_value_list,
     SmokeJobItem,
     SMOKE_UL_job_log,
