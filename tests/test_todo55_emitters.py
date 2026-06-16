@@ -352,3 +352,277 @@ class TestEmitterWiring:
 
     def test_reset_on_load_clears_emitters(self):
         assert "s.emitters.clear()" in _src()
+
+
+# ==========================================================================
+# Increment 3: emitter sweep layering + make_name encoding
+# ==========================================================================
+
+_EM_SCALARS = ("temperature", "density", "surface_distance", "volume_density",
+               "velocity_factor", "velocity_normal")
+_EM_DEFAULTS = {"temperature": 1.0, "density": 1.0, "surface_distance": 1.5,
+                "volume_density": 0.0, "velocity_factor": 0.0,
+                "velocity_normal": 0.0}
+
+
+def _emitter_stub(name="Emit", *, use_initial_velocity=False,
+                  velocity_texts=("0, 0, 0",), **over):
+    """EmitterSettings-like stub carrying the Range/List sextet for each scalar
+    plus a velocity_list of objects with `.text` (so expand_param + the emitter
+    helpers run against it)."""
+    ns = types.SimpleNamespace(name=name,
+                               use_initial_velocity=use_initial_velocity)
+    ns.velocity_list  = [types.SimpleNamespace(text=t) for t in velocity_texts]
+    ns.velocity_index = 0
+    for p in _EM_SCALARS:
+        begin = over.get(f"{p}_begin", _EM_DEFAULTS[p])
+        setattr(ns, f"{p}_begin", begin)
+        setattr(ns, f"{p}_end",   over.get(f"{p}_end", begin))
+        setattr(ns, f"{p}_step",  over.get(f"{p}_step", 0))
+        setattr(ns, f"{p}_use_range", over.get(f"{p}_use_range", False))
+        setattr(ns, f"{p}_use_list",  over.get(f"{p}_use_list", False))
+        setattr(ns, f"{p}_list",
+                [types.SimpleNamespace(value=float(v))
+                 for v in over.get(f"{p}_list", [])])
+        setattr(ns, f"{p}_index", 0)
+    return ns
+
+
+_DOMAIN_PARAMS = ["resolution", "vorticity", "alpha", "beta", "dissolve_speed",
+                  "noise_upres", "noise_strength", "noise_spatial_scale"]
+_DOMAIN_BASE = {"resolution": 64, "vorticity": 0.0, "alpha": 1.0, "beta": 1.0,
+                "dissolve_speed": 5, "noise_upres": 2, "noise_strength": 2.0,
+                "noise_spatial_scale": 2.0}
+
+
+def _settings(emitters=None, iteration_mode="LIMITED", **over):
+    """Minimal SmokeSettings stub (domain params at defaults, no sweeps) with an
+    `emitters` list — mirrors test_job_generation's _make_settings."""
+    d = dict(_DOMAIN_BASE)
+    d.update({"use_dissolve": False, "slow_dissolve": False,
+              "iterate_dissolve_both": False, "use_noise": False,
+              "iterate_noise_both": False, "iteration_mode": iteration_mode})
+    for p in _DOMAIN_PARAMS:
+        d[f"{p}_use_list"]  = False
+        d[f"{p}_use_range"] = False
+        d[f"{p}_list"]      = []
+        d[f"{p}_begin"]     = d[p]
+        d[f"{p}_end"]       = d[p]
+        d[f"{p}_step"]      = 0
+    d.update(over)
+    ns = types.SimpleNamespace(**d)
+    ns.emitters = emitters or []
+    return ns
+
+
+class TestEmitterVelocityVectors:
+    def test_parses_entries(self):
+        em = _emitter_stub(velocity_texts=("0, 0, 1", "1, 0, 0"))
+        assert ssl._emitter_velocity_vectors(em) == [(0.0, 0.0, 1.0), (1.0, 0.0, 0.0)]
+
+    def test_skips_invalid(self):
+        em = _emitter_stub(velocity_texts=("0, 0, 1", "garbage", "2, 2, 2"))
+        assert ssl._emitter_velocity_vectors(em) == [(0.0, 0.0, 1.0), (2.0, 2.0, 2.0)]
+
+    def test_fallback_when_all_invalid(self):
+        em = _emitter_stub(velocity_texts=("bad", ""))
+        assert ssl._emitter_velocity_vectors(em) == [(0.0, 0.0, 0.0)]
+
+
+class TestEmitterBaseline:
+    def test_first_values(self):
+        em = _emitter_stub(temperature_begin=2.0, density_use_list=True,
+                           density_list=[3, 4])
+        base = ssl._emitter_baseline(em)
+        assert base["temperature"] == 2.0
+        assert base["density"] == 3.0       # first list value
+        assert base["use_initial_velocity"] is False
+        assert base["velocity_coord"] == [0.0, 0.0, 0.0]
+
+
+class TestEmitterSweepAxes:
+    def test_scalar_range_is_an_axis(self):
+        em = _emitter_stub(temperature_use_range=True, temperature_begin=1,
+                           temperature_end=3, temperature_step=1)
+        axes = ssl._emitter_sweep_axes(_settings([em]))
+        assert ("Emit", "temperature", [1.0, 2.0, 3.0]) in axes
+
+    def test_scalar_list_is_an_axis(self):
+        em = _emitter_stub(density_use_list=True, density_list=[1, 2])
+        axes = ssl._emitter_sweep_axes(_settings([em]))
+        assert ("Emit", "density", [1.0, 2.0]) in axes
+
+    def test_single_value_is_not_an_axis(self):
+        em = _emitter_stub(temperature_begin=5)   # no range/list
+        assert ssl._emitter_sweep_axes(_settings([em])) == []
+
+    def test_velocity_scalars_gated_off(self):
+        em = _emitter_stub(use_initial_velocity=False,
+                           velocity_factor_use_range=True,
+                           velocity_factor_begin=0, velocity_factor_end=2,
+                           velocity_factor_step=1)
+        assert ssl._emitter_sweep_axes(_settings([em])) == []
+
+    def test_velocity_scalars_gated_on(self):
+        em = _emitter_stub(use_initial_velocity=True,
+                           velocity_factor_use_range=True,
+                           velocity_factor_begin=0, velocity_factor_end=2,
+                           velocity_factor_step=1)
+        axes = ssl._emitter_sweep_axes(_settings([em]))
+        assert ("Emit", "velocity_factor", [0.0, 1.0, 2.0]) in axes
+
+    def test_velocity_vector_list_axis(self):
+        em = _emitter_stub(use_initial_velocity=True,
+                           velocity_texts=("0, 0, 0", "0, 0, 5"))
+        axes = ssl._emitter_sweep_axes(_settings([em]))
+        assert ("Emit", "velocity_coord", [[0.0, 0.0, 0.0], [0.0, 0.0, 5.0]]) in axes
+
+    def test_velocity_vector_single_is_not_an_axis(self):
+        em = _emitter_stub(use_initial_velocity=True, velocity_texts=("0, 0, 1",))
+        axes = [a for a in ssl._emitter_sweep_axes(_settings([em]))
+                if a[1] == "velocity_coord"]
+        assert axes == []
+
+
+class TestEmitterCombinations:
+    def test_no_axes_single_baseline(self):
+        em = _emitter_stub()
+        combos = ssl._emitter_combinations(_settings([em]))
+        assert len(combos) == 1
+        assert combos[0]["Emit"]["temperature"] == 1.0
+
+    def test_product_of_two_axes(self):
+        em = _emitter_stub(temperature_use_list=True, temperature_list=[1, 2],
+                           density_use_list=True, density_list=[10, 20])
+        combos = ssl._emitter_combinations(_settings([em]))
+        pairs = {(c["Emit"]["temperature"], c["Emit"]["density"]) for c in combos}
+        assert pairs == {(1, 10), (1, 20), (2, 10), (2, 20)}
+
+
+class TestGenerateJobsEmitters:
+    def test_limited_sweeps_one_emitter_axis(self):
+        em = _emitter_stub(temperature_use_list=True, temperature_list=[1, 2, 3])
+        jobs = list(ssl.generate_jobs(_settings([em], iteration_mode="LIMITED")))
+        # every job carries the emitter block
+        assert all("Emit" in j["emitters"] for j in jobs)
+        temps = {j["emitters"]["Emit"]["temperature"] for j in jobs}
+        assert {1.0, 2.0, 3.0} <= temps
+        # domain params held constant across the emitter sweep
+        assert {j["resolution"] for j in jobs} == {64}
+
+    def test_limited_no_emitter_sweep_attaches_baseline(self):
+        em = _emitter_stub(temperature_begin=2.0)   # single value, no sweep
+        jobs = list(ssl.generate_jobs(_settings([em], iteration_mode="LIMITED")))
+        assert all(j["emitters"]["Emit"]["temperature"] == 2.0 for j in jobs)
+
+    def test_all_crosses_domain_and_emitter(self):
+        em = _emitter_stub(density_use_list=True, density_list=[1, 2])
+        s = _settings([em], iteration_mode="ALL",
+                      resolution_use_list=True,
+                      resolution_list=[types.SimpleNamespace(value=64.0),
+                                       types.SimpleNamespace(value=128.0)])
+        jobs = list(ssl.generate_jobs(s))
+        combos = {(j["resolution"], j["emitters"]["Emit"]["density"]) for j in jobs}
+        assert combos == {(64, 1), (64, 2), (128, 1), (128, 2)}
+
+    def test_jobs_have_independent_emitter_dicts(self):
+        # deepcopy guard: mutating one job's emitters must not bleed into others.
+        em = _emitter_stub(temperature_use_list=True, temperature_list=[1, 2])
+        jobs = list(ssl.generate_jobs(_settings([em])))
+        jobs[0]["emitters"]["Emit"]["temperature"] = 999
+        assert jobs[1]["emitters"]["Emit"]["temperature"] != 999
+
+
+# --- make_name emitter encoding -------------------------------------------
+
+def _em(**over):
+    d = {"temperature": 1.0, "density": 1.0, "surface_distance": 1.5,
+         "volume_density": 0.0, "use_initial_velocity": False,
+         "velocity_factor": 0.0, "velocity_normal": 0.0,
+         "velocity_coord": [0.0, 0.0, 0.0]}
+    d.update(over)
+    return d
+
+
+def _p(emitters=None, **over):
+    d = {"resolution": 128, "vorticity": 0.0, "alpha": 1.0, "beta": 1.0,
+         "dissolve_speed": 5, "use_dissolve": False, "slow_dissolve": False,
+         "use_noise": False, "noise_upres": 2, "noise_strength": 2.0,
+         "noise_spatial_scale": 2.0, "time_scale": 1.0,
+         "use_adaptive_timesteps": True, "cfl_number": 4.0,
+         "timesteps_max": 4, "timesteps_min": 1, "use_fire": False,
+         "burning_rate": 0.75, "flame_smoke": 1.0, "flame_vorticity": 0.5,
+         "flame_max_temp": 1.7, "flame_ignition": 1.5}
+    d.update(over)
+    if emitters is not None:
+        d["emitters"] = emitters
+    return d
+
+
+class TestMakeNameEmitters:
+    def test_no_emitters_key_unchanged(self):
+        # Backwards compat: a pre-TODO-55 job dict produces the same name.
+        assert ssl.make_name(_p()) == ssl.make_name(_p(emitters={}))
+
+    def test_all_default_emitter_adds_nothing(self):
+        # An emitter entirely at flow defaults contributes no token.
+        assert ssl.make_name(_p(emitters={"A": _em()})) == ssl.make_name(_p())
+
+    def test_non_default_temperature_encoded(self):
+        name = ssl.make_name(_p(emitters={"A": _em(temperature=2.0)}))
+        assert "_E0T2" in name
+
+    def test_surface_and_volume_emission(self):
+        name = ssl.make_name(_p(emitters={"A": _em(surface_distance=2.0,
+                                                   volume_density=0.5)}))
+        assert "E0SE2" in name and "E0VE0.5" in name
+
+    def test_two_emitters_indexed_by_sorted_name(self):
+        name = ssl.make_name(_p(emitters={
+            "Zeta": _em(density=2.0),
+            "Alpha": _em(temperature=3.0),
+        }))
+        assert "E0T3" in name      # Alpha sorts first → E0
+        assert "E1D2" in name      # Zeta → E1
+
+    def test_velocity_on_marker(self):
+        name = ssl.make_name(_p(emitters={"A": _em(use_initial_velocity=True)}))
+        assert "E0Vy" in name
+
+    def test_velocity_off_no_marker(self):
+        name = ssl.make_name(_p(emitters={"A": _em(use_initial_velocity=False)}))
+        assert "Vy" not in name
+
+    def test_velocity_coord_encoded(self):
+        name = ssl.make_name(_p(emitters={
+            "A": _em(use_initial_velocity=True, velocity_coord=[0.0, 0.0, 5.0])}))
+        assert "E0VC0c0c5" in name
+
+
+class TestEmitterNameNoCollisions:
+    """Cache-safety (BUG-013 family): varying ANY emitter param must yield a
+    distinct make_name, so two jobs never share a cache directory."""
+
+    def test_each_scalar_variation_distinct(self):
+        names = set()
+        variants = [
+            _em(),
+            _em(temperature=2.0),
+            _em(density=2.0),
+            _em(surface_distance=2.0),
+            _em(volume_density=1.0),
+            _em(use_initial_velocity=True),
+            _em(use_initial_velocity=True, velocity_factor=1.0),
+            _em(use_initial_velocity=True, velocity_normal=1.0),
+            _em(use_initial_velocity=True, velocity_coord=[1.0, 0.0, 0.0]),
+            _em(use_initial_velocity=True, velocity_coord=[0.0, 1.0, 0.0]),
+        ]
+        for v in variants:
+            names.add(ssl.make_name(_p(emitters={"A": v})))
+        assert len(names) == len(variants)   # all distinct
+
+    def test_per_emitter_namespacing(self):
+        # Same value on different emitters must not collapse to one name.
+        n1 = ssl.make_name(_p(emitters={"A": _em(temperature=2.0), "B": _em()}))
+        n2 = ssl.make_name(_p(emitters={"A": _em(), "B": _em(temperature=2.0)}))
+        assert n1 != n2

@@ -62,6 +62,7 @@ bl_info = {
 }
 
 import bpy
+import copy
 import math
 import os
 import re
@@ -908,21 +909,134 @@ def generate_jobs_all(s):
                 }
 
 
+# ---------------------------------------------------------------------------
+# v0.9.0 TODO-55: emitter sweep layering (increment 3)
+#
+# The domain generators above stay emitter-agnostic.  generate_jobs() layers
+# per-emitter values onto each domain job: in LIMITED mode every domain job gets
+# the baseline emitters and each explicitly-swept emitter axis adds a row (one
+# axis varied, everything else baseline); in ALL mode each domain job is crossed
+# with the full emitter cartesian product.  The job dict gains an "emitters" key
+# {name: {temperature, density, surface_distance, volume_density,
+# use_initial_velocity, velocity_factor, velocity_normal, velocity_coord}} which
+# rides into job JSON via job_data["params"] and into make_name().
+# ---------------------------------------------------------------------------
+
+# Emitter scalar params always sweepable; the velocity scalars only when
+# use_initial_velocity is on (mirrors the use_dissolve / use_noise gating).
+_EMITTER_SCALARS = ("temperature", "density", "surface_distance", "volume_density")
+_EMITTER_VELOCITY_SCALARS = ("velocity_factor", "velocity_normal")
+
+
+def _emitter_velocity_vectors(em):
+    """Parsed (x, y, z) tuples from an emitter's velocity_list.
+
+    Skips malformed entries (the UI red-tints them; export validation reports
+    them).  Falls back to [_VELOCITY_DEFAULT] when empty / all-invalid so the
+    baseline always has one vector.
+    """
+    vecs = []
+    for item in getattr(em, "velocity_list", []):
+        v = _parse_velocity_vector(getattr(item, "text", ""))
+        if v is not None:
+            vecs.append(v)
+    return vecs if vecs else [_VELOCITY_DEFAULT]
+
+
+def _emitter_baseline(em):
+    """One emitter's baseline param dict — every axis at its first value."""
+    d = {p: expand_param(em, p)[0] for p in _EMITTER_SCALARS}
+    d["use_initial_velocity"] = bool(getattr(em, "use_initial_velocity", False))
+    d["velocity_factor"] = expand_param(em, "velocity_factor")[0]
+    d["velocity_normal"] = expand_param(em, "velocity_normal")[0]
+    d["velocity_coord"]  = list(_emitter_velocity_vectors(em)[0])
+    return d
+
+
+def _default_emitters(s):
+    """Baseline {emitter_name: param_dict} for all of s.emitters."""
+    return {em.name: _emitter_baseline(em) for em in getattr(s, "emitters", [])}
+
+
+def _emitter_sweep_axes(s):
+    """Return [(emitter_name, param_key, values), ...] for every emitter param
+    the user explicitly swept (list, or range with >1 value; velocity vector
+    list with >1 vector).  Mirrors the is_explicit rule used for domain axes."""
+    axes = []
+    for em in getattr(s, "emitters", []):
+        scalars = list(_EMITTER_SCALARS)
+        if getattr(em, "use_initial_velocity", False):
+            scalars += list(_EMITTER_VELOCITY_SCALARS)
+        for p in scalars:
+            use_list  = getattr(em, p + "_use_list",  False)
+            use_range = getattr(em, p + "_use_range", False)
+            vals = expand_param(em, p)
+            if use_list:
+                explicit = True
+            elif use_range:
+                explicit = len(vals) > 1
+            else:
+                explicit = False
+            if explicit:
+                axes.append((em.name, p, vals))
+        # Initial X/Y/Z vector list — a sweep when >1 distinct vector entered.
+        if getattr(em, "use_initial_velocity", False):
+            vecs = _emitter_velocity_vectors(em)
+            if len(vecs) > 1:
+                axes.append((em.name, "velocity_coord", [list(v) for v in vecs]))
+    return axes
+
+
+def _emitter_combinations(s):
+    """ALL-combinations: cartesian product over every swept emitter axis.
+
+    Returns a list of complete emitters dicts.  When no emitter axis is swept,
+    returns a single baseline combo so the domain product is unchanged.
+    """
+    default = _default_emitters(s)
+    axes = _emitter_sweep_axes(s)
+    if not axes:
+        return [copy.deepcopy(default)]
+    combos = []
+    for combo in itertools.product(*[vals for (_, _, vals) in axes]):
+        em = copy.deepcopy(default)
+        for (ename, pkey, _), v in zip(axes, combo):
+            em[ename][pkey] = v
+        combos.append(em)
+    return combos
+
+
 def generate_jobs(s):
     """
-    Dispatch to the appropriate job generator based on s.iteration_mode.
+    Dispatch to the appropriate domain generator based on s.iteration_mode,
+    then layer per-emitter values (TODO-55) onto every job.
 
-    Parameters
-    ----------
-    s : SmokeSettings
-
-    Returns
-    -------
-    generator of job dicts
+    Returns a generator of job dicts (each with an "emitters" block).
     """
+    default_emitters = _default_emitters(s)
+
     if s.iteration_mode == 'LIMITED':
-        return generate_jobs_limited(s)
-    return generate_jobs_all(s)
+        # Domain sweeps: each domain job keeps emitters at baseline.
+        for job in generate_jobs_limited(s):
+            job["emitters"] = copy.deepcopy(default_emitters)
+            yield job
+        # Emitter sweeps: one emitter axis varied at a time, domain + other
+        # emitters held at baseline (mirrors the domain Limited pattern).
+        if default_emitters:
+            domain_base = _default_job(s)
+            for (ename, pkey, vals) in _emitter_sweep_axes(s):
+                for v in vals:
+                    job = dict(domain_base)
+                    job["emitters"] = copy.deepcopy(default_emitters)
+                    job["emitters"][ename][pkey] = v
+                    yield job
+    else:  # ALL — cross every domain job with every emitter combination.
+        emitter_combos = _emitter_combinations(s)
+        for job in generate_jobs_all(s):
+            for em in emitter_combos:
+                j = dict(job)
+                j["emitters"] = copy.deepcopy(em)
+                yield j
 
 
 def _dedupe_jobs(jobs):
@@ -941,9 +1055,10 @@ def _dedupe_jobs(jobs):
     seen   = set()
     unique = []
     for j in jobs:
-        # All job values are scalar (int/float/bool), so a tuple of sorted
-        # items is hashable and stable across runs.
-        key = tuple(sorted(j.items()))
+        # v0.9.0 TODO-55: jobs now carry a nested "emitters" dict, so the old
+        # tuple(sorted(items())) key is unhashable.  A sort_keys JSON dump is a
+        # stable, hashable signature that handles nested dicts/lists too.
+        key = json.dumps(j, sort_keys=True, default=str)
         if key in seen:
             continue
         seen.add(key)
@@ -970,6 +1085,50 @@ def _fmt_num(x):
 # 'Dx' / 'Nx' / 'Fx' read unambiguously as "feature off" without needing
 # the verbose "-OFF" suffix.
 _OFF_SUFFIX = "x"
+
+
+# v0.9.0 TODO-55: emitter param encoding for make_name().  Suffixes are
+# default-suppressed against the documented FluidFlowSettings defaults — a value
+# at its default contributes no token, so cache names stay short.  This is
+# collision-SAFE because only the exact-default value is dropped: any differing
+# value is encoded, so two jobs that differ in an emitter param always get
+# distinct names (BUG-013 family).  Each token is namespaced by the emitter's
+# sorted-order index (E0, E1, ...) so multiple emitters never clash.
+_EMITTER_NAME_DEFAULTS = {
+    "temperature": 1.0, "density": 1.0,
+    "surface_distance": 1.5, "volume_density": 0.0,
+    "velocity_factor": 0.0, "velocity_normal": 0.0,
+}
+_EMITTER_NAME_ABBR = {
+    "temperature": "T", "density": "D",
+    "surface_distance": "SE", "volume_density": "VE",
+    "velocity_factor": "VS", "velocity_normal": "VN",
+}
+
+
+def _emitter_name_tokens(emitters):
+    """Return make_name() tokens for the per-emitter params (default-suppressed,
+    namespaced by sorted-order emitter index).  Pure / testable."""
+    tokens = []
+    for i, ename in enumerate(sorted(emitters or {})):
+        em = emitters[ename]
+        for key in _EMITTER_SCALARS:
+            val = float(em.get(key, _EMITTER_NAME_DEFAULTS[key]))
+            if val != _EMITTER_NAME_DEFAULTS[key]:
+                tokens.append(f"E{i}{_EMITTER_NAME_ABBR[key]}{_fmt_num(val)}")
+        # Velocity block — only when initial velocity is on.  The "Vy" marker
+        # guarantees on/off differ even when every velocity value is at default.
+        if em.get("use_initial_velocity"):
+            tokens.append(f"E{i}Vy")
+            for key in _EMITTER_VELOCITY_SCALARS:
+                val = float(em.get(key, 0.0))
+                if val != 0.0:
+                    tokens.append(f"E{i}{_EMITTER_NAME_ABBR[key]}{_fmt_num(val)}")
+            vc = list(em.get("velocity_coord") or [0.0, 0.0, 0.0])
+            if [float(c) for c in vc] != [0.0, 0.0, 0.0]:
+                comps = "c".join(_fmt_num(c) for c in vc)
+                tokens.append(f"E{i}VC{comps}")
+    return tokens
 
 
 def make_name(p):
@@ -1063,6 +1222,9 @@ def make_name(p):
         extras.append(f"FV{_fmt_num(p['flame_vorticity'])}")
         extras.append(f"TMax{_fmt_num(p['flame_max_temp'])}")
         extras.append(f"TIgn{_fmt_num(p['flame_ignition'])}")
+
+    # v0.9.0 TODO-55: per-emitter param tokens (default-suppressed, namespaced).
+    extras.extend(_emitter_name_tokens(p.get("emitters")))
 
     extras_suffix = ("_" + "_".join(extras)) if extras else ""
 

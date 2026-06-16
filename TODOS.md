@@ -61,15 +61,30 @@ stays 0.7.6, no release yet). `_populate_emitters` + `_seed_emitter_from_flow`
 (`smoke.add/remove_emitter_value`, `smoke.add/remove_emitter_velocity`);
 `emitters` cleared in `_reset_on_load`. Schema + wiring tests (51 in the file).
 
-**Next: increment 3** = job generation + `make_name`. Read each emitter's swept
-values (reuse `expand_param` on the EmitterSettings element + the parsed
-velocity vectors), extend `generate_jobs_limited` / `generate_jobs_all` to
-include emitter axes (with the job-count blow-up guard), write an `emitters`
-block into each `job_NNNN.json`, and **encode emitter params into `make_name`**
-(cache-collision safety — BUG-013 family; `TestNoCacheCollisions`-style proof).
-Then **increment 4** = worker applies the per-emitter flow settings by name
-before baking (version bump + re-export). Bump to **v0.9.0** + release when 3+4
-land and the feature works end to end.
+**Increment 3 DONE:** emitter sweep layering + `make_name` encoding (addon
+side). `generate_jobs` now layers emitters over the (untouched) domain
+generators — LIMITED: baseline emitters on each domain job + one emitter axis
+swept at a time; ALL: domain product × emitter cartesian product
+(`_emitter_combinations`). Helpers: `_emitter_velocity_vectors`,
+`_emitter_baseline`, `_default_emitters`, `_emitter_sweep_axes`. Job dict gains
+an `emitters` block that rides into job JSON via `job_data["params"]` (no
+export change needed). `make_name` encodes per-emitter tokens
+(`_emitter_name_tokens`, default-suppressed, `E<i>` namespaced) — collision-safe
+(BUG-013); proven by `TestEmitterNameNoCollisions`. Emitter-free jobs produce
+byte-identical names (no orphaning). `_dedupe_jobs` switched to a JSON key
+(nested emitters dict). 27 tests added (78 in file; 575 total). Combinatorial
+guard = the existing "N jobs will be created" label (counts `generate_jobs`).
+
+**Next: increment 4 (worker + text overlay; version bump + re-export):**
+(1) worker applies each job's `emitters` block to the matching flow object's
+`flow_settings` by name before baking (temperature/density/surface_distance/
+volume_density + use_initial_velocity → velocity_factor/normal/coord), guarded
+per-attr; warn on missing emitter.
+(2) **Emitter text overlay (user request):** add `text_emitter_left` /
+`text_emitter_right` object-name StringProperties + Text Objects UI rows; write
+them into the job `text_objects` block; worker `update_text_objects` formats
+each emitter's settings into the lower-left / lower-right font objects.
+Bump to **v0.9.0** + release when this lands and works end to end.
 
 **Filed 2026-06-16.**  Today a batch sweeps **domain**-level settings only. This
 TODO is the v0.9.0 scope expansion (see [ROADMAP.md](ROADMAP.md)): let a single
