@@ -928,5 +928,51 @@ with F = number of failed jobs; clean batches show only `(N done)`.
 
 ---
 
+## BUG-015: N-Panel Body Blank After Remote Extension Install (bl_info NameError)
+
+**Status:** `DEPLOYED / UNVERIFIED` (v0.9.1)
+**Files:** `__init__.py` — `SMOKE_PT_panel.draw`
+
+### Symptoms
+After installing v0.9.0 from the remote repository (rickpalo.github.io), the
+addon enabled normally and printed `BatchSimLab 0.9.0 loaded`, but the N-panel
+(Sidebar → BatchLab tab) showed only the panel title bar with an empty body.
+User console (2026-06-20):
+`line 5510, in draw / version = ".".join(str(v) for v in bl_info["version"]) /
+NameError: name 'bl_info' is not defined.`
+Never reproduced under legacy (<4.2) add-on installs — only as an *extension*.
+
+The user initially suspected a conflict from running a second addon
+(AssetDoctor) hosted on the same GitHub Pages domain in a different directory.
+Ruled out: Blender keys extensions by unique `id` (`batchsimlab` vs
+`assetdoctor`), and multiple remote repos on one domain are fully supported.
+
+### Root Cause
+Blender deletes `bl_info` from an extension's module namespace **after import**
+(4.2+ extensions are driven by `blender_manifest.toml`, not `bl_info`).  The
+module-level `ADDON_VERSION = ".".join(...bl_info["version"])` at import time
+succeeds (bl_info still present then), but `SMOKE_PT_panel.draw` re-derived the
+version from `bl_info` on every repaint — long after Blender removed it.  The
+NameError raised inside `draw()`, so Blender rendered the panel header from
+`bl_label` and aborted the body → title-only panel.
+
+### Fix (v0.9.1)
+`draw()` now uses the import-time `ADDON_VERSION` module constant (which
+survives, since Blender only removes `bl_info`) instead of re-reading
+`bl_info["version"]`.  Single line change; behaviour identical under legacy
+add-on installs.
+
+### Tests Added
+`tests/test_version_stamps.TestPanelDrawUsesAddonVersion` — 2 tests:
+- `SMOKE_PT_panel.draw` source contains no executable `bl_info` reference
+  (comment lines stripped before the check)
+- `SMOKE_PT_panel.draw` uses `ADDON_VERSION`
+
+### Verification
+Install the v0.9.1 extension from the remote repo, open Sidebar → BatchLab,
+and confirm the full panel body renders with `BatchSimLab v0.9.1` at the top.
+
+---
+
 *Document created 2026-05-11.  Append new attempts to existing issues rather than
 creating duplicate entries.*

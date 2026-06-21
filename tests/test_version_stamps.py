@@ -27,6 +27,55 @@ class TestAddonVersionConstant:
         assert ssl.ADDON_VERSION == expected
 
 
+class TestPanelDrawUsesAddonVersion:
+    """Regression: when installed as an *extension* (Blender 4.2+), Blender
+    deletes `bl_info` from the module namespace after import.  Any runtime
+    (draw-time) reference to `bl_info` then raises NameError, blanking the
+    N-panel body.  draw() must use the import-time ADDON_VERSION constant."""
+
+    def test_panel_draw_does_not_reference_bl_info(self):
+        import inspect
+        # Strip comment lines so the explanatory comment (which names bl_info)
+        # doesn't trip the check — we only care about executable references.
+        code = "\n".join(
+            ln for ln in inspect.getsource(ssl.SMOKE_PT_panel.draw).splitlines()
+            if not ln.lstrip().startswith("#")
+        )
+        assert "bl_info" not in code, (
+            "SMOKE_PT_panel.draw references bl_info, which is removed by "
+            "Blender at runtime for extensions; use ADDON_VERSION instead."
+        )
+
+    def test_panel_draw_uses_addon_version(self):
+        import inspect
+        src = inspect.getsource(ssl.SMOKE_PT_panel.draw)
+        assert "ADDON_VERSION" in src
+
+    def test_no_runtime_bl_info_reference_anywhere(self):
+        """Class-wide guard: `bl_info` is removed from an extension module after
+        import, so it may ONLY be referenced at module top level (its definition
+        and the import-time ADDON_VERSION).  Any `bl_info` inside a function or
+        method body is a latent NameError under extension installs.  Parse the
+        AST so this catches a reintroduction in *any* operator/panel/handler,
+        not just SMOKE_PT_panel.draw."""
+        import ast
+        path = os.path.join(os.path.dirname(__file__), "..",
+                            "scripts", "SmokeSimLab", "__init__.py")
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+        offenders = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Name) and node.id == "bl_info":
+                    offenders.append(f"{fn.name}() line {node.lineno}")
+        assert not offenders, (
+            "bl_info referenced inside function/method bodies (removed at "
+            "runtime for extensions — use ADDON_VERSION): " + ", ".join(offenders)
+        )
+
+
 class TestEstimLogStamp:
     def test_estim_log_adds_addon_version(self, tmp_path):
         ssl._estim["output_path"] = str(tmp_path)

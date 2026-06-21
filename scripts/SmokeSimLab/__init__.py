@@ -51,7 +51,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "BatchSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 9, 0),
+    "version":     (0, 9, 1),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > BatchLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging "
@@ -5507,8 +5507,11 @@ class SMOKE_PT_panel(bpy.types.Panel):
         s      = context.scene.smoke_settings
         layout = self.layout
 
-        version = ".".join(str(v) for v in bl_info["version"])
-        layout.label(text=f"BatchSimLab v{version}", icon='TOOL_SETTINGS')
+        # Use the module-level ADDON_VERSION captured at import time.  Blender
+        # deletes `bl_info` from the module namespace after loading a package as
+        # an *extension* (4.2+), so referencing it here (runtime/draw) raises
+        # NameError and leaves the panel body blank.  ADDON_VERSION survives.
+        layout.label(text=f"BatchSimLab v{ADDON_VERSION}", icon='TOOL_SETTINGS')
 
         # ── Setup (collapsible) ───────────────────────────────────────────
         box_setup = layout.box()
