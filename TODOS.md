@@ -518,7 +518,12 @@ real Blender 5.1. Also converted `test_v060_fixes._addon_src` to `read_addon_sou
 
 ### ▶ RESUME POINT (fresh session) — LAST module: #7 `ui.py`
 
-**Baseline now = 1036 pytest + REGISTER_OK/UNREGISTER_OK.** Modules #1–6b complete,
+**Baseline now = 1049 pytest + REGISTER_OK/UNREGISTER_OK** (v0.9.6 released; hotfix
+BUG-018 clamp-recursion crash + BUG-019 export NameError regression). **A new
+permanent guard `tests/test_no_unbound_names.py` runs AST unbound-name analysis on
+every package module — it WILL cover ui.py, but still also headless-exercise the
+panel `draw()` when done (the AST guard catches missing imports, not draw-time logic
+or RNA misuse).** Modules #1–6b complete,
 gated green, still UNCOMMITTED (per user: ONE commit at the very END of the split, off a
 branch — `main` is the current branch). Working-tree files that must NOT be lost: new
 `scripts/BatchSimLab/{jobgen,emitters,settings_io,progress,properties,operators,engine}.py`,
