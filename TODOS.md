@@ -343,17 +343,44 @@ Natural to pair with TODO-58. Add tests proving job-gen output is unchanged.
 
 ---
 
-## TODO-58: Split the 6.1k-line `__init__.py` into a package — **OPEN**
+## TODO-58: Split the 6.1k-line `__init__.py` into a package — **OPEN (groundwork done)**
 
 **Filed 2026-06-21** (review Part 1 #2). Everything (props, job-gen, emitter
 discovery, progress polling, operators, UI, handlers, register) lives in one
 module. Split into `properties.py`, `jobgen.py`, `emitters.py`, `settings_io.py`,
 `progress.py`, `operators.py`, `ui.py`, `__init__.py` (register only). Watch two
 extension-specific risks: **registration order** and **relative imports under
-`bl_ext.*`** (the package is installed as `bl_ext.<repo>.batchsimlab`). Keep the
-existing `from BatchSimLab import …` test entry points working (or update them as
-part of the split). **Severity:** medium. **Effort:** large; do with/after
-TODO-57. Pairs with TODO-61 Tier B (filename renames).
+`bl_ext.*`** (installed as `bl_ext.<repo>.batchsimlab`). Keep the existing
+`from BatchSimLab import …` test entry points working by **re-exporting** moved
+names from the package `__init__.py`. Pairs with TODO-61 Tier B (filename renames).
+
+**Groundwork done 2026-06-21 (no code moved yet):**
+- **CRITICAL GATE — the pytest suite stubs `bpy`, so green tests do NOT prove the
+  add-on still registers.** Use this real-Blender smoke-test after EVERY
+  extraction (passes against current code):
+  ```sh
+  "C:\Program Files\Blender Foundation\Blender 5.1\blender.exe" --factory-startup \
+    --background --python-expr "import sys; sys.path.insert(0,'scripts'); \
+    import BatchSimLab as b; b.register(); print('REGISTER_OK'); b.unregister(); \
+    print('UNREGISTER_OK')"
+  ```
+  Gate per module = 618 pytest **+** REGISTER_OK/UNREGISTER_OK.
+- **First module mapped — `jobgen.py` (lowest risk, do first):** a self-contained
+  PURE cluster, no `bpy` calls, no deps on the rest of `__init__` except
+  `ITERABLE_PARAMS` (which moves with it). Contents: `ITERABLE_PARAMS` (~L124),
+  then the contiguous block `expand_param`→`make_name` (~L559–1307): `expand_param`,
+  `_first_value`, `_default_job`, `generate_jobs_limited/all/generate_jobs`,
+  `_dedupe_jobs`, `_fmt_num`, `make_name`, the emitter job-gen helpers
+  (`_emitter_*`, `_default_emitters`, `_emitter_combinations`) + their constants
+  (`_EMITTER_SCALARS`, `_EMITTER_VELOCITY_SCALARS`, `_OFF_SUFFIX`,
+  `_EMITTER_NAME_*`). **Exclude** `find_fluid_emitters`/`emitters_inside_domain`
+  (~L1308+) — bpy scene-scan → `emitters.py` (module #2). `__init__` then does
+  `from .jobgen import *` (or explicit) so the ~209 job-gen tests + UI sites
+  (`ITERABLE_PARAMS` at ~L2928/5983) keep resolving.
+- **Suggested module order** (leaf → trunk): jobgen → emitters → settings_io →
+  progress (incl. `_estimate_batch_remaining`, already extracted) → properties →
+  operators → ui → `__init__` (register only). Commit one module at a time.
+**Severity:** medium. **Effort:** large; natural to pair with TODO-57.
 
 ---
 
