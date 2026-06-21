@@ -26,7 +26,7 @@ Repo is source of truth — verify line refs against current code before acting.
 | TODO-23 | Retry overall batch time estimate is unreliable | OPEN | — |
 | TODO-22 | Crash timing inconsistency (5-min stall vs immediate) | INSTRUMENTED (root cause open) | — |
 | TODO-61 | Finish the BatchSimLab rename — remaining `SmokeSimLab`/`smoke_*` names | OPEN | — |
-| TODO-56 | Docs overhaul — README/DOCUMENTATION split, fix CSV/install/features/screenshot | OPEN | — |
+| TODO-56 | Docs overhaul — README/DOCUMENTATION split, fix CSV/install/features/screenshot | MOSTLY DONE (v0.9.4) — hero screenshot recapture remains | — |
 | TODO-57 | Declarative `PARAM_SPECS` registry (kills shotgun-surgery + positional `combo[N]`) | OPEN | — |
 | TODO-58 | Split 6.1k-line `__init__.py` into a package | OPEN | — |
 | TODO-59 | Decompose `_poll_batch_progress_impl` + finish `draw()` section helpers | OPEN (started — `_estimate_batch_remaining` extracted v0.9.4) | — |
@@ -294,10 +294,22 @@ almost immediately.  **Files:** `smoke_launcher.py` — near WerFault post-exit 
 
 ---
 
-## TODO-56: Documentation overhaul — **OPEN**
+## TODO-56: Documentation overhaul — **MOSTLY DONE (v0.9.4)**
 
-**Filed 2026-06-21** from the design+docs review (see `DESIGN_AND_DOCS_REVIEW.md`
-Part 2). The README predates three feature waves and has outright errors. Scope:
+**DONE 2026-06-21 (v0.9.4):** README.md rewritten as a concise summary; new
+**DOCUMENTATION.md** full reference (all params incl. emitters/fire/timing,
+two-phase pipeline, render settings, output structure, **correct 23-column CSV
+schema**, caching/resume, estimates, troubleshooting, limitations); install steps
+switched to the extension-feed flow; `DOCS_URL` + `bl_info` `doc_url` now point at
+DOCUMENTATION.md (HELP button); three review §G screenshots folded into
+`documentation/images/` (job_log_failed / render_time_estimate /
+slow_dissolve_comparison) and referenced. **REMAINING:** recapture the stale
+2026-04-25 hero `documentation/images/SmokeSimLab_Panel.png` (needs Blender open
+with the current collapsible UI + Emitters section) and add the other §G captures
+(panel overview, sim-params expanded, emitters section, range-vs-list close-up,
+job-log mid-run, results.csv in a spreadsheet, render with overlays).
+
+**Original scope (filed 2026-06-21, review Part 2):**
 - **README.md → concise summary** (what it is, hero screenshot, key features,
   install via the extension feed, quick-start, link to full docs).
 - **New `DOCUMENTATION.md` → full reference** (every parameter incl. emitters/

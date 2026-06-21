@@ -58,7 +58,7 @@ bl_info = {
     "location":    "View3D > Sidebar > BatchLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging "
                    "(roadmap: fire @ v2.0.0, fluid @ v3.0.0)",
-    "doc_url":     "https://github.com/rickpalo/BatchSimLab",
+    "doc_url":     "https://github.com/rickpalo/BatchSimLab/blob/main/DOCUMENTATION.md",
     "tracker_url": "https://github.com/rickpalo/BatchSimLab/issues",
     "category":    "Fluid Simulation",
 }
@@ -79,10 +79,11 @@ ADDON_VERSION = ".".join(str(v) for v in bl_info["version"])
 print(f"BatchSimLab {ADDON_VERSION} loaded")
 
 
-# GitHub repo URL.  The repository and source folder are now "BatchSimLab";
-# only the lowercase runtime identifiers (smoke_settings, SMOKE_*, .smokesettings)
-# still use the legacy "smoke" prefix for .blend/keymap compatibility.
-DOCS_URL = "https://github.com/rickpalo/BatchSimLab"
+# In-addon HELP button target — the full reference (TODO-56).  The repository
+# and source folder are now "BatchSimLab"; only the lowercase runtime identifiers
+# (smoke_settings, SMOKE_*, .smokesettings) keep the legacy "smoke" prefix for
+# .blend/keymap compatibility.
+DOCS_URL = "https://github.com/rickpalo/BatchSimLab/blob/main/DOCUMENTATION.md"
 
 # Expected version strings in the helper files exported to the output folder.
 # When Run Batch detects a mismatch it warns the user to re-run Export Batch.

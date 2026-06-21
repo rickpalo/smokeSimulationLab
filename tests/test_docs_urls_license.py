@@ -52,8 +52,11 @@ class TestRepoUrl:
 
     def test_addon_doc_urls_are_correct(self):
         src = _read(os.path.join("scripts", "BatchSimLab", "__init__.py"))
-        assert f'DOCS_URL = "https://{RIGHT_REPO_URL}"' in src
-        assert f'"doc_url":     "https://{RIGHT_REPO_URL}"' in src
+        # HELP button + doc_url point at the full reference (TODO-56);
+        # tracker_url at the issues page. All on the BatchSimLab repo.
+        docs = f"https://{RIGHT_REPO_URL}/blob/main/DOCUMENTATION.md"
+        assert f'DOCS_URL = "{docs}"' in src
+        assert f'"doc_url":     "{docs}"' in src
         assert f'"tracker_url": "https://{RIGHT_REPO_URL}/issues"' in src
 
 
