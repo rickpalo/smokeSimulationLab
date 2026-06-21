@@ -96,7 +96,7 @@ class TestWorkerSource:
         return _WORKER_SRC.read_text(encoding="utf-8")
 
     def test_worker_version_bumped(self):
-        assert 'WORKER_VERSION = "0.9.0"' in self._src()
+        assert 'WORKER_VERSION = "0.9.1"' in self._src()
 
     def test_applies_emitter_block(self):
         src = self._src()

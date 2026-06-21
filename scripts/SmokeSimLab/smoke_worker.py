@@ -15,7 +15,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.9.0"
+WORKER_VERSION = "0.9.1"
 
 import bpy
 import sys
@@ -287,7 +287,7 @@ def enable_gpu_rendering(scene):
     return False
 
 
-def setup_eevee(scene):
+def setup_eevee(scene, samples=64):
     """
     Switch to EEVEE for rendering.  Returns True if EEVEE is available,
     False if it falls back to Cycles CPU.
@@ -295,15 +295,24 @@ def setup_eevee(scene):
     EEVEE requires an OpenGL context which is not available in --background
     mode.  This function is provided for windowed mode use (no --background).
     In background mode use setup_cycles() instead.
+
+    BUG-016: applies the per-job sample count to `taa_render_samples` (the
+    final-frame sample property used by both EEVEE and EEVEE Next).  Without
+    this the render silently used whatever sample count was saved in the
+    .blend, ignoring the exported per-job render_samples (which was still
+    logged as if applied — a silent data lie that also invalidates the
+    TODO-51 samples calibration).
     """
     available = scene.render.bl_rna.properties['engine'].enum_items.keys()
     if 'BLENDER_EEVEE_NEXT' in available:
         scene.render.engine = 'BLENDER_EEVEE_NEXT'
-        _log("  Render engine: EEVEE Next")
+        scene.eevee.taa_render_samples = samples
+        _log(f"  Render engine: EEVEE Next ({samples} samples)")
         return True
     elif 'BLENDER_EEVEE' in available:
         scene.render.engine = 'BLENDER_EEVEE'
-        _log("  Render engine: EEVEE")
+        scene.eevee.taa_render_samples = samples
+        _log(f"  Render engine: EEVEE ({samples} samples)")
         return True
     _log("  EEVEE not available — falling back to Cycles")
     return False
@@ -1188,7 +1197,7 @@ else:
 
     os.makedirs(effective_frames_dir, exist_ok=True)
     if render_mode == "EEVEE":
-        setup_eevee(scene)
+        setup_eevee(scene, samples=render_samples)
     else:
         setup_cycles(scene, samples=render_samples)
     scene.render.image_settings.file_format = "PNG"
@@ -1286,7 +1295,7 @@ else:
     if not _can_copy:
         if render_mode == "EEVEE":
             # EEVEE — only works in windowed mode (no --background)
-            if not setup_eevee(scene):
+            if not setup_eevee(scene, samples=render_samples):
                 setup_cycles(scene, samples=render_samples)
         else:
             # Cycles GPU — default, works in background mode

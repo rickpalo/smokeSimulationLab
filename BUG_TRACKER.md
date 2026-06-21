@@ -18,7 +18,7 @@ new attempt is appended under the same issue.
 
 ## BUG-001: Job Log Rows Go Blank
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.19 — stable icons + Unicode prefix + alert)  
+**Status:** `CONFIRMED FIXED` (v0.2.19 — stable icons + Unicode prefix + alert; user-verified 2026-06-20 across many production batches through v0.9.0)  
 **TODOS:** TODO-5, TODO-17, TODO-21  
 **Files:** `__init__.py` — `SMOKE_UL_job_log.draw_item`, `_update_job_log_statuses`
 
@@ -266,7 +266,7 @@ and the batch silently continues (or hangs).
 
 ## BUG-003: Render Progress Bar Stuck at 0
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.19 — mtime-based counting)  
+**Status:** `CONFIRMED FIXED` (v0.2.19 — mtime-based counting; user-verified 2026-06-20 across many production batches through v0.9.0)  
 **TODOS:** TODO-19  
 **Files:** `__init__.py` — `_poll_batch_progress_impl`, `_count_png_frames`
 
@@ -333,7 +333,7 @@ unchanged; baseline subtraction gives 0 forever.  Both cases now handled by the
 
 ## BUG-004: baked_frames = 0 Despite data_files = 1000
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.2.15)  
+**Status:** `CONFIRMED FIXED` (v0.2.15; user-verified 2026-06-20 across many production batches through v0.9.0)  
 **Files:** `smoke_worker.py` — bake decision block, post-bake verification block
 
 ### Symptoms
@@ -810,7 +810,7 @@ counter drops by 1 when the crash happens (instead of staying at 13/13).
 
 ## BUG-013: slow=False jobs inherit slow=True caches (v0.6.0 TODO-39 backwards-compat collision)
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.6.2 — make_name uses -Slow/-Fast explicitly)
+**Status:** `CONFIRMED FIXED` (v0.6.2 — make_name uses -Slow/-Fast explicitly; user-verified 2026-06-20 across many production batches through v0.9.0)
 **Files:** `__init__.py` — `make_name()` (~line 660)
 **Filed:** 2026-06-01 from user observation in 13-job batch
 **Resolved:** 2026-06-02 — option (B) implemented per the recommended approach
@@ -877,7 +877,7 @@ actually slow=True.  Or use `use_existing_cache=False` to force re-bake.
 
 ## BUG-012: Failed Jobs Counted as "Done" in Live Progress Display
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.6.0)
+**Status:** `CONFIRMED FIXED` (v0.6.0; user-verified 2026-06-20 across many production batches through v0.9.0)
 **Files:** `__init__.py` — `_poll_batch_progress_impl` done-count block
 
 ### Symptoms
@@ -930,7 +930,7 @@ with F = number of failed jobs; clean batches show only `(N done)`.
 
 ## BUG-015: N-Panel Body Blank After Remote Extension Install (bl_info NameError)
 
-**Status:** `DEPLOYED / UNVERIFIED` (v0.9.1)
+**Status:** `CONFIRMED FIXED` (v0.9.1; user-verified 2026-06-20 on remote extension install)
 **Files:** `__init__.py` — `SMOKE_PT_panel.draw`
 
 ### Symptoms
@@ -971,6 +971,51 @@ add-on installs.
 ### Verification
 Install the v0.9.1 extension from the remote repo, open Sidebar → BatchLab,
 and confirm the full panel body renders with `BatchSimLab v0.9.1` at the top.
+
+---
+
+## BUG-016: EEVEE Renders Ignore Per-Job render_samples (used .blend value)
+
+**Status:** `DEPLOYED / UNVERIFIED` (v0.9.2 — fixed in worker 0.9.1)
+**Files:** `smoke_worker.py` — `setup_eevee()` + its two render-path call sites
+
+### Symptoms
+Found by inspection (2026-06-20) while answering "do samples get saved with the
+job export?" `render_samples` is frozen per-job at export (`__init__.py` job_data
+`"render_samples": s.render_samples`) and read by the worker, but EEVEE renders
+used whatever sample count was saved in the **.blend**, not the exported value.
+Worst part: the per-job value was still written to `perf_log.json`/`results.csv`
+as if applied — a silent data lie.
+
+### Root Cause
+`setup_eevee(scene)` only switched the render engine; it never set
+`scene.eevee.taa_render_samples`.  `setup_cycles(scene, samples=...)` correctly
+applied `scene.cycles.samples`, so Cycles respected the per-job value but EEVEE
+did not.  The two EEVEE render-path call sites passed no sample count.
+
+### Impact
+Directly invalidated the TODO-51 EEVEE samples calibration: every "different
+samples" EEVEE job would render identically while the log claimed they differed,
+so the model would be fit on fabricated variance.  Fixed *before* running that
+sweep.
+
+### Fix (worker 0.9.1 / addon v0.9.2)
+`setup_eevee(scene, samples=64)` now sets `scene.eevee.taa_render_samples =
+samples` in both the EEVEE Next and legacy EEVEE branches (the property both
+engines use for final-frame samples).  Both render-path call sites now pass
+`samples=render_samples`, mirroring `setup_cycles`.
+
+### Tests Added
+`tests/test_bug016_eevee_samples.TestBug016EeveeSamples` — 3 source-inspection
+tests (setup_eevee needs a live bpy/EEVEE context to run):
+- `setup_eevee` accepts a `samples` parameter
+- `taa_render_samples = samples` set in both EEVEE branches
+- no bare `setup_eevee(scene)` call remains; render path forwards `render_samples`
+
+### Verification
+Run two EEVEE jobs with different samples (e.g. 2 and 64) over the same scene and
+confirm render times/quality differ and `perf_log.json` render times track the
+sample count (this is also the TODO-51 samples sweep).
 
 ---
 
