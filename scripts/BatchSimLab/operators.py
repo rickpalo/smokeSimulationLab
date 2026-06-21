@@ -35,11 +35,12 @@ from .jobgen import (
     ITERABLE_PARAMS,
     expand_param,
     generate_jobs,
+    _dedupe_jobs,
     make_name,
     _VELOCITY_DEFAULT,
     _format_velocity_vector,
 )
-from .emitters import _populate_emitters
+from .emitters import _populate_emitters, _blend_domain_resolution
 from .settings_io import _settings_dict, _load_settings_from_path
 
 

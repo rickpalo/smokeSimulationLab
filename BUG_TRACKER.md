@@ -1074,5 +1074,99 @@ mismatch" warning appears when the installed addon matches the exported files.
 
 ---
 
+## BUG-018: Editing a bounded sweep List value crashes Blender (stack overflow, no log)
+
+**Status:** `FIXED` (v0.9.6) — reproduced + fixed + verified in real Blender 5.1
+**Files:** `properties.py` — `ValueItem._clamp_value`
+
+### Symptoms
+User set a **List** value for **Buoyancy Heat** to `0.1` — Blender closed instantly,
+every time (3/3).  No crash log, no `.crash.txt`, no Python traceback.  Entering
+`0.1` directly in the Buoyancy Heat *Range* (`_begin`) field worked fine.
+
+### Root cause
+`ValueItem.value` is a `FloatProperty(update=_clamp_value)`, and `_clamp_value`
+assigned `self.value` **unconditionally**:
+```python
+if lo < hi:
+    self.value = max(lo, min(hi, self.value))   # writes value from value's own update cb
+```
+Writing a property inside its own update callback re-fires the callback.  With the
+old code the rewrite happened even when the value was already in range (the clamp
+returns the same number), so it recursed forever → **C stack overflow**, which
+takes down the process hard with no Python traceback and no crash log.
+
+It only bit params whose bounds give `lo < hi` — `_PARAM_BOUNDS` Buoyancy Heat
+(`beta` = -5..5), Buoyancy Density (`alpha`), `cfl_number`, `timesteps_*`, and the
+fire params.  Params with effective `(0,0)` bounds (vorticity, dissolve_speed, …)
+never enter the assignment branch, so List mode there never crashed — which is why
+it went unnoticed.  **Adding** a value didn't crash because `SMOKE_OT_add_value`
+sets `value` *before* `min_bound`/`max_bound` (still 0/0 at that point); the crash
+only fired on the later edit, once the bounds were -5/5.
+
+Reproduced headlessly (Blender 5.1, `--background`): adding a `beta_list` item with
+`min_bound=-5, max_bound=5` then `item.value = 0.1` → `EXCEPTION_STACK_OVERFLOW`,
+exit 127, no `AFTER_SET`.
+
+### Fix (v0.9.6)
+Compute the clamp, then write **only when it actually changes**:
+```python
+if lo < hi:        clamped = max(lo, min(hi, self.value))
+elif lo > 0 and self.value < lo:   clamped = lo
+else:              return
+if clamped != self.value:
+    self.value = clamped
+```
+An in-range edit is now a no-op (no re-fire); an out-of-range edit clamps exactly
+once (the corrected value is in range, so its single re-fire is itself a no-op).
+Same headless repro after the fix: `0.1`→0.1, `9.0`→5.0, `-9.0`→-5.0, exit 0.
+
+### Tests
+`test_properties_module.py` — a write-counting `_ClampTracker` stub asserts an
+in-range value produces **zero** writes (the recursion guard), out-of-range exactly
+one, `(0,0)` bounds never write, and min-only bounds clamp below / no-op at-or-above.
+(Addon-only — worker/launcher unchanged, no re-export.)
+
+---
+
+## BUG-019: Export Batch crashes with NameError (`_dedupe_jobs` not defined) — 0.9.5 regression
+
+**Status:** `FIXED` (v0.9.6) — regression from the TODO-58 package split (0.9.5)
+**Files:** `operators.py` — imports
+
+### Symptoms
+`line 507 in operators.py  NameError: '_dedupe_jobs' is not defined` when running
+Export Batch.  Export Batch was **completely broken in 0.9.5** for every user.
+
+### Root cause
+The TODO-58 split (v0.9.5) moved `export_batch` from `__init__.py` into
+`operators.py` (module #6).  In `__init__` those helpers were resolved via the
+package-level re-imports; in the new module they must be imported explicitly.
+`operators.py` imported most of what `export_batch` uses but missed **two**:
+`_dedupe_jobs` (jobgen) and `_blend_domain_resolution` (emitters).
+
+Why the gates missed it: the pytest suite stubs `bpy` and the real-Blender REGISTER
+smoke-test only *imports* the package — neither calls `export_batch`'s body, so the
+NameError only surfaced at Export time in production.  I ran an AST unbound-name
+analysis on engine.py (module #6b) which caught its analogous misses, but did NOT
+run it on operators.py (#6).
+
+### Fix (v0.9.6)
+Add the two missing imports to `operators.py`:
+`from .jobgen import …, _dedupe_jobs` and
+`from .emitters import _populate_emitters, _blend_domain_resolution`.
+Verified end-to-end headlessly (Blender 5.1): a real fluid-domain export of a
+2-job resolution sweep wrote both job JSONs + `run_smoke_batch.bat` + copied
+`smoke_worker.py`, exit 0.
+
+### Tests (prevents the whole class going forward)
+New `tests/test_no_unbound_names.py` runs the AST unbound-name analysis on every
+addon-package module and fails on any name used-but-bound-nowhere — i.e. exactly
+this missing-import class, which the bpy-stubbed suite and the REGISTER smoke-test
+cannot catch.  Would have flagged both `export_batch` misses (and the engine.py
+ones).  Addon-only — worker/launcher unchanged, no re-export.
+
+---
+
 *Document created 2026-05-11.  Append new attempts to existing issues rather than
 creating duplicate entries.*

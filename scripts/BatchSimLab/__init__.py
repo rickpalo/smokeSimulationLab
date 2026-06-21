@@ -67,7 +67,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "BatchSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 9, 5),
+    "version":     (0, 9, 6),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > BatchLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging "

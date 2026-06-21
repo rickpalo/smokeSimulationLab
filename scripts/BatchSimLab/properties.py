@@ -194,11 +194,24 @@ class ValueItem(bpy.types.PropertyGroup):
     are clamped automatically on edit.  0/0 means no limit active.
     """
     def _clamp_value(self, context):
+        # BUG-018: this is the update callback for `value`, so assigning self.value
+        # re-fires it.  Writing UNCONDITIONALLY (even to the same number) recurses
+        # until the C stack overflows — Blender vanishes with no Python traceback or
+        # crash log.  It bit any param whose bounds give lo < hi (e.g. Buoyancy Heat
+        # / beta, alpha, cfl_number, timesteps, fire params) the moment an in-range
+        # list value was edited.  Fix: compute the clamp, then write ONLY when it
+        # actually changes — an in-range edit becomes a no-op (no re-fire), and an
+        # out-of-range edit clamps exactly once (the corrected value is in range, so
+        # the single re-fire is itself a no-op).
         lo, hi = self.min_bound, self.max_bound
         if lo < hi:
-            self.value = max(lo, min(hi, self.value))
+            clamped = max(lo, min(hi, self.value))
         elif lo > 0 and self.value < lo:
-            self.value = lo
+            clamped = lo
+        else:
+            return
+        if clamped != self.value:
+            self.value = clamped
 
     value:     bpy.props.FloatProperty(update=_clamp_value)
     int_value: bpy.props.IntProperty()

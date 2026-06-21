@@ -153,3 +153,67 @@ def test_domain_import_map_shape(properties):
     assert m["resolution_max"] == "resolution"
     assert m["noise_scale"] == "noise_upres"
     assert m["cfl_condition"] == "cfl_number"
+
+
+class _ClampTracker:
+    """Stub ValueItem that counts writes to `value`.  `_clamp_value` is the update
+    callback for `value`, so in real Blender each write re-fires it — a write to an
+    already-in-range value recurses to a C stack overflow (BUG-018).  Counting
+    writes lets us assert the fix without a live RNA loop: an in-range value must
+    produce ZERO writes (no re-fire), an out-of-range value exactly ONE."""
+    def __init__(self, value, lo, hi):
+        self._v = value
+        self.min_bound = lo
+        self.max_bound = hi
+        self.writes = 0
+
+    @property
+    def value(self):
+        return self._v
+
+    @value.setter
+    def value(self, x):
+        self.writes += 1
+        self._v = x
+
+
+def test_clamp_in_range_does_not_rewrite(properties):
+    """BUG-018 regression: editing a list value that is already within bounds must
+    NOT reassign `value` (that re-fires the update callback → infinite recursion →
+    Blender stack-overflow crash with no log)."""
+    t = _ClampTracker(0.1, -5.0, 5.0)   # Buoyancy Heat (beta) bounds; 0.1 in range
+    properties.ValueItem._clamp_value(t, None)
+    assert t.writes == 0, "in-range edit must not rewrite value (recursion guard)"
+    assert t.value == 0.1
+
+
+def test_clamp_out_of_range_writes_once(properties):
+    """An out-of-range value clamps with exactly one write (the clamped value is in
+    range, so the single re-fire it causes is itself a no-op)."""
+    hi = _ClampTracker(9.0, -5.0, 5.0)
+    properties.ValueItem._clamp_value(hi, None)
+    assert hi.writes == 1 and hi.value == 5.0
+
+    lo = _ClampTracker(-9.0, -5.0, 5.0)
+    properties.ValueItem._clamp_value(lo, None)
+    assert lo.writes == 1 and lo.value == -5.0
+
+
+def test_clamp_no_bounds_is_noop(properties):
+    """0/0 bounds (no limit active) must never write — vorticity/dissolve_speed
+    style params that never enter the clamp branch."""
+    t = _ClampTracker(123.0, 0.0, 0.0)
+    properties.ValueItem._clamp_value(t, None)
+    assert t.writes == 0 and t.value == 123.0
+
+
+def test_clamp_min_only_clamps_below(properties):
+    """min-only bound (e.g. resolution lo=8, hi=0): below-min clamps up once; at/above
+    is a no-op."""
+    below = _ClampTracker(3.0, 8.0, 0.0)
+    properties.ValueItem._clamp_value(below, None)
+    assert below.writes == 1 and below.value == 8.0
+
+    ok = _ClampTracker(64.0, 8.0, 0.0)
+    properties.ValueItem._clamp_value(ok, None)
+    assert ok.writes == 0 and ok.value == 64.0
