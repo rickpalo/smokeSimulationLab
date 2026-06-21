@@ -23,11 +23,13 @@ from BatchSimLab import (
 )
 
 
+from addon_src import read_addon_source
+
+
 def _addon_src():
-    p = os.path.join(os.path.dirname(__file__), "..", "scripts", "BatchSimLab",
-                     "__init__.py")
-    with open(p, encoding="utf-8") as fh:
-        return fh.read()
+    # TODO-58: the SmokeSettings props these tests assert on now live in
+    # properties.py — read the whole addon package.
+    return read_addon_source()
 
 
 def _worker_src():

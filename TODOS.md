@@ -28,7 +28,7 @@ Repo is source of truth — verify line refs against current code before acting.
 | TODO-61 | Finish the BatchSimLab rename — remaining `SmokeSimLab`/`smoke_*` names | OPEN | — |
 | TODO-56 | Docs overhaul — README/DOCUMENTATION split, fix CSV/install/features/screenshot | MOSTLY DONE (v0.9.4) — hero screenshot recapture remains | — |
 | TODO-57 | Declarative `PARAM_SPECS` registry (kills shotgun-surgery + positional `combo[N]`) | OPEN | — |
-| TODO-58 | Split 6.1k-line `__init__.py` into a package | OPEN | — |
+| TODO-58 | Split 6.1k-line `__init__.py` into a package | IN PROGRESS — modules #1 `jobgen` + #2 `emitters` + #3 `settings_io` + #4 `progress` + #5 `properties` + #6 `operators` + #6b `engine` (run/poll) extracted; `__init__` 6207→1429 ln; remaining: #7 `ui` (panel + UILists) | — |
 | TODO-59 | Decompose `_poll_batch_progress_impl` + finish `draw()` section helpers | OPEN (started — `_estimate_batch_remaining` extracted v0.9.4) | — |
 | TODO-60 | Cleanup — extract `_with_slow_companion`/`_first_value`; archive `rename_to_v0_7_1.py` | PARTIAL (v0.9.4 — `_first_value` done) | — |
 | TODO-62 | Job Log header shows worker version (+ caution icon if ≠ expected) when jobs exist | OPEN | — |
@@ -343,7 +343,293 @@ Natural to pair with TODO-58. Add tests proving job-gen output is unchanged.
 
 ---
 
-## TODO-58: Split the 6.1k-line `__init__.py` into a package — **OPEN (groundwork done)**
+## TODO-58: Split the 6.1k-line `__init__.py` into a package — **IN PROGRESS (modules #1–4 done, UNCOMMITTED)**
+
+**Module #1 `jobgen.py` EXTRACTED (this session, no behaviour change):** the pure,
+`bpy`-free job-gen cluster moved to `scripts/BatchSimLab/jobgen.py` (779 ln) —
+`ITERABLE_PARAMS`, the `expand_param`→`make_name` block, the emitter job-gen
+helpers, plus the two pure velocity-text deps it needed (`_VELOCITY_DEFAULT`,
+`_parse_velocity_vector`; the inverse `_format_velocity_vector` + UI
+`_VELOCITY_FORMAT_HINT` stayed). `__init__.py` 6207→5486 ln; re-imports all 23
+names from `.jobgen` so `from BatchSimLab import …` + the ~209 job-gen tests
+resolve unchanged. Now-unused `import copy`/`import itertools` dropped from
+`__init__`. Gate passed: **689 pytest** (was 618 + 71 new in `test_jobgen_module.py`,
+which locks the re-export contract: each name lives in `jobgen` AND is the same
+object on the package) **+ REGISTER_OK/UNREGISTER_OK** in real Blender 5.1.
+**Module #2 `emitters.py` EXTRACTED (this session):** the fluid-emitter
+discovery + sync cluster moved to `scripts/BatchSimLab/emitters.py` (238 ln) —
+`_blend_domain_resolution`, the discovery chain (`_is_flow_object`,
+`find_fluid_emitters`, `_world_aabb`, `_aabb_overlap`, `emitters_inside_domain`,
+`find_emitters`), and the sync side (`_emitter_sync_plan`, `_EMITTER_FLOW_IMPORT_MAP`,
+`_flow_settings_of`, `_seed_emitter_from_flow`, `_populate_emitters`).  Turned out
+to be pure too (every helper is duck-typed on its scene/object/settings args — no
+`bpy.` calls), so it stays unit-testable.  To break the one cross-dep
+(`_seed_emitter_from_flow` needs the velocity-text helpers), `_format_velocity_vector`
+was also moved into `jobgen.py` alongside `_VELOCITY_DEFAULT`/`_parse_velocity_vector`;
+`emitters.py` imports those from the leaf `jobgen` (no cycle).  The UI-only
+`_VELOCITY_FORMAT_HINT` stayed in `__init__`.  `__init__.py` now 5486→5277 ln;
+re-imports all 12 emitter names + `_format_velocity_vector`.  Gate: **732 pytest**
+(+43 in `test_emitters_module.py`, incl. a stub-scene `find_emitters` end-to-end +
+the same-object re-export contract) **+ REGISTER_OK/UNREGISTER_OK**.
+
+**Module #3 `settings_io.py` EXTRACTED (this session):** the `.smokesettings`
+preset save/load cluster moved to `scripts/BatchSimLab/settings_io.py` (192 ln) —
+`_SWEEP_PARAMS` (moved, used only by this cluster + tests), `_settings_dict`,
+`_apply_settings_dict`, `_load_settings_from_path`, `_is_settings_dirty`, the
+`_SETTINGS_ENUM_SENTINEL` + `_settings_items_cache` constants, and the two dynamic
+preset-dropdown callbacks `_settings_files_enum_items` / `_on_settings_enum_update`.
+**First bpy-touching module** (the enum callbacks call `bpy.path.abspath`), so it
+imports `bpy`/`json`/`os`; conftest stubs `bpy.path.abspath` for pytest, the
+REGISTER gate covers real Blender. No dep on jobgen/emitters (near-leaf). The
+registration-order gotcha held: the two callbacks are referenced at CLASS-BODY
+level in `SmokeSettings` (`items=…`/`update=…`), and the `from .settings_io import …`
+re-import sits ABOVE the class defs, so it's covered. `__init__.py` 5277→5131 ln;
+re-imports all 9 names. `json` stays (still used elsewhere in `__init__`). Gate:
+**762 pytest** (+30 in `test_settings_io_module.py`: defined-in-module + same-object
+re-export contract + a snapshot→apply round-trip through the package) **+
+REGISTER_OK/UNREGISTER_OK** in real Blender 5.1.
+
+**Module #4 `progress.py` EXTRACTED (this session) — only the PURE half.** The
+risk with progress was that the poll engine shares *rebindable* module globals
+(`_last_auto_index`, `_auto_retry_count`, `_job_log_rows`, `_job_statuses`,
+`_batch_times`, `_estim`, `_poll_state`) with operators/load-handlers that stay in
+`__init__`; a `global X; X = …` rebind from `__init__` against a variable that
+*lived* in `progress` would split the binding across two modules and silently
+diverge. So the split drew the line at purity: `scripts/BatchSimLab/progress.py`
+(382 ln) got the 8 stateless helpers that take all inputs as args and rebind
+nothing — `_find_running_log`, `_count_vdb_frames`, `_count_png_frames`,
+`_format_eta`, `_estimate_batch_remaining`, `_format_elapsed`, `_has_error`,
+`_compute_batch_summary` — plus the constants they own (`_SETUP_SECS_DEFAULT`,
+`_STILL_SECS_DEFAULT`, the unphased sentinel regexes `_DONE_RE`/`_RETRY_DONE_RE`/
+`_CRASHED_RE`, `_LOG_DONE_MARKERS`). Pure / bpy-free (imports only `json`/`os`/`re`);
+no dep on the other modules. **LEFT in `__init__` on purpose:** `_poll_batch_progress`
+/ `_poll_batch_progress_impl`, `_update_job_log_statuses`, `_redraw_panels`, the
+`_bt*`/`_estim*` helpers, and ALL the rebindable globals above (kept with the
+phased `_BAKE_DONE_RE`/`_RENDER_DONE_RE` regexes that only the engine uses). The
+functions were non-contiguous (`_update_job_log_statuses` interleaves) + constants
+scattered (L212/447/2252), so extraction was surgical (`sed -n` two ranges out,
+`sed -i '…d'` four ranges deleted). `__init__.py` 5131→4813 ln; re-imports all 14
+names. `re`/`json`/`os` all still used in `__init__`. Gate: **810 pytest** (+48 in
+`test_progress_module.py`: defined-in-module + same-object re-export + a guard that
+the stateful engine/globals did NOT leak here + format/estimate/find-log behaviour)
+**+ REGISTER_OK/UNREGISTER_OK** in real Blender 5.1.
+
+**Module #5 `properties.py` EXTRACTED (this session) — the highest-register-risk
+module, gated clean.** The five `bpy.props` PropertyGroups moved to
+`scripts/BatchSimLab/properties.py` (1002 ln) — `ValueItem` (+ nested
+`_clamp_value`), `VelocityItem`, `EmitterSettings`, `SmokeJobItem`, and the
+~650-line `SmokeSettings` monster — together with the class-body callback
+factories/helpers they wire up: `make_toggle_range`/`make_toggle_list`,
+`_sync_frame_defaults`, `_import_domain_params` (+ its `_DOMAIN_IMPORT_MAP`), and
+`_on_render_sim_result_update`. **Cycle resolved as predicted:** moving
+`_on_render_sim_result_update` (a pure SmokeSettings toggle-clear callback) into
+properties.py avoided properties→`__init__` import. The module imports `bpy`,
+`_populate_emitters` (from `.emitters`), and `_settings_files_enum_items` /
+`_on_settings_enum_update` (from `.settings_io`) — both one-way leaves, no cycle.
+**INTERLEAVING handled:** the two UIList classes that sit physically between the
+PropertyGroups (`SMOKE_UL_value_list`, `SMOKE_UL_job_log`) are UI → LEFT in
+`__init__` (→ #7); extraction was the non-contiguous PropertyGroup ranges around
+them (one defensive Python script, boundary-asserted). `classes=[…]` + `register()`
+stay in `__init__`; the new `from .properties import (…11 names…)` re-import sits
+ABOVE them. `__init__.py` 4813→3868 ln; re-imports all 11 names.
+
+**Source-text test infra change (new this module, per user decision "read whole
+package"):** seven source-grep regression assertions read `__init__.py` and assert
+on now-moved property/helper defs. Added `tests/addon_src.py::read_addon_source()`
+— concatenates every addon-package `*.py` (EXCLUDES `smoke_worker.py` /
+`smoke_launcher.py`, which are separate deployables tested via their own readers) —
+and repointed the three broken helpers (`test_todo44_sections._addon_src`,
+`test_todo55_emitters._src`, `test_v070_param_expansion._addon_src`) at it. The
+other `__init__`-only source readers (jobgen re-export contract, bl_info doc-URL
+checks, AST version-stamp parsing) were LEFT as-is; convert the next ones to
+`read_addon_source()` in #6/#7 *as their targets actually move* (re-verifying each
+`... not in src` / version assertion). Gate: **851 pytest** (+41 in
+`test_properties_module.py`: defined-in-module + same-object re-export + a guard
+the UILists/panel did NOT leak here + make_toggle/sync-frames/render-toggle/
+domain-import behaviour) **+ REGISTER_OK/UNREGISTER_OK** in real Blender 5.1.
+
+**Module #6 `operators.py` EXTRACTED (this session) — Tiers 1+2 only (per user
+decision).** Moved the operators that DON'T touch the run/poll engine, into
+`scripts/BatchSimLab/operators.py` (899 ln): `SMOKE_OT_export_batch` +
+`export_batch()` + its 6 pure export helpers (`_scene_has_camera`,
+`_find_next_job_index`, `_existing_jobs_for_bat`, `_job_run_cmd`, `_job_bat_block`,
+`_batch_ready`), `_PARAM_BOUNDS`, the preset `save_settings`/`load_settings`, the
+value `add/remove` ops + `_next_list_value`, the emitter `refresh`/`add`/`remove`
+value+velocity ops + `_emitter_of`, and `open_docs`. Imports are one-way leaves
+(`.jobgen`/`.emitters`/`.settings_io`); operators.py NEVER imports `__init__` at
+module scope. **The few `__init__`-resident names export/open_docs need** —
+`_job_log_rows`, `_job_statuses` (in-place mutate only, never rebound), `_debug_log`,
+`ADDON_VERSION`, `DOCS_URL` — are pulled via a **function-local deferred import**
+(`from . import …`) to avoid an operators→`__init__` cycle. `__init__.py` 3868→3052
+ln; re-imports all 21 moved names.
+
+**⚠ EXTRACTION GOTCHA (fixed, note for #6b/#7):** a `^def ` grep HID three classes
+(`SMOKE_UL_value_list`, `SMOKE_UL_job_log`, `SmokeSimLabPreferences`) sitting
+*between* `export_batch()` and `class SMOKE_OT_export_batch` — they got swept into
+the export_batch range and wrongly moved. Boundary asserts (which only check the
+ENDS of a range) passed anyway. Caught by the register/import gate (NameError +
+`SmokeSimLabPreferences.bl_idname = __name__` must = package name). Fixed forward
+(moved them back to `__init__`). **Lesson: map ranges against `^class|^def`
+TOGETHER, and assert NO unexpected `class `/`def ` appears INSIDE each moving
+range, not just at its boundaries.**
+
+**STILL in `__init__` (Tier 3 — the cohesive run/poll engine):** `SMOKE_OT_run_batch`
+/ `retry_failed` / `monitor_existing_jobs` / `remove_all_jobs` / `setup_results` /
+`reset_to_defaults`, the poll loop (`_poll_batch_progress*`, `_update_job_log_statuses`,
+`_redraw_panels`, `_bt*`/`_estim*`/`_debug_log`), the rebindable scalars
+`_last_auto_index`/`_auto_retry_count` + in-place state `_job_log_rows`/`_job_statuses`/
+`_batch_times`/`_estim`/`_poll_state`, `_batch_is_running`, the load handlers, the 3
+UILists, `SmokeSimLabPreferences`. Gate: **924 pytest** (+73 in
+`test_operators_module.py`: defined-in-module + same-object re-export + guards that
+the engine/UILists/Prefs did NOT leak here, that the rebindable state is NOT an
+operators module-global, and that the deferred-import targets stay reachable) **+
+REGISTER_OK/UNREGISTER_OK** in real Blender 5.1. Also converted `test_camera_check`'s
+two `_src()` readers to `read_addon_source()` (export wiring moved).
+
+**Module #6b `engine.py` EXTRACTED (this session) — the stateful run/poll engine.**
+Moved the Tier-3 cluster into `scripts/BatchSimLab/engine.py` (1723 ln): the poller
+(`_poll_batch_progress`/`_impl`), `_update_job_log_statuses`, the `_bt*` timing +
+`_estim*` estimate-logging helpers, `_debug_log`, `_redraw_panels`, `_should_auto_retry`,
+the phased regexes `_BAKE_DONE_RE`/`_RENDER_DONE_RE`, `_STAGES`/`_TOTAL_SUBTASKS`,
+`_batch_is_running`, the bake/render RATE constants, the in-place state
+(`_job_statuses`/`_job_log_rows`/`_batch_times`/`_estim`/`_poll_state`), the rebindable
+scalars (`_last_auto_index`/`_auto_retry_count`), and the 6 run operators
+(run_batch/retry_failed/setup_results/remove_all_jobs/monitor/reset_to_defaults) +
+`_auto_retry_deferred`/`_setup_results_deferred`. **No container refactor needed:**
+every rebinder of the two scalars moved together, so `global` stays valid within
+engine.py; the staying load handlers only mutate `_job_*` IN PLACE (works through the
+re-import). Imports `from .progress` (pure helpers) + `from .operators import
+_scene_has_camera`; NEVER imports `__init__` at module scope. **Deferred (function-local)
+`from . import …`** for the 5 `__init__`-resident names engine reaches: `ADDON_VERSION`
+(in `_estim_log`), `_read_helper_version`+`_EXPECTED_*` (in run_batch), `_reset_on_load`
+(in reset_to_defaults). The 2 rebindable scalars are engine-owned but **NOT re-exported**
+(a re-imported int is a stale snapshot; nothing outside engine reads them — verified).
+
+**KEY SAFETY STEP (do this for #7 too):** pytest+REGISTER do NOT call the run operators,
+so a missing import inside an engine *function* would NOT be caught. Ran an **AST
+unbound-name analysis** (collect every `Name(Load)` minus all bound names minus builtins)
+on engine.py → caught 11 real misses the gates missed: `import math`, the 5 RATE
+constants (engine-only — moved in), and the 5 deferred-import targets. Re-ran until
+clean. `__init__.py` 3052→1429 ln. Gate: **1036 pytest** (+112 in `test_engine_module.py`:
+same-object re-export contract, UI-didn't-leak guard, scalars-not-re-exported guard,
+deferred-target reachability, `_should_auto_retry`/`_bt` behaviour, and a real
+`_estim_log`→ADDON_VERSION deferred-import exercise) **+ REGISTER_OK/UNREGISTER_OK** in
+real Blender 5.1. Also converted `test_v060_fixes._addon_src` to `read_addon_source()`.
+
+### ▶ RESUME POINT (fresh session) — LAST module: #7 `ui.py`
+
+**Baseline now = 1036 pytest + REGISTER_OK/UNREGISTER_OK.** Modules #1–6b complete,
+gated green, still UNCOMMITTED (per user: ONE commit at the very END of the split, off a
+branch — `main` is the current branch). Working-tree files that must NOT be lost: new
+`scripts/BatchSimLab/{jobgen,emitters,settings_io,progress,properties,operators,engine}.py`,
+`tests/{addon_src.py,test_*_module.py ×7}`; modified `scripts/BatchSimLab/__init__.py`,
+`TODOS.md`, five repointed source-grep tests (`test_todo44_sections`, `test_todo55_emitters`,
+`test_v070_param_expansion`, `test_camera_check`, `test_v060_fixes`). Don't
+`git stash`/`reset`/`checkout` these.
+
+**#7 `ui.py` (LAST) — checkpoint with user.** Move: the panel `SMOKE_PT_panel` + the
+`_*_ui` draw helpers (`_sub_param_ui`/`_settings_ui`/`_standalone_param_ui`/`_gas_ui`/
+`_noise_ui`/`_fire_ui`/`_emitter_sub_param_ui`/`_emitter_velocity_ui`/`_emitters_ui`),
+the 3 UILists (`SMOKE_UL_value_list`/`SMOKE_UL_job_log`/`SMOKE_UL_velocity_list`), the
+UI-only `_VELOCITY_FORMAT_HINT`, and the panel-private helpers (`_progress_active`/
+`_effective_show_progress` if they exist). The panel is heavily source-tested but the
+readers already read the whole package (`read_addon_source`), so re-export covers. Panel
+draw reads `ADDON_VERSION`/`_batch_is_running`/`_batch_ready`/`generate_jobs`/
+`noise_grid_exceeds_ceiling`/`_job_log_rows`/`_job_statuses`/the `_*_ui` helpers — trace
+each (ui.py→__init__ for ADDON_VERSION = deferred import; the rest are
+jobgen/operators/engine, import direct). **STILL apply: AST unbound-name analysis on
+ui.py before gating**, and assert no stray non-UI `class`/`def` in moving ranges.
+SmokeSimLabPreferences + the load handlers + register/metadata STAY in `__init__`.
+
+Then `__init__` keeps only register/handlers/metadata. Final step: ONE commit on a new
+branch. **Follow the proven methodology below.**
+
+#### Historical pre-map for #5 (now DONE — kept for methodology reference)
+
+#### Historical pre-map for #5 (now DONE — kept for methodology reference)
+
+
+
+**STATE OF THE TREE — READ FIRST.** Modules #1–4 are **complete, gated green, and
+UNCOMMITTED** (per user: one single commit at the very END of the whole split, off
+a branch — `main` is the current branch). Uncommitted working-tree files that must
+NOT be lost: new `scripts/BatchSimLab/{jobgen,emitters,settings_io,progress}.py`,
+`tests/test_{jobgen,emitters,settings_io,progress}_module.py`; modified
+`scripts/BatchSimLab/__init__.py`, `TODOS.md`. Don't `git stash`/`reset`/`checkout`
+these. Re-confirm green before starting #5 (baseline = **810 pytest +
+REGISTER_OK/UNREGISTER_OK**).
+
+**The proven methodology (repeat for every remaining module):**
+1. Map the cluster's CURRENT line numbers (they shift after each extraction).
+2. Trace deps BOTH ways: external names the cluster references (→ must import or
+   move) and cluster names referenced elsewhere/in tests (→ must re-export). Grep
+   tests for `monkeypatch`/`mock.patch` of the names (none so far — keep checking).
+   **For #5+ also trace rebindable module globals** (`global X; X = …`): if a global
+   is rebound from BOTH the moving cluster and code staying in `__init__`, the
+   *variable* must NOT move (see #4 — split the binding = silent divergence). Move
+   only the pure / read-or-in-place-mutate surface; keep rebound state put.
+3. Write `<mod>.py` (header + imports), append the exact block via
+   `sed -n 'A,Bp' __init__.py >> <mod>.py` for fidelity (a linter may reflow — fine).
+4. In `__init__.py`: add an explicit `from .<mod> import (…ALL names…)` at the TOP
+   import block, then delete the original defs (`sed -i 'A,Bd'`). Drop any stdlib
+   import that's now unused in `__init__`.
+5. Add `tests/test_<mod>_module.py` mirroring the existing four (defined-in-module +
+   re-exported-as-SAME-object contract; a small behavioural sanity test).
+6. GATE: full pytest **and** the real-Blender REGISTER_OK smoke-test (the command
+   block above — pytest stubs `bpy`, so green pytest alone does NOT prove the addon
+   still registers). Update this section's line counts + status.
+
+**⚠ Module #5 `properties.py` — CHECKPOINT WITH THE USER BEFORE STARTING (per the
+plan). Highest registration-order risk of the whole split.** This is the
+`bpy.props` PropertyGroups + their class-body property factories/callbacks.
+
+**PRE-MAPPED (verified 2026-06-21 after #4; line #s WILL shift — re-grep fresh):**
+- **Classes that MOVE (the 5 PropertyGroups):** `ValueItem` (~L894), `VelocityItem`
+  (~L929), `EmitterSettings` (~L945), `SmokeJobItem` (~L1053), `SmokeSettings`
+  (~L1133–1787, the ~654-line monster with all the per-param `*_use_range`/`_begin`/
+  `_end`/`_step`/`_list` blocks).
+- **⚠ INTERLEAVING — non-contiguous extraction.** Two UIList classes sit BETWEEN the
+  PropertyGroups: `SMOKE_UL_value_list` (~L916, between ValueItem & VelocityItem) and
+  `SMOKE_UL_job_log` (~L1073, between SmokeJobItem & SmokeSettings). UILists are UI →
+  they belong to #7 `ui.py`, so SKIP them (leave in `__init__`); extract the
+  PropertyGroup ranges around them. (`SMOKE_UL_velocity_list` ~L2093 is down with the
+  operators — also #7, untouched by #5.)
+- **Class-body helpers the PropertyGroups depend on → MOVE WITH THEM (re-export):**
+  `make_toggle_range`/`make_toggle_list` (~L295/307, used as `update=` in ~40 toggle
+  props + by tests), `_sync_frame_defaults` (~L319, `update=` on frame props),
+  `_import_domain_params` (~L369, `update=` on the domain pointer). `_clamp_value` is
+  a nested def INSIDE `ValueItem` (~L902) → moves automatically with the class.
+  **GOOD NEWS:** none of these four rebind a module global (every `global` stmt in
+  `__init__` is in the progress/operator/handler code, NOT in these callbacks), so the
+  property cluster is rebind-safe — unlike #4, nothing here is forced to stay.
+- **Already-moved deps referenced at CLASS BODY (keep imports ABOVE the class — the
+  top re-import block already does):** `_settings_files_enum_items` /
+  `_on_settings_enum_update` (settings_io, `items=`/`update=` ~L1243-44). Also
+  `_on_render_sim_result_update` (still in `__init__`, ~L568-orig) is `update=` on a
+  SmokeSettings bool — if properties.py moves and `__init__` still defines that
+  callback, properties.py must import it FROM `__init__`… which is a CYCLE. Resolve by
+  moving `_on_render_sim_result_update` into properties.py too (it's a small pure
+  toggle-clear callback), or into a shared leaf. CHECK THIS before extracting.
+- **`noise_grid_edge`/`noise_grid_exceeds_ceiling` (~L272/282):** pure validators used
+  by `_noise_ui` (→#7) + tests; NOT class-body deps. Optional to move; simplest to
+  leave in `__init__` for now (or hand to a later utils module).
+- **Registration:** the `classes = [...]` list (~L4757) + `register()` (`PointerProperty(
+  type=SmokeSettings)` on `Scene.smoke_settings`) STAY in `__init__`; the top re-import
+  makes `SmokeSettings` et al. resolve. PropertyGroups must register before the panel/
+  operators that reference them — order in `classes` is already correct; don't reorder.
+- **Tests to keep green (import via package root, so re-export covers them):**
+  `test_v070_param_expansion` (make_toggle_*), `test_todo55_emitters`
+  (_import_domain_params/EmitterSettings), `test_noise_ceiling` (noise_grid_*). No
+  monkeypatching of any of these (checked). Lean hard on the REGISTER gate — this is
+  the module most likely to surface a registration-order break.
+
+**Remaining order after #4:** #5 `properties.py` → #6 `operators.py` → #7 `ui.py`
+→ `__init__` (register only). #5–7 touch the most-debugged machinery
+(PropertyGroups, operators, panel) — checkpoint with the user before #5. Final step
+once the split is done: ONE commit on a new branch, then optionally TODO-61 Tier B
+filename renames.
+
+
 
 **Filed 2026-06-21** (review Part 1 #2). Everything (props, job-gen, emitter
 discovery, progress polling, operators, UI, handlers, register) lives in one

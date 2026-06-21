@@ -7,6 +7,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import BatchSimLab as ssl
 
+from addon_src import read_addon_source
+
 
 class _StubObj:
     def __init__(self, obj_type):
@@ -45,10 +47,9 @@ class TestExportBatchWiring:
     draw() can compose a single dialog (resolution + camera) or fire either
     independently."""
     def _src(self):
-        path = os.path.join(os.path.dirname(__file__), "..",
-                            "scripts", "BatchSimLab", "__init__.py")
-        with open(path, encoding="utf-8") as fh:
-            return fh.read()
+        # TODO-58: SMOKE_OT_export_batch moved to operators.py — read the whole
+        # addon package so the wiring assertions span the split modules.
+        return read_addon_source()
 
     def test_invoke_sets_both_warning_flags(self):
         src = self._src()
@@ -69,10 +70,9 @@ class TestRunBatchWiring:
     """Source-level check: Run Batch's invoke fires ONLY on the no-camera +
     render-on case (the save-before dialog removed in v0.4.1 stays gone)."""
     def _src(self):
-        path = os.path.join(os.path.dirname(__file__), "..",
-                            "scripts", "BatchSimLab", "__init__.py")
-        with open(path, encoding="utf-8") as fh:
-            return fh.read()
+        # TODO-58: run_batch stays in __init__ for now, but read the whole addon
+        # package so this keeps working once it moves to operators.py too.
+        return read_addon_source()
 
     def test_run_batch_invoke_checks_camera(self):
         src = self._src()

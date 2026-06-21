@@ -173,9 +173,28 @@ visible throughout.
 
 ## BUG-002: Crashes Not Detected / Logged
 
-**Status:** `DEPLOYED / UNVERIFIED` (partial fix v0.2.12); hang timeout not yet implemented  
+**Status:** `PARTIALLY CONFIRMED` — stale-log watchdog auto-recovery VERIFIED in
+production (2026-06-21); dialog *suppression* still gapped  
 **TODOS:** TODO-20  
 **Files:** `smoke_launcher.py`, `smoke_worker.py`
+
+### Production verification (2026-06-21, screen recording)
+Recording `tmpDataTransfer/2026-06-21 12-44-12.mp4` @ ~24:53 shows the recovery
+path working end-to-end on a real crashed job:
+- A Blender crash dialog ("Restart / View Crash Log / Close") appeared for the
+  stuck job `job_0018` (so dialog suppression did NOT prevent this crash dialog —
+  one of the still-open failure modes below).
+- The launcher console logged: `[launcher/job_0018] stale watchdog: idle=1800s
+  threshold=1800s` then `[smoke_launcher] No log activity for 1800s — killing
+  stuck job job_0018`, and wrote `…\SmokeSimulatorForPiazzaSanMarco.crash.txt`.
+- ~7 s later the crash dialog was gone and the **next job began initializing its
+  cache** — the batch auto-recovered with no user action (cursor was nowhere near
+  the dialog).
+**Conclusion:** the stale-log watchdog (the "Hang (no exit)" recovery) is
+CONFIRMED working. **Remaining gaps:** (1) crash-DIALOG suppression still fails for
+some crash types (Job-Object/`SEM_NOGPFAULTERRORBOX` mode); (2) the 1800 s (30 min)
+idle threshold is a long stall before recovery — consider a shorter threshold or
+detecting the crash dialog / `.crash.txt` directly to recover faster.
 
 ### Symptoms
 Blender crashes during a batch run.  No crash log is written, the launcher

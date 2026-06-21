@@ -13,12 +13,13 @@ import re
 
 import pytest
 
+from addon_src import read_addon_source
+
 
 def _addon_src():
-    p = os.path.join(os.path.dirname(__file__), "..", "scripts", "BatchSimLab",
-                     "__init__.py")
-    with open(p, encoding="utf-8") as fh:
-        return fh.read()
+    # TODO-58: read the whole addon package — properties/UI/operators now live in
+    # sibling modules, so "source contains X" checks must span them all.
+    return read_addon_source()
 
 
 class TestNewBoolProperties:

@@ -13,6 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import BatchSimLab as ssl
 
+from addon_src import read_addon_source
+
 
 # --- stubs ----------------------------------------------------------------
 
@@ -318,10 +320,9 @@ class TestEmitterSettingsSchema:
 # --- wiring (source-level, like test_camera_check) ------------------------
 
 def _src():
-    path = os.path.join(os.path.dirname(__file__), "..",
-                        "scripts", "BatchSimLab", "__init__.py")
-    with open(path, encoding="utf-8") as fh:
-        return fh.read()
+    # TODO-58: _import_domain_params now lives in properties.py — read the whole
+    # addon package so source-level wiring checks span the split modules.
+    return read_addon_source()
 
 
 class TestEmitterWiring:
