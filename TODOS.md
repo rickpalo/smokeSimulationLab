@@ -18,7 +18,7 @@ Repo is source of truth — verify line refs against current code before acting.
 | ID | Title | Status | Target |
 |----|-------|--------|--------|
 | TODO-51 | Better time estimates — samples + noise up-res terms | IN PROGRESS (step 1 done) | v0.8.0 |
-| TODO-46 | "All jobs" ETA doesn't model two-pass bake-then-render | OPEN | v0.8.0 |
+| TODO-46 | "All jobs" ETA doesn't model two-pass bake-then-render | DONE (v0.9.4) — calibration deferred to TODO-51 | v0.8.0 |
 | TODO-36 | Monitor Existing Jobs — progress count wildly off mid-bake | OPEN | v0.8.0 |
 | TODO-31 | RESUME progress bar should start at "(already-baked + 1) of total" | OPEN (needs decision) | v0.8.0 |
 | TODO-27 | Restore crash dumps (relax Job Object kill window) | PARTIAL | — |
@@ -120,7 +120,23 @@ all EEVEE @ 16 samples, so there's no variance to fit until this runs):**
 
 ---
 
-## TODO-46: Time estimate doesn't account for two-pass bake-then-render — **OPEN** (v0.7.0)
+## TODO-46: Time estimate doesn't account for two-pass bake-then-render — **DONE (v0.9.4)**
+
+**DONE 2026-06-21 (v0.9.4):** Confirmed root cause from a 38-min screen recording +
+the `estim_log.jsonl` (1,134 jobs): the old ETA used `jobs_not_started = total -
+done - 1` where `done` counts only the **unphased** `.done`, which stays 0 through
+the entire bake phase (bake pass emits `.bake.done`) — so the "All jobs" estimate
+sat frozen at `total × (bake + render)` until rendering began (matched the user's
+"stuck at ~5h55m"). Fix: extracted pure helper `_estimate_batch_remaining(...)`
+(next to `_format_eta`) driven by the per-phase `_bake_done_n` / `_render_done_n`
+counts + the current job's `.bake.done` marker to pick bake-vs-render phase; the
+poller's "All jobs:" block now calls it. Counts down in BOTH phases; cached/SKIP
+bakes are NOT pre-discounted (corrupt-cache safe) — a job drops out only when its
+`.bake.done` actually lands. 11 regression tests in `test_phase_aware_eta.py`.
+**Deferred to TODO-51 (the planned Cycles+EEVEE calibration sweep):** rolling
+per-batch averages and recalibrating `_BAKE_RATE_*` / `_RENDER_RATE_*` (current
+data showed bake ~2.4× high, Cycles render ~212× LOW on 2 samples, EEVEE ~ok).
+Bar 2 "this job" estimate left as-is per user (bake+render shown during bake is OK).
 
 **Filed 2026-06-01.** User observation from a 13-job batch: the addon showed
 `Job stage 3 of 4 (~15 min remaining this job)` and `All jobs: ~25 min remaining`

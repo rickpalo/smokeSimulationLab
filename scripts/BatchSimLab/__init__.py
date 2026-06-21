@@ -53,7 +53,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "BatchSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 9, 3),
+    "version":     (0, 9, 4),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > BatchLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging "
@@ -3510,6 +3510,59 @@ def _format_eta(seconds):
     return f"~{h}h {m}min remaining"
 
 
+def _estimate_batch_remaining(
+    *, total, bake_done_n, render_done_n, current_job_baked, bake_only,
+    setup_remaining, bake_remaining, render_remaining, still_remaining,
+    default_bake_secs, default_render_secs,
+    setup_secs=_SETUP_SECS_DEFAULT, still_secs=_STILL_SECS_DEFAULT,
+):
+    """Phase-aware "all jobs remaining" estimate for the two-pass pipeline.
+
+    The batch bakes every job first, then renders every job (see
+    ``_emit_pass``), so completion must be tracked per phase: ``bake_done_n``
+    counts finished bakes (``.bake.done``) and ``render_done_n`` finished
+    renders (``.render.done``).  The previous estimate keyed off the unphased
+    ``.done`` count, which stays 0 for the entire bake phase — so the ETA sat
+    frozen at ``total × (bake + render)`` until rendering began (TODO-46).
+
+    Model (each Blender launch pays ``setup_secs``):
+      bake job   = setup + bake
+      render job = setup + render + still
+
+    The *current* job's real-time ``*_remaining`` values refine its own phase;
+    every other not-yet-finished job is charged its flat phase cost.  No job is
+    pre-discounted for a cached bake — once its bake actually completes (the
+    fast SKIP-BAKE path, or a real re-bake if the cache was corrupt) its
+    ``.bake.done`` appears and ``bake_done_n`` drops it out of the estimate.
+
+    Returns seconds (float), never negative.
+    """
+    bake_job_cost   = setup_secs + default_bake_secs
+    render_job_cost = setup_secs + default_render_secs + still_secs
+
+    if bake_only:
+        bakes_left = max(total - bake_done_n, 0)
+        current    = setup_remaining + bake_remaining
+        return max(current + max(bakes_left - 1, 0) * bake_job_cost, 0.0)
+
+    if not current_job_baked:
+        # Bake phase: current job is baking; all renders are still pending.
+        bakes_left   = max(total - bake_done_n, 0)   # includes the current job
+        renders_left = max(total - render_done_n, 0)  # == total during bake phase
+        current      = setup_remaining + bake_remaining
+        return max(
+            current
+            + max(bakes_left - 1, 0) * bake_job_cost
+            + renders_left * render_job_cost,
+            0.0,
+        )
+
+    # Render phase: current job's bake is done; only renders remain.
+    renders_left = max(total - render_done_n, 0)      # includes the current job
+    current      = setup_remaining + render_remaining + still_remaining
+    return max(current + max(renders_left - 1, 0) * render_job_cost, 0.0)
+
+
 def _format_elapsed(secs):
     """Return elapsed wall-clock time as '1 h, 7 min', '27 min', or '45 sec'."""
     secs = int(max(0.0, secs))
@@ -4441,12 +4494,6 @@ def _poll_batch_progress_impl():
             # Each stage is allocated a band proportional to its time estimate.
             # Within a band, progress = (estimate - remaining) / estimate, clamped
             # to [0, estimate] so slow stages stay within their band.
-            default_job_secs = (
-                _SETUP_SECS_DEFAULT
-                + default_bake_secs
-                + default_render_secs
-                + _STILL_SECS_DEFAULT
-            )
             stage_secs      = [_SETUP_SECS_DEFAULT, default_bake_secs,
                                 default_render_secs, _STILL_SECS_DEFAULT]
             stage_remaining = [setup_remaining, bake_remaining,
@@ -4461,9 +4508,26 @@ def _poll_batch_progress_impl():
             s.batch_job_factor = job_factor
             s.batch_job_text   = f"Job stage {current_stage} of {_TOTAL_SUBTASKS} ({_format_eta(job_remaining)} this job)"
 
-            # --- ETA: current_job_remaining + not-started jobs × model estimate ---
-            jobs_not_started = max(total - done - 1, 0)
-            remaining        = job_remaining + jobs_not_started * default_job_secs
+            # --- ETA: phase-aware all-jobs remaining (TODO-46) ---
+            # Two-pass pipeline bakes every job, then renders every job, so the
+            # estimate must count bake/render completions separately (the
+            # unphased `done` count stays 0 through the whole bake phase, which
+            # used to freeze this ETA).  The current job's `.bake.done` tells us
+            # whether it is baking or rendering.
+            current_job_baked = (log_stem + ".bake.done") in set(_all_files)
+            remaining = _estimate_batch_remaining(
+                total=total,
+                bake_done_n=_bake_done_n,
+                render_done_n=_render_done_n,
+                current_job_baked=current_job_baked,
+                bake_only=_bake_only,
+                setup_remaining=setup_remaining,
+                bake_remaining=bake_remaining,
+                render_remaining=render_remaining,
+                still_remaining=still_remaining,
+                default_bake_secs=default_bake_secs,
+                default_render_secs=default_render_secs,
+            )
             s.batch_time_remaining = f"All jobs: {_format_eta(remaining)}"
 
         else:
