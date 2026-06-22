@@ -518,8 +518,13 @@ real Blender 5.1. Also converted `test_v060_fixes._addon_src` to `read_addon_sou
 
 ### ▶ RESUME POINT (fresh session) — LAST module: #7 `ui.py`
 
-**Baseline now = 1049 pytest + REGISTER_OK/UNREGISTER_OK** (v0.9.6 released; hotfix
-BUG-018 clamp-recursion crash + BUG-019 export NameError regression). **A new
+**Baseline now = 1068 pytest + REGISTER_OK/UNREGISTER_OK** (v0.9.7: added the manual
+**Retry Failed Jobs** button to the Utilities box below Monitor Existing Jobs, AND
+broadened `SMOKE_OT_retry_failed` to also re-run jobs that never finished — no final
+unphased `.done` (interrupted/never-started), not just error-marked ones. Detection
+extracted into pure tested `engine._jobs_needing_retry`; verified it now catches all 24
+unfinished jobs in the AutoTest sweep (was 14). v0.9.6 hotfix BUG-018 clamp-recursion
+crash + BUG-019 export NameError regression). **A new
 permanent guard `tests/test_no_unbound_names.py` runs AST unbound-name analysis on
 every package module — it WILL cover ui.py, but still also headless-exercise the
 panel `draw()` when done (the AST guard catches missing imports, not draw-time logic

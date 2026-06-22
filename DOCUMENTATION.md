@@ -330,6 +330,16 @@ inserted before it. When a master toggle is off, its dependent columns are `OFF`
 - **Auto Retry Failed** — re-run a failed job once before marking it failed.
 - **Monitor Existing Jobs** — reconnect to an already-running batch after closing
   and reopening Blender; rebuilds the Job Log and resumes monitoring.
+- **Retry Failed Jobs** (Utilities) — re-run every job that isn't cleanly
+  finished: those whose final completion marker reports an error, **and** those
+  that never finished at all (no final `.done` — e.g. the batch was interrupted
+  or a job never started). Writes and launches `run_retry_failed.bat` with **Use
+  Placeholders** and **Use Existing Cache** forced on, so each retry resumes from
+  where the job last succeeded (a fully-baked-but-unrendered job skips the bake).
+  The latest attempt wins — a successful retry clears an earlier failure. Enabled
+  once a run has produced any per-job output; if every job completed cleanly it
+  reports "No failed or unfinished jobs found". (This is the manual, whole-batch
+  equivalent of **Auto Retry Failed**, available any time after a run.)
 
 Cache safety: every swept parameter (including emitters) is encoded into the job
 name, so distinct jobs get distinct cache directories — no cross-job cache

@@ -28,7 +28,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 # Re-exported from the package as the SAME object (functions + mutable state +
 # true constants).  The two REBINDABLE scalars are intentionally excluded.
 _ENGINE_REEXPORTED = [
-    "_BAKE_DONE_RE", "_RENDER_DONE_RE", "_batch_is_running",
+    "_BAKE_DONE_RE", "_RENDER_DONE_RE", "_JOB_JSON_RE", "_jobs_needing_retry",
+    "_batch_is_running",
     "_STAGES", "_TOTAL_SUBTASKS", "_update_job_log_statuses",
     "_batch_times", "_bt", "_bt_set", "_bt_reset_all",
     "_job_statuses", "_job_log_rows", "_MAX_AUTO_RETRIES", "_should_auto_retry",
@@ -130,6 +131,86 @@ def test_should_auto_retry_behaves(engine):
     assert engine._should_auto_retry(2, False, 0) is False  # disabled
     assert engine._should_auto_retry(2, True, 0) is True
     assert engine._should_auto_retry(1, True, engine._MAX_AUTO_RETRIES) is False
+
+
+class TestJobsNeedingRetry:
+    """A job needs a retry when its final unphased marker says "error" OR when it
+    has no final unphased .done at all (interrupted / never finished).  The
+    phased .bake.done / .render.done are diagnostic and never count."""
+
+    def _job(self, jobs, idx, *, done=None, retry_done=None, bake_done=None,
+             render_done=None):
+        """Write a job_NNNN.json (+ optional markers) into the jobs dir."""
+        stem = f"job_{idx:04d}"
+        (jobs / f"{stem}.json").write_text("{}")
+        if done is not None:
+            (jobs / f"{stem}.done").write_text(done)
+        if retry_done is not None:
+            (jobs / f"{stem}_retry.done").write_text(retry_done)
+        if bake_done is not None:
+            (jobs / f"{stem}.bake.done").write_text(bake_done)
+        if render_done is not None:
+            (jobs / f"{stem}.render.done").write_text(render_done)
+        return stem
+
+    def _stems(self, engine, jobs):
+        return [s for s, _ in engine._jobs_needing_retry(str(jobs))]
+
+    def test_errored_job_included(self, engine, tmp_path):
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 0, done="error exit 1 ...")
+        assert self._stems(engine, jobs) == ["job_0000"]
+
+    def test_clean_done_excluded(self, engine, tmp_path):
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 0, done="done ...")
+        assert self._stems(engine, jobs) == []
+
+    def test_unfinished_job_included(self, engine, tmp_path):
+        # Baked but never rendered, no unphased .done (the AutoTest case).
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 0, bake_done="done ...")          # no .done at all
+        assert self._stems(engine, jobs) == ["job_0000"]
+
+    def test_never_started_job_included(self, engine, tmp_path):
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 0)                                 # only the .json
+        assert self._stems(engine, jobs) == ["job_0000"]
+
+    def test_phased_markers_do_not_count_as_final(self, engine, tmp_path):
+        # A render.done error with no unphased .done still needs retry; a pair of
+        # successful phased markers without an unphased .done is still unfinished.
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 0, bake_done="done ...", render_done="error exit 1 ...")
+        assert self._stems(engine, jobs) == ["job_0000"]
+
+    def test_successful_retry_clears_earlier_failure(self, engine, tmp_path):
+        # Latest attempt wins: orig .done errored, _retry.done succeeded → skip.
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 0, done="error exit 1 ...", retry_done="done ...")
+        assert self._stems(engine, jobs) == []
+
+    def test_failed_retry_overrides_earlier_success(self, engine, tmp_path):
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 0, done="done ...", retry_done="error exit 1 ...")
+        assert self._stems(engine, jobs) == ["job_0000"]
+
+    def test_mixed_batch_sorted_by_index(self, engine, tmp_path):
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 0, done="done ...")               # clean → skip
+        self._job(jobs, 1, done="error exit 1 ...")       # failed
+        self._job(jobs, 2, bake_done="done ...")          # unfinished
+        self._job(jobs, 3, done="done ...")               # clean → skip
+        assert self._stems(engine, jobs) == ["job_0001", "job_0002"]
+
+    def test_returns_job_json_path(self, engine, tmp_path):
+        jobs = tmp_path / "jobs"; jobs.mkdir()
+        self._job(jobs, 7, done="error ...")
+        result = engine._jobs_needing_retry(str(jobs))
+        assert result[0][1].endswith(os.path.join("jobs", "job_0007.json"))
+
+    def test_missing_dir_returns_empty(self, engine, tmp_path):
+        assert engine._jobs_needing_retry(str(tmp_path / "nope")) == []
 
 
 def test_bt_timing_roundtrip(engine):

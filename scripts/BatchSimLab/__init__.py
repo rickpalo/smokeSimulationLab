@@ -67,7 +67,7 @@ Requires Blender 4.x (tested on 4.5.5 and 5.1.1) on Windows 10/11.  May work on 
 bl_info = {
     "name":        "BatchSimLab",
     "author":      "Rick Palo",
-    "version":     (0, 9, 6),
+    "version":     (0, 9, 7),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > BatchLab",
     "description": "Batch smoke simulation parameter sweeper with CSV logging "
@@ -233,6 +233,8 @@ from .operators import (
 from .engine import (
     _BAKE_DONE_RE,
     _RENDER_DONE_RE,
+    _JOB_JSON_RE,
+    _jobs_needing_retry,
     _batch_is_running,
     _STAGES,
     _TOTAL_SUBTASKS,
@@ -1140,6 +1142,18 @@ class SMOKE_PT_panel(bpy.types.Panel):
                 re.match(r'^job_\d{4}\.json$', f) for f in os.listdir(_jobs_dir)
             )
             row_mon.operator("smoke.monitor_existing_jobs", text="Monitor Existing Jobs", icon='RECOVER_LAST')
+            # Retry failed + unfinished jobs (the operator reports "No failed or
+            # unfinished jobs found" if every job completed cleanly).  Enabled
+            # once a run has produced any per-job output — a marker or a log —
+            # so it also lights up for a batch interrupted before any unphased
+            # .done was written.  Filename-only (no content reads) to keep
+            # draw() off the Synology/Norton I/O path.
+            row_retry = box_util.row()
+            row_retry.enabled = os.path.isdir(_jobs_dir) and any(
+                re.match(r'^job_\d{4}.*\.(done|worker_done|log)$', f)
+                for f in os.listdir(_jobs_dir)
+            )
+            row_retry.operator("smoke.retry_failed", text="Retry Failed Jobs", icon='FILE_REFRESH')
             box_util.separator()
             box_util.operator("smoke.remove_all_jobs", text="Remove All Jobs", icon='TRASH')
             box_util.separator()

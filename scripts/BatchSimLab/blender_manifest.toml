@@ -4,7 +4,7 @@
 schema_version = "1.0.0"
 
 id = "batchsimlab"
-version = "0.9.6"
+version = "0.9.7"
 name = "BatchSimLab"
 tagline = "Batch smoke simulation parameter sweeper with CSV logging"
 maintainer = "Rick Palo <rap2010@comcast.net>"

@@ -74,6 +74,9 @@ _RENDER_RATE_DEFAULT =  45.0   # s/frame at unspecified resolution
 _BAKE_DONE_RE    = re.compile(r"^job_\d{4}\.bake\.done$")
 _RENDER_DONE_RE  = re.compile(r"^job_\d{4}\.render\.done$")
 
+# A base job's spec file (excludes the per-retry job_NNNN_retry.json).
+_JOB_JSON_RE     = re.compile(r"^job_\d{4}\.json$")
+
 
 def _batch_is_running():
     """True while a batch poll timer is active (a Run Batch is in progress).
@@ -1174,13 +1177,51 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _jobs_needing_retry(jobs_dir):
+    """Return ``[(base_stem, job_json_path), ...]`` for every job that is not
+    cleanly complete, sorted by job index.
+
+    A job needs a retry when its final unphased completion marker reports an
+    error, OR when it has no final unphased marker at all (interrupted, killed
+    mid-batch, or never started).  The phased ``.bake.done`` / ``.render.done``
+    markers are diagnostic and never count as a final result.
+
+    The latest attempt wins: a ``_retry.done`` reflects a more recent run than
+    the original ``.done``, so a successful retry clears an earlier failure (and
+    a failed retry overrides an earlier success).
+    """
+    out = []
+    try:
+        names = sorted(os.listdir(jobs_dir))
+    except OSError:
+        return out
+    for f in names:
+        if not _JOB_JSON_RE.match(f):
+            continue
+        base_stem  = f[:-len(".json")]
+        retry_done = os.path.join(jobs_dir, base_stem + "_retry.done")
+        orig_done  = os.path.join(jobs_dir, base_stem + ".done")
+        final = retry_done if os.path.exists(retry_done) else orig_done
+        if os.path.exists(final):
+            try:
+                with open(final) as fh:
+                    if "error" not in fh.read().lower():
+                        continue          # cleanly finished — leave it alone
+            except OSError:
+                pass                       # unreadable marker → treat as needs-retry
+        out.append((base_stem, os.path.join(jobs_dir, f)))
+    return out
+
+
 class SMOKE_OT_retry_failed(bpy.types.Operator):
-    """Re-run failed jobs with Use Placeholders and Use Existing Cache forced on."""
+    """Re-run failed or unfinished jobs with Use Placeholders and Use Existing
+    Cache forced on."""
 
     bl_idname     = "smoke.retry_failed"
     bl_label      = "Retry Failed Jobs"
     bl_description = (
-        "Write and launch run_retry_failed.bat containing only the failed jobs. "
+        "Write and launch run_retry_failed.bat containing the failed jobs and "
+        "any that never finished (no final .done — e.g. interrupted mid-batch). "
         "Use Placeholders and Use Existing Cache are always forced on so each "
         "retry resumes from where the job last succeeded."
     )
@@ -1194,32 +1235,12 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
             self.report({'ERROR'}, "Jobs folder not found — run Export Batch first")
             return {'CANCELLED'}
 
-        # Collect failed jobs — check ALL .done files (including _retry.done) for
-        # "error"; strip _retry suffix to get the base job stem so re-retrying works.
-        failed = []
-        seen_base_stems = set()
-        for f in sorted(os.listdir(jobs_dir)):
-            # Only the unphased completion markers count as job results — the
-            # phased .bake.done / .render.done are diagnostic.
-            if not (_DONE_RE.match(f) or _RETRY_DONE_RE.match(f)):
-                continue
-            try:
-                with open(os.path.join(jobs_dir, f)) as fh:
-                    if "error" not in fh.read().lower():
-                        continue
-                stem      = f[:-5]
-                base_stem = stem[:-6] if stem.endswith("_retry") else stem
-                if base_stem in seen_base_stems:
-                    continue
-                job_json = os.path.join(jobs_dir, base_stem + ".json")
-                if os.path.exists(job_json):
-                    failed.append((base_stem, job_json))
-                    seen_base_stems.add(base_stem)
-            except OSError:
-                pass
+        # Failed jobs (final marker says "error") plus any that never finished
+        # (no final unphased .done) — see _jobs_needing_retry.
+        failed = _jobs_needing_retry(jobs_dir)
 
         if not failed:
-            self.report({'INFO'}, "No failed jobs found")
+            self.report({'INFO'}, "No failed or unfinished jobs found")
             return {'CANCELLED'}
 
         blender_exe = bpy.app.binary_path
@@ -1230,7 +1251,7 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
             "@echo off",
             'cd /d "%~dp0"',
             "setlocal enabledelayedexpansion",
-            f"echo BatchSimLab retry — {len(failed)} failed job(s)",
+            f"echo BatchSimLab retry — {len(failed)} job(s)",
             "echo.",
             "set ERRORS=0",
             "",

@@ -35,8 +35,8 @@ liquid at v3.0.0 — hence "BatchSim".
   render via scene FONT objects.
 - **Cycles GPU** (OptiX → CUDA → HIP) headless, or **EEVEE** windowed.
 - **Crash-safe launcher**, per-job logs, live **Job Log** with progress bars and
-  phase-aware ETAs, **Monitor Existing Jobs**, **Auto Retry**, **Use Existing
-  Cache** / **Placeholders**, and `.smokesettings` presets.
+  phase-aware ETAs, **Monitor Existing Jobs**, **Auto Retry** / **Retry Failed
+  Jobs**, **Use Existing Cache** / **Placeholders**, and `.smokesettings` presets.
 
 ---
 

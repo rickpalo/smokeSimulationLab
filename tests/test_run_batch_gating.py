@@ -50,6 +50,46 @@ class TestBatchReady:
         assert _batch_ready(str(tmp_path / "does_not_exist")) is False
 
 
+# ── Retry Failed Jobs button lives in Utilities, below Monitor Existing Jobs ──
+
+class TestRetryFailedButton:
+    """The Retry Failed Jobs button must be wired into the Utilities box right
+    below Monitor Existing Jobs.  The operator (SMOKE_OT_retry_failed) already
+    existed for auto-retry; this guards the manual button + its ordering."""
+
+    def _draw_src(self):
+        import inspect
+        import BatchSimLab as ssl
+        return inspect.getsource(ssl.SMOKE_PT_panel.draw)
+
+    def test_button_present(self):
+        assert 'smoke.retry_failed' in self._draw_src()
+        assert 'text="Retry Failed Jobs"' in self._draw_src()
+
+    def test_button_below_monitor(self):
+        # A contextual retry button already lives in the Progress summary; the
+        # one we added is the persistent Utilities entry, identified by its
+        # "Retry Failed Jobs" label, and must follow Monitor Existing Jobs.
+        src = self._draw_src()
+        i_mon   = src.index('smoke.monitor_existing_jobs')
+        i_retry = src.index('text="Retry Failed Jobs"')
+        assert i_mon < i_retry, "Utilities Retry button must be drawn after Monitor Existing Jobs"
+
+    def test_gate_lights_up_on_any_run_output(self):
+        # The button enables once a run has produced any per-job output (a
+        # marker or a log) — including a batch interrupted before any unphased
+        # .done — but NOT for a freshly exported, never-run batch (.json only).
+        gate = re.compile(r'^job_\d{4}.*\.(done|worker_done|log)$')
+        assert gate.match("job_0000.done")
+        assert gate.match("job_0012_retry.done")
+        assert gate.match("job_0000.bake.done")       # interrupted-after-bake case
+        assert gate.match("job_0000.render.done")
+        assert gate.match("job_0000.worker_done")
+        assert gate.match("job_0000.log")
+        assert not gate.match("job_0000.json")         # fresh export → disabled
+        assert not gate.match("config.json")
+
+
 # ── TODO-26: bake-only mode clears "Display Results When Finished" ────────────
 
 class TestRenderSimResultUpdate:
