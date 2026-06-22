@@ -1225,5 +1225,54 @@ the register-path rebuild lands on the right side of the boundary.
 
 ---
 
+## BUG-021: Retry Failed Jobs re-runs a job the Job Log shows COMPLETE (two "complete" definitions disagree)
+
+**Status:** `DOCUMENTED — DEFERRED` (latent inconsistency in v0.9.7/0.9.8; fix queued for next session, per user 2026-06-22)
+**Files:** `engine.py` — `_jobs_needing_retry` vs `_update_job_log_statuses`
+**Related:** introduced with the v0.9.7 retry-coverage broadening (TODO; see RELEASING.md 0.9.7).
+
+### Symptom / how it was spotted
+After upgrading and clicking **Retry Failed Jobs** on a finished-looking sweep, the
+user noted the Job Log had appeared to show jobs as completed, yet retry queued
+them.  In the AutoTest sweep that prompted this it was a *false alarm* (those jobs
+were `BAKED`, not `COMPLETE` — see below), but the question exposed a real
+disagreement between two "is this job complete?" code paths.
+
+### Root cause (identified, not yet fixed)
+There are two independent notions of "complete":
+
+- **Job Log status** (`_update_job_log_statuses`, engine.py ~L178-184): marks a job
+  `COMPLETE` when its **`render.done`** sentinel is present and error-free — *even if
+  the unphased `job_NNNN.done` alias is missing* (an explicit "defensive" branch;
+  the comment notes the missing-alias case should be rare since the v0.4.1 bat-block
+  fix).  It also has a bake-only notion of done.
+- **Retry detection** (`_jobs_needing_retry`, added v0.9.7): considers a job complete
+  ONLY when the unphased **`.done`/`_retry.done`** is present and error-free.  It does
+  **not** look at `render.done` (or bake-only mode) at all.
+
+So a job that rendered successfully (`render.done` = done) but never got its unphased
+`.done` written shows **COMPLETE** in the panel yet is flagged **needs-retry** by the
+button → a needless re-run of an already-complete job.  Output isn't corrupted (a
+re-render with use_existing_cache + placeholders is wasteful, not wrong), but the UI
+and the action contradict each other.
+
+Note this did NOT affect the 2026-06-22 AutoTest retry: jobs job_0002-0010 had a
+`.bake.done` but **no `.render.done`** (and only a partial `…_frames` dir, no final
+`.mp4`/`.png`), so the Job Log showed them `BAKED` (◐), not `COMPLETE` (✓), and
+re-running them was correct.  The bug bites only the rarer render-done-without-
+unphased-alias case.
+
+### Candidate fix (for next session — queued, not applied)
+Align `_jobs_needing_retry` with `_update_job_log_statuses`'s "complete" definition:
+treat a job as complete (skip retry) when its latest marker is a clean **`render.done`**
+(no "error"), in addition to the existing clean unphased `.done`/`_retry.done` check;
+and respect bake-only mode (a clean `bake.done` completes a bake-only job).  Keep
+"latest attempt wins" (a `_retry.*` supersedes the first run).  Best: factor the
+shared "final status of job N" decision into one helper both call, so the two paths
+can't drift again.  Add `test_engine_module.py::TestJobsNeedingRetry` cases for
+render-done-without-unphased-done (must SKIP) and bake-only completion.
+
+---
+
 *Document created 2026-05-11.  Append new attempts to existing issues rather than
 creating duplicate entries.*
