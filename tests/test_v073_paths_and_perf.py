@@ -62,8 +62,11 @@ class TestWorkerVersionBump:
         # The version gate compares the exported worker against this constant.
         # 0.9.1 = BUG-016 (per-job render_samples via taa_render_samples);
         # 0.9.2 = generic "Emitter"/"Emitter[i]" overlay labels stacked in the
-        # Dissolve text (item-4 overlay change).
-        assert ssl._EXPECTED_WORKER_VERSION == "0.9.2"
+        # Dissolve text (item-4 overlay change);
+        # 0.9.3 = TODO-66 follow-up (negative Frame Start: cache-filename
+        # regexes tolerate a sign, frame-count math no longer assumes
+        # frame_start == 1).
+        assert ssl._EXPECTED_WORKER_VERSION == "0.9.3"
 
 
 class TestPerfRecordEstimationFields:

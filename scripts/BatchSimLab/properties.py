@@ -986,6 +986,7 @@ class SmokeSettings(bpy.types.PropertyGroup):
     batch_time_remaining: bpy.props.StringProperty(default="")
     batch_job_log_key:    bpy.props.StringProperty(default="")
     batch_frame_end:      bpy.props.IntProperty(default=0)
+    batch_frame_start:    bpy.props.IntProperty(default=1)
     batch_jobs_elapsed:      bpy.props.FloatProperty(default=0.0)
     batch_resolution:        bpy.props.IntProperty(default=0)
     batch_render_width:      bpy.props.IntProperty(default=0)

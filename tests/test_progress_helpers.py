@@ -59,13 +59,15 @@ class TestFormatEta:
 # _count_png_frames
 # ---------------------------------------------------------------------------
 
-def _make_job(tmp_path, frame_end=5, name="MyJob"):
+def _make_job(tmp_path, frame_end=5, name="MyJob", frame_start=None):
     """Write a minimal job JSON and return (jobs_dir, frames_dir)."""
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir(exist_ok=True)
     frames_dir = tmp_path / "Renders" / f"{name}_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     job_data = {"frame_end": frame_end, "output_path": str(tmp_path), "name": name}
+    if frame_start is not None:
+        job_data["frame_start"] = frame_start
     (jobs_dir / "job_0000.json").write_text(json.dumps(job_data))
     return jobs_dir, frames_dir
 
@@ -199,6 +201,41 @@ class TestCountPngFrames:
         count, total = _count_png_frames(str(jobs_dir), "job_0000")
         assert count == 0
         assert total == 5
+
+    # ── TODO-66 follow-up: negative Frame Start ─────────────────────────────
+    # frame_end alone is the absolute end-frame number, not the frame count,
+    # once frame_start can be negative — total must be (end - start + 1).
+
+    def test_total_uses_frame_start_when_present(self, tmp_path):
+        jobs_dir, _ = _make_job(tmp_path, frame_end=200, frame_start=-50)
+        _, total = _count_png_frames(str(jobs_dir), "job_0000")
+        assert total == 251   # -50..200 inclusive
+
+    def test_total_defaults_frame_start_to_one(self, tmp_path):
+        # No frame_start key (older job JSON) — must match the pre-TODO-66
+        # behavior of total == frame_end.
+        jobs_dir, _ = _make_job(tmp_path, frame_end=250)
+        _, total = _count_png_frames(str(jobs_dir), "job_0000")
+        assert total == 250
+
+    def test_counts_png_named_with_negative_frame_number(self, tmp_path):
+        # The worker names PNGs with f"frame_{frame_num:04d}.png", which pads
+        # the sign into the width for negative frame numbers (e.g. -49 -> "-049").
+        jobs_dir, frames_dir = _make_job(tmp_path, frame_end=-40, frame_start=-49)
+        for n in ("-049", "-048", "-047"):
+            (frames_dir / f"frame_{n}.png").write_bytes(b"")
+        count, total = _count_png_frames(str(jobs_dir), "job_0000")
+        assert count == 3
+        assert total == 10   # -49..-40 inclusive
+
+    def test_frame_end_zero_is_not_treated_as_missing(self, tmp_path):
+        # A range like -10..0 is legitimate under TODO-66 (pre-roll ending at
+        # frame 0) — frame_end == 0 must not be confused with "key absent".
+        jobs_dir, frames_dir = _make_job(tmp_path, frame_end=0, frame_start=-10)
+        (frames_dir / "frame_-010.png").write_bytes(b"")
+        count, total = _count_png_frames(str(jobs_dir), "job_0000")
+        assert count == 1
+        assert total == 11   # -10..0 inclusive
 
 
 # ---------------------------------------------------------------------------

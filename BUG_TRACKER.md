@@ -1388,5 +1388,71 @@ default) or if a per-machine-configurable threshold becomes worth the complexity
 
 ---
 
+## BUG-024: Negative Frame Start broke progress-bar totals, time estimates, and cache-file matching — **FIXED (v0.9.11)**
+
+**Status:** `FIXED` (v0.9.11) — follow-up to TODO-66 (v0.9.10), which only removed the `min` clamp
+**Files:** `progress.py`, `engine.py`, `properties.py`, `smoke_worker.py`, `smoke_launcher.py`, `tools/analyze_perf.py`
+**Related:** [[project_todos]] TODO-66
+
+### Symptom
+User report after using a negative Frame Start (allowed since TODO-66): the live progress
+bar, the bake/render time estimates, and the "find and reuse existing cache" logic were all
+suspected of mishandling the negative range.
+
+### Root cause
+Two independent defects, both stemming from TODO-66 only fixing the `min` bound and not
+auditing the consumers:
+
+1. **`frame_end` used as a stand-in for frame *count*.** Several call sites assumed
+   `frame_start == 1`, under which `frame_end` and the frame count are numerically equal — so
+   nobody had needed to track `frame_start` separately. `progress.py`'s `_count_vdb_frames` /
+   `_count_png_frames` returned the raw `frame_end` as the "total frames" denominator for the
+   bake/render progress bar; `engine.py`'s poller did `frame_end = max(s.batch_frame_end, 1)`
+   and fed that into every rate-based bake/render estimate; the worker's own
+   `bake_secs_per_frame` / `bake_secs_per_res3_frame` calibration metrics (which feed
+   `tools/analyze_perf.py` and the TODO-51 rate constants) divided by `frame_end` the same way.
+   With a negative `frame_start`, the true count (`frame_end - frame_start + 1`) is larger than
+   `frame_end` — and if `frame_end` itself is negative, the old code clamped it to 1, collapsing
+   the estimate to "1 frame's worth of time" for what could be a 100+ frame bake.
+   A second-order bug in the same two `progress.py` functions: the guard
+   `if not (output_path and name and frame_end)` treated `frame_end == 0` as "missing" (Python
+   falsiness), but a legitimate negative range can legitimately end at frame 0 (e.g. a -10..0
+   pre-roll) — that job's progress would silently return `None` instead of a real count.
+2. **Cache/render filename regexes couldn't match a signed frame number.** Seven `_(\d+)…`-style
+   regexes (two in `progress.py`, one in `smoke_launcher.py`, four in `smoke_worker.py`) required
+   the frame digits to immediately follow `_`, with no allowance for a `-`. The worker itself
+   names rendered PNGs with `f"frame_{frame_num:04d}.png"`, which Python pads sign-inclusive for
+   negative numbers (e.g. `frame_-049.png`) — so render-progress counting could never see those
+   files. The same shape of regex is used for Mantaflow's `.vdb`/`.uni` cache files; one of the
+   four `smoke_worker.py` sites is in the presave-merge path that restores cache data after a
+   directory rename during RESUME — a miss there would have silently dropped negatively-numbered
+   baked frames during cache reuse, exactly the "cache reuse" symptom reported.
+
+### Fix (v0.9.11)
+- Added a tracked `batch_frame_start` property (mirrors the existing `batch_frame_end`) so the
+  poller can compute `frame_end - frame_start + 1` instead of assuming `frame_start == 1`.
+- `_count_vdb_frames` / `_count_png_frames` now read `frame_start` from the job JSON and return
+  the real frame count; the `frame_end == 0` guard now checks key *presence*, not truthiness.
+- The worker's `_perf` record now logs `frame_start` and derives `bake_secs_per_frame` /
+  `bake_secs_per_res3_frame` from the real frame count; `analyze_perf.py`'s sanity table does the
+  same (falling back to `frame_start=1` for pre-existing records so old data keeps its old math).
+- Broadened all seven frame-number regexes to `_(-?\d+)…`, tolerating an optional sign.
+- Left one assumption unverified by design: the TODO-34 fast-path single-file check
+  (`fluid_data_{frame_end:04d}.vdb`) assumes Mantaflow pads a negative frame's sign into the
+  filename the same way Python's `:04d` does. Unconfirmed against a real Blender bake; if wrong,
+  the failure mode is a conservative full re-bake, not data loss — flagged with a comment for
+  whoever runs the first real negative-frame AutoTest sweep.
+
+### Tests
+11 new regression tests: `test_progress_helpers.py` (negative-range total, `frame_start`-absent
+default, signed-filename counting, `frame_end == 0` not treated as missing), the equivalent set
+in `test_todo52_noise_stage.py` for `_count_vdb_frames`, a signed-filename match in
+`test_todo53_heartbeat.py`, a `batch_frame_start` property-existence/no-min-bound check in
+`test_properties_module.py`, and an updated `test_modular_resume.py` regex-pin. Gate: 1162 pytest
++ AST unbound-name guard. Worker 0.9.2→0.9.3, launcher 0.6.5→0.6.6, addon 0.9.10→0.9.11 —
+**re-export required**.
+
+---
+
 *Document created 2026-05-11.  Append new attempts to existing issues rather than
 creating duplicate entries.*

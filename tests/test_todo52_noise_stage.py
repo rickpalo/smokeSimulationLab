@@ -63,11 +63,13 @@ class TestStageAdvancement:
         assert _stage_for(self.NOISE_DONE_TAIL) == "Verifying cache"
 
 
-def _make_cache_job(tmp_path, name="J", frame_end=5):
+def _make_cache_job(tmp_path, name="J", frame_end=5, frame_start=None):
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
-    (jobs_dir / "job_0000.json").write_text(json.dumps(
-        {"frame_end": frame_end, "output_path": str(tmp_path), "name": name}))
+    job_data = {"frame_end": frame_end, "output_path": str(tmp_path), "name": name}
+    if frame_start is not None:
+        job_data["frame_start"] = frame_start
+    (jobs_dir / "job_0000.json").write_text(json.dumps(job_data))
     return jobs_dir
 
 
@@ -103,3 +105,42 @@ class TestCountVdbSubdir:
         (noise / "fluid_noise_0001.vdb").write_bytes(b"")
         assert _count_vdb_frames(str(jobs_dir), "job_0000", subdir="data")[0] == 5
         assert _count_vdb_frames(str(jobs_dir), "job_0000", subdir="noise")[0] == 1
+
+
+class TestCountVdbNegativeFrameStart:
+    """TODO-66 follow-up: frame_end alone is not the frame count once
+    frame_start can be negative, and Mantaflow's cache filenames may carry
+    a sign for negative frame numbers."""
+
+    def test_total_uses_frame_start_when_present(self, tmp_path):
+        jobs_dir = _make_cache_job(tmp_path, frame_end=200, frame_start=-50)
+        data = tmp_path / "Cache" / "J" / "data"
+        data.mkdir(parents=True)
+        count, total = _count_vdb_frames(str(jobs_dir), "job_0000")
+        assert (count, total) == (0, 251)   # -50..200 inclusive
+
+    def test_total_defaults_frame_start_to_one(self, tmp_path):
+        jobs_dir = _make_cache_job(tmp_path, frame_end=5)
+        data = tmp_path / "Cache" / "J" / "data"
+        data.mkdir(parents=True)
+        _, total = _count_vdb_frames(str(jobs_dir), "job_0000")
+        assert total == 5
+
+    def test_counts_vdb_named_with_negative_frame_number(self, tmp_path):
+        jobs_dir = _make_cache_job(tmp_path, frame_end=-40, frame_start=-49)
+        data = tmp_path / "Cache" / "J" / "data"
+        data.mkdir(parents=True)
+        for n in ("-049", "-048", "-047"):
+            (data / f"fluid_data_{n}.vdb").write_bytes(b"")
+        count, total = _count_vdb_frames(str(jobs_dir), "job_0000")
+        assert count == 3
+        assert total == 10   # -49..-40 inclusive
+
+    def test_frame_end_zero_is_not_treated_as_missing(self, tmp_path):
+        jobs_dir = _make_cache_job(tmp_path, frame_end=0, frame_start=-10)
+        data = tmp_path / "Cache" / "J" / "data"
+        data.mkdir(parents=True)
+        (data / "fluid_data_-010.vdb").write_bytes(b"")
+        count, total = _count_vdb_frames(str(jobs_dir), "job_0000")
+        assert count == 1
+        assert total == 11   # -10..0 inclusive

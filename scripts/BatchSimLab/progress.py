@@ -139,7 +139,7 @@ def _find_running_log(jobs_dir):
 
 
 def _count_vdb_frames(jobs_dir, log_stem, tail=None, start_time=None, subdir="data"):
-    """Return (frames_counted, frame_end) by counting VDB files for log_stem, or None.
+    """Return (frames_counted, frame_count) by counting VDB files for log_stem, or None.
 
     When tail is supplied the function tries to extract the effective cache dir
     from the v0.2.7+ "Effective cache dir" log line so it counts files in the
@@ -166,10 +166,19 @@ def _count_vdb_frames(jobs_dir, log_stem, tail=None, start_time=None, subdir="da
             job_data = json.load(fh)
     except (OSError, json.JSONDecodeError):
         return None
-    frame_end   = job_data.get("frame_end", 0)
+    # "frame_end" is checked for key presence, not truthiness — TODO-66 allows
+    # a negative frame_start, so a legitimate range (e.g. -10..0) can have
+    # frame_end == 0, which `and frame_end` would wrongly treat as missing.
+    if "frame_end" not in job_data:
+        return None
+    frame_end   = job_data["frame_end"]
+    # frame_start can be negative, so the frame COUNT is (end - start + 1),
+    # not the bare frame_end the caller used to receive.
+    frame_start = job_data.get("frame_start", 1)
+    frame_count = frame_end - frame_start + 1
     output_path = job_data.get("output_path", "")
     name        = job_data.get("name", "")
-    if not (output_path and name and frame_end):
+    if not (output_path and name):
         return None
 
     mtime_cutoff = (start_time - 10.0) if start_time else None
@@ -179,7 +188,9 @@ def _count_vdb_frames(jobs_dir, log_stem, tail=None, start_time=None, subdir="da
         if not os.path.isdir(data_dir):
             return counted
         for f in os.listdir(data_dir):
-            m = re.search(r'_(\d{4})\.vdb$', f)
+            # Optional leading "-" handles a negative frame number in the
+            # cache filename (Mantaflow pads the sign into the frame width).
+            m = re.search(r'_(-?\d+)\.vdb$', f)
             if not m:
                 continue
             if mtime_cutoff is not None:
@@ -201,15 +212,15 @@ def _count_vdb_frames(jobs_dir, log_stem, tail=None, start_time=None, subdir="da
             _data = os.path.join(_eff, subdir)
             if os.path.isdir(_data):
                 frames_baked = _vdb_count_from_dir(_data)
-                return len(frames_baked), frame_end
+                return len(frames_baked), frame_count
 
     # Fall back: look in this job's own cache dir.
     frames_baked = _vdb_count_from_dir(os.path.join(output_path, "Cache", name, subdir))
-    return len(frames_baked), frame_end
+    return len(frames_baked), frame_count
 
 
 def _count_png_frames(jobs_dir, log_stem, start_time=None):
-    """Return (frames_rendered, frame_end) for log_stem, or None.
+    """Return (frames_rendered, frame_count) for log_stem, or None.
 
     When start_time is provided (a time.time() value), only PNGs with an mtime
     >= start_time - 10.0 are counted.  This correctly handles re-render runs
@@ -224,17 +235,27 @@ def _count_png_frames(jobs_dir, log_stem, start_time=None):
             job_data = json.load(fh)
     except (OSError, json.JSONDecodeError):
         return None
-    frame_end   = job_data.get("frame_end", 0)
+    # "frame_end" is checked for key presence, not truthiness — TODO-66 allows
+    # a negative frame_start, so a legitimate range (e.g. -10..0) can have
+    # frame_end == 0, which `and frame_end` would wrongly treat as missing.
+    if "frame_end" not in job_data:
+        return None
+    frame_end   = job_data["frame_end"]
+    frame_start = job_data.get("frame_start", 1)
+    frame_count = frame_end - frame_start + 1
     output_path = job_data.get("output_path", "")
     name        = job_data.get("name", "")
-    if not (output_path and name and frame_end):
+    if not (output_path and name):
         return None
     frames_dir = os.path.join(output_path, "Renders", f"{name}_frames")
     count = 0
     if os.path.isdir(frames_dir):
         mtime_cutoff = (start_time - 10.0) if start_time else None
         for f in os.listdir(frames_dir):
-            if re.match(r'frame_\d{4}\.png$', f):
+            # Optional leading "-" handles a negative frame number — the
+            # worker names PNGs with Python's f"{frame_num:04d}", which pads
+            # the sign into the width (e.g. frame_-049.png).
+            if re.match(r'frame_-?\d+\.png$', f):
                 if mtime_cutoff is not None:
                     try:
                         if os.path.getmtime(os.path.join(frames_dir, f)) < mtime_cutoff:
@@ -242,7 +263,7 @@ def _count_png_frames(jobs_dir, log_stem, start_time=None):
                     except OSError:
                         continue
                 count += 1
-    return count, frame_end
+    return count, frame_count
 
 
 def _format_eta(seconds):

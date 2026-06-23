@@ -34,7 +34,7 @@ Repo is source of truth — verify line refs against current code before acting.
 | TODO-62 | Job Log header shows worker version (+ caution icon if ≠ expected) when jobs exist | OPEN | — |
 | TODO-63 | Opt-in diagnostic capture: tee Blender console + periodic all-jobs ETA snapshots | ✅ **DONE (v0.9.9)** — Part A console capture + filter; Part B `batch_eta_tick` + analyzer trajectory view; folded in TODO-27 opt4 + TODO-24 parser | — |
 | TODO-65 | Render ETA ignores the **Render Animation** checkbox (still-only over-estimated) | OPEN (filed 2026-06-22) | — |
-| TODO-66 | Custom Frame Range rejects a negative Frame Start | ✅ **DONE (v0.9.10)** — `sim_frame_start`/`sim_frame_end` `min` was 1, silently clamping negative values (typed directly or copied from a scene with a negative `frame_start`) | — |
+| TODO-66 | Custom Frame Range rejects a negative Frame Start | ✅ **DONE (v0.9.10)** — `sim_frame_start`/`sim_frame_end` `min` was 1, silently clamping negative values (typed directly or copied from a scene with a negative `frame_start`). **Follow-up fixed in v0.9.11 — see BUG-024**: progress-bar totals, time estimates, and cache-filename matching all assumed `frame_start == 1` and needed a separate audit. | — |
 
 ---
 
@@ -76,6 +76,13 @@ properties (matching Blender's own hard floor). Tests:
 `test_frame_start_end_allow_negative_values` (property declaration) +
 extended `test_sync_frame_defaults_copies_scene_range` (negative scene
 frame_start copies through unclamped) in `test_properties_module.py`.
+
+**Follow-up (v0.9.11, see BUG-024):** the `min` fix only covers the property
+bounds and the worker's own bake-range math — it doesn't cover everything
+*downstream* that reads `frame_end` and assumes `frame_start == 1`. A
+user-requested audit found the progress-bar denominator, the live time
+estimates, and several cache/render filename regexes all carried that
+assumption; see BUG-024 for the full writeup and fix.
 
 ---
 

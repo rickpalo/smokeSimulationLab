@@ -151,6 +151,17 @@ def test_frame_start_end_allow_negative_values(properties):
     assert ann["sim_frame_end"][1]["min"] <= -1048574
 
 
+def test_batch_frame_start_exists_and_allows_negative(properties):
+    """TODO-66 follow-up: the poller mirrors the running job's frame_start
+    into batch_frame_start (alongside the pre-existing batch_frame_end) so
+    the live progress/ETA math can compute the real frame count — (end -
+    start + 1) — instead of assuming frame_start == 1.  No min bound, same
+    as batch_frame_end, so it can hold a negative value."""
+    ann = properties.SmokeSettings.__annotations__
+    assert "batch_frame_start" in ann
+    assert "min" not in ann["batch_frame_start"][1]
+
+
 def test_on_render_sim_result_update_clears_show_results(properties):
     """Turning rendering off clears the now-meaningless display-results flag."""
     s = types.SimpleNamespace(render_simulation_result=False, show_results=True)

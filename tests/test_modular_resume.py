@@ -235,7 +235,12 @@ class TestCountDataFilesFastScan:
                 )
 
     def test_still_uses_vdb_uni_regex(self):
-        """Preserves prior count semantics — only frame-numbered files count."""
+        """Preserves prior count semantics — only frame-numbered files count.
+
+        TODO-66 follow-up: the digit run now allows an optional leading "-"
+        (Mantaflow may write a sign into the frame portion for a negative
+        Frame Start), so the pattern is _-?\\d+\\.(vdb|uni) rather than the
+        original _\\d+\\.(vdb|uni)."""
         src = _worker_src()
         m = re.search(
             r"def _count_data_files\(directory\):[\s\S]+?return count",
@@ -243,8 +248,9 @@ class TestCountDataFilesFastScan:
         )
         assert m
         body = m.group(0)
-        assert r"_\d+\.(vdb|uni)" in body or r'_\\d+\\.(vdb|uni)' in body, (
-            "must still filter by the _NNNN.vdb / _NNNN.uni pattern"
+        assert r"_-?\d+\.(vdb|uni)" in body or r'_-?\\d+\\.(vdb|uni)' in body, (
+            "must still filter by the _NNNN.vdb / _NNNN.uni pattern, "
+            "tolerating a negative frame number"
         )
 
     def test_handles_missing_subdirs_gracefully(self):

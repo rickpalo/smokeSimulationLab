@@ -51,6 +51,15 @@ class TestCountCacheVdb:
         (base / "fluid_data.vdb").write_bytes(b"")       # no 4-digit frame number
         assert sl._count_cache_vdb(out, "J") == (3, 0)
 
+    def test_counts_negatively_numbered_frames(self, tmp_path):
+        # TODO-66 follow-up: a negative Frame Start can produce cache
+        # filenames with a sign in the frame portion.
+        out = _make_cache(tmp_path)
+        base = tmp_path / "Cache" / "J" / "data"
+        for n in ("-0049", "-0048", "0001"):
+            (base / f"fluid_data_{n}.vdb").write_bytes(b"")
+        assert sl._count_cache_vdb(out, "J") == (3, 0)
+
 
 class TestVdbFrameRegex:
     def test_matches_data_and_noise_names(self):
@@ -59,6 +68,12 @@ class TestVdbFrameRegex:
 
     def test_rejects_unnumbered(self):
         assert not sl._VDB_FRAME_RE.search("fluid_data.vdb")
+
+    # TODO-66 follow-up: a negative Frame Start means Mantaflow may write a
+    # cache filename with a sign in the frame portion (e.g. fluid_data_-0049.vdb).
+    def test_matches_negative_frame_number(self):
+        m = sl._VDB_FRAME_RE.search("fluid_data_-0049.vdb")
+        assert m and m.group(1) == "-0049"
 
 
 class TestHeartbeatScansSafely:

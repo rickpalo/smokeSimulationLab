@@ -141,7 +141,9 @@ def analyze(perf_path):
         print(f"  {'-'*40} {'-'*10} {'-'*10} {'-'*8}")
         for r in bake_detail:
             res3     = r["resolution"] ** 3
-            frames   = r["frame_end"]
+            # frame_start is absent in records from before TODO-66 (negative
+            # Frame Start); default to 1 so old records keep their old math.
+            frames   = r["frame_end"] - r.get("frame_start", 1) + 1
             actual   = r["bake_seconds"]
             pred     = k * res3 * frames
             err_pct  = (actual - pred) / pred * 100 if pred else 0

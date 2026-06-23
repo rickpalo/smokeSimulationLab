@@ -30,7 +30,7 @@ Behaviour
 No third-party dependencies — stdlib + tasklist.exe (built into Windows).
 """
 
-LAUNCHER_VERSION = "0.6.5"
+LAUNCHER_VERSION = "0.6.6"
 
 import atexit
 import ctypes
@@ -51,7 +51,8 @@ _CRASH_DUMP_GRACE_SECS   = 15    # seconds to wait for blender.crash.txt to appe
 _HEARTBEAT_INTERVAL      = 30    # TODO-53: seconds between bake-progress heartbeats to the job log
 
 # TODO-53: frame-numbered VDB file (fluid_data_0007.vdb / fluid_noise_0007.vdb).
-_VDB_FRAME_RE = re.compile(r"_(\d{4})\.vdb$")
+# Optional leading "-" handles a negative frame number (TODO-66).
+_VDB_FRAME_RE = re.compile(r"_(-?\d+)\.vdb$")
 
 
 def _count_cache_vdb(output_path, name):

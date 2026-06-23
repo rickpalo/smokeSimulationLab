@@ -542,6 +542,7 @@ def _poll_batch_progress_impl():
             s.batch_job_log_key       = ""
             _bt_set("job_start_time", 0.0)
             s.batch_frame_end         = 0
+            s.batch_frame_start       = 1
             s.batch_jobs_elapsed      = 0.0
             s.batch_resolution        = 0
             s.batch_render_width      = 0
@@ -664,6 +665,7 @@ def _poll_batch_progress_impl():
                     with open(json_path) as fh:
                         jd = json.load(fh)
                     s.batch_frame_end     = jd.get("frame_end", 0)
+                    s.batch_frame_start   = jd.get("frame_start", 1)
                     s.batch_resolution    = int(jd.get("params", {}).get("resolution", 0))
                     s.batch_render_width  = jd.get("render_resolution_x", 0)
                     s.batch_render_height = jd.get("render_resolution_y", 0)
@@ -673,6 +675,7 @@ def _poll_batch_progress_impl():
                     _estim["job_name"]    = jd.get("name", log_stem)
                 except (OSError, json.JSONDecodeError):
                     s.batch_frame_end     = 0
+                    s.batch_frame_start   = 1
                     s.batch_resolution    = 0
                     s.batch_render_width  = 0
                     s.batch_render_height = 0
@@ -691,7 +694,11 @@ def _poll_batch_progress_impl():
                 s.batch_job_text          = ""
                 s.batch_job_factor        = 0.0
 
-            frame_end      = max(s.batch_frame_end, 1)
+            # frame_end here is the FRAME COUNT (end - start + 1), not the
+            # absolute end-frame number — TODO-66 allows a negative
+            # batch_frame_start, so batch_frame_end alone no longer equals
+            # the frame count the rate-based estimates below need.
+            frame_end      = max(s.batch_frame_end - s.batch_frame_start + 1, 1)
             elapsed_in_job = max(now - _bt("job_start_time"), 0.0) if _bt("job_start_time") > 0 else 0.0
 
             # Determine current stage from log tail.
@@ -1236,6 +1243,7 @@ class SMOKE_OT_run_batch(bpy.types.Operator):
         s.batch_job_log_key       = ""
         _bt_set("job_start_time", 0.0)
         s.batch_frame_end         = 0
+        s.batch_frame_start       = 1
         s.batch_jobs_elapsed      = 0.0
         s.batch_resolution        = 0
         s.batch_render_width      = 0
@@ -1445,6 +1453,7 @@ class SMOKE_OT_retry_failed(bpy.types.Operator):
         s.batch_job_log_key       = ""
         _bt_set("job_start_time", 0.0)
         s.batch_frame_end         = 0
+        s.batch_frame_start       = 1
         s.batch_jobs_elapsed      = 0.0
         s.batch_resolution        = 0
         s.batch_render_width      = 0
@@ -1698,6 +1707,7 @@ class SMOKE_OT_remove_all_jobs(bpy.types.Operator):
         s.batch_job_log_key      = ""
         _bt_set("job_start_time", 0.0)
         s.batch_frame_end        = 0
+        s.batch_frame_start      = 1
         s.batch_jobs_elapsed     = 0.0
         s.batch_resolution       = 0
         s.batch_render_width     = 0
@@ -1800,6 +1810,7 @@ class SMOKE_OT_monitor_existing_jobs(bpy.types.Operator):
         s.batch_job_log_key       = ""
         _bt_set("job_start_time", 0.0)
         s.batch_frame_end         = 0
+        s.batch_frame_start       = 1
         s.batch_jobs_elapsed      = 0.0
         s.batch_resolution        = 0
         s.batch_render_width      = 0

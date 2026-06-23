@@ -15,7 +15,7 @@ Applies fluid parameters, bakes, renders playblast MP4 + final still PNG,
 appends a row to Renders/results.csv, then quits Blender.
 """
 
-WORKER_VERSION = "0.9.2"
+WORKER_VERSION = "0.9.3"
 
 import bpy
 import sys
@@ -471,6 +471,11 @@ if not do_bake:
          f"bake_failed={_r34_bake_failed}")
 
     # Single-file presence check on the final frame — fast and lock-tolerant.
+    # Unverified for a negative frame_end: this assumes Mantaflow pads the
+    # sign into the field width the same way Python's :04d does (so frame
+    # -49 -> "fluid_data_-049.vdb").  If a real negative-frame bake names it
+    # differently, this check goes conservative — _r34_incomplete forces a
+    # full re-bake rather than silently trusting a stale/partial cache.
     _r34_final_frame = os.path.join(
         cache_dir, "data", f"fluid_data_{frame_end:04d}.vdb"
     )
@@ -760,7 +765,7 @@ def _count_data_files(directory):
         try:
             with os.scandir(path) as it:
                 for entry in it:
-                    if entry.is_file() and re.search(r'_\d+\.(vdb|uni)$', entry.name):
+                    if entry.is_file() and re.search(r'_-?\d+\.(vdb|uni)$', entry.name):
                         count += 1
         except OSError:
             pass
@@ -777,11 +782,11 @@ if use_existing_cache:
         n_cfg = sum(
             1 for _r, _d, _fs in os.walk(cache_dir)
             if os.path.basename(_r) == 'config'
-            for f in _fs if re.search(r'_\d+\.uni$', f)
+            for f in _fs if re.search(r'_-?\d+\.uni$', f)
         )
         _log(f"[{name}]   Cache dir empty  config_uni={n_cfg} — will bake from scratch")
         # Fix-2 diagnostic: enumerate EVERY file under cache_dir, grouped by
-        # extension and parent.  If our regex r'_\d+\.(vdb|uni)$' misses real
+        # extension and parent.  If our regex r'_-?\d+\.(vdb|uni)$' misses real
         # bake output (e.g. files Mantaflow named differently in a newer
         # Blender), this listing will surface them.
         _all = []
@@ -884,7 +889,8 @@ for _root, _dirs, files in os.walk(_walk_dir):
         _all_cache_files.append(f)
         if subdir == 'config':
             continue  # checkpoint files, not simulation data
-        m = re.search(r'_(\d+)\.(vdb|uni)$', f)
+        # Optional leading "-" handles a negative frame number (TODO-66).
+        m = re.search(r'_(-?\d+)\.(vdb|uni)$', f)
         if m:
             baked_frames.add(int(m.group(1)))
 _log(f"[{name}]   Found {len(baked_frames)} baked frame(s)")
@@ -918,7 +924,8 @@ if _paths_differ:
                 if os.path.basename(_root) == 'config':
                     continue
                 for f in files:
-                    m = re.search(r'_(\d+)\.(vdb|uni)$', f)
+                    # Optional leading "-" handles a negative frame number (TODO-66).
+                    m = re.search(r'_(-?\d+)\.(vdb|uni)$', f)
                     if m:
                         _post_assign.add(int(m.group(1)))
             if len(_post_assign) < len(baked_frames):
@@ -1022,7 +1029,7 @@ elif use_existing_cache and baked_frames:
                 if os.path.basename(_proot) == 'config':
                     continue  # keep the fresh config/ Mantaflow just wrote
                 for _pf in _pfiles:
-                    if re.search(r'_\d+\.(vdb|uni)$', _pf):
+                    if re.search(r'_-?\d+\.(vdb|uni)$', _pf):
                         _psrc    = os.path.join(_proot, _pf)
                         _prel    = os.path.relpath(_proot, _presave_dir)
                         _pdstdir = os.path.join(effective_cache_dir, _prel)
@@ -1409,12 +1416,17 @@ _res3      = _res ** 3
 _rx        = scene.render.resolution_x
 _ry        = scene.render.resolution_y
 _pixels    = _rx * _ry
+# TODO-66 follow-up: frame_end alone is the absolute end-frame number, not the
+# frame count, once frame_start can be negative — the per-frame bake rates
+# below need (end - start + 1).
+_frame_count = frame_end - frame_start + 1
 
 _perf = {
     "addon_version": addon_version,
     "worker_version": WORKER_VERSION,
     "job_name":    name,
     "resolution":  _res,
+    "frame_start": frame_start,
     "frame_end":   frame_end,
     # TODO-51: fields needed to fit samples + noise-upres terms into the time
     # estimates.  Render time rises with both render_samples (more EEVEE/Cycles
@@ -1426,8 +1438,8 @@ _perf = {
     # Bake
     "bake_skipped":            bake_skipped,
     "bake_seconds":            round(bake_seconds, 2) if not bake_skipped else None,
-    "bake_secs_per_frame":     round(bake_seconds / frame_end, 6) if not bake_skipped and frame_end > 0 else None,
-    "bake_secs_per_res3_frame": round(bake_seconds / (_res3 * frame_end), 12) if not bake_skipped and _res3 > 0 and frame_end > 0 else None,
+    "bake_secs_per_frame":     round(bake_seconds / _frame_count, 6) if not bake_skipped and _frame_count > 0 else None,
+    "bake_secs_per_res3_frame": round(bake_seconds / (_res3 * _frame_count), 12) if not bake_skipped and _res3 > 0 and _frame_count > 0 else None,
     # Render
     "render_engine":           render_mode,
     "render_width":            _rx,
