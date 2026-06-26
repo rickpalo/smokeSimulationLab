@@ -7,7 +7,7 @@
       "id": "batchsimlab",
       "name": "BatchSimLab",
       "tagline": "Batch smoke simulation parameter sweeper with CSV logging",
-      "version": "0.9.11",
+      "version": "0.9.13",
       "type": "add-on",
       "maintainer": "Rick Palo <rap2010@comcast.net>",
       "license": [
@@ -25,9 +25,9 @@
         "Physics",
         "Pipeline"
       ],
-      "archive_url": "./batchsimlab-0.9.11.zip",
-      "archive_size": 119746,
-      "archive_hash": "sha256:b80f42743af94775873a1c0f12fd91268d8daf1ecbbb6e8d0dd3adf8654279f4"
+      "archive_url": "./batchsimlab-0.9.13.zip",
+      "archive_size": 122983,
+      "archive_hash": "sha256:93470e90b8237970c698a9dc033704d1b71216db1b0b00a5645a9535bfc79faa"
     }
   ]
 }
